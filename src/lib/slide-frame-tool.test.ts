@@ -42,7 +42,7 @@ describe("slide frame tool", () => {
 
     activateSlideFrameTool(api as never);
 
-    expect(api.updateFrameRendering).toHaveBeenCalledWith({ outline: true, name: true, clip: true });
+    expect(api.updateFrameRendering).toHaveBeenCalledWith({ outline: true, name: true, clip: false });
     expect(api.setActiveTool).toHaveBeenCalledWith({ type: "frame" });
     expect(api.setToast).toHaveBeenCalledWith({ message: SLIDE_FRAME_HINT });
   });
@@ -109,6 +109,7 @@ describe("slide frame tool", () => {
       elements: [frame],
       appState: { selectedElementIds: { [frame.id]: true } },
     }));
+    expect(api.updateFrameRendering).toHaveBeenCalledWith({ outline: true, name: true, clip: false });
     expect(api.setActiveTool).toHaveBeenCalledWith({ type: "selection" });
     expect(api.scrollToContent).toHaveBeenCalledWith(frame, expect.objectContaining({
       fitToViewport: true,

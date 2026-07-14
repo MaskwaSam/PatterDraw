@@ -1,7 +1,7 @@
 import { useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent } from "react";
 import type { ClassroomProject, SceneId, SerializedScene } from "../types";
 import type { PdfPageDropEdge } from "../lib/pdf/page-order";
-import { DownIcon, DragIcon, HidePanelIcon, PlusIcon, UpIcon } from "./Icons";
+import { DownIcon, DragIcon, HidePanelIcon, PlusIcon, TrashIcon, UpIcon } from "./Icons";
 
 const PDF_PAGE_DRAG_TYPE = "application/x-canvas-classroom-pdf-page";
 export const PDF_RAIL_MIN_WIDTH = 180;
@@ -16,6 +16,7 @@ interface PdfPageRailProps {
   onMovePage: (movingId: SceneId, targetId: SceneId, edge: PdfPageDropEdge) => void;
   onShiftPage: (sceneId: SceneId, direction: -1 | 1) => void;
   onAddPage: () => void;
+  onDeletePage: (sceneId: SceneId) => void;
   width: number;
   onWidthChange: (width: number) => void;
   onHide: () => void;
@@ -47,6 +48,7 @@ export function PdfPageRail({
   onMovePage,
   onShiftPage,
   onAddPage,
+  onDeletePage,
   width,
   onWidthChange,
   onHide,
@@ -142,7 +144,18 @@ export function PdfPageRail({
                   <span>{isBlankPage ? "Added page" : `Original page ${workspace.pageIndex + 1}`}</span>
                 </span>
               </button>
-              <div className="pdf-page-actions" aria-label={`Reorder output page ${index + 1}`}>
+              {scene.id === activeSceneId ? (
+                <button
+                  className="thumbnail-delete-button pdf-page-delete"
+                  type="button"
+                  aria-label="Delete selected page"
+                  title="Delete selected page"
+                  onClick={() => onDeletePage(scene.id)}
+                >
+                  <TrashIcon />
+                </button>
+              ) : null}
+              <div className="pdf-page-actions" aria-label={`Actions for output page ${index + 1}`}>
                 <button
                   type="button"
                   disabled={index === 0}

@@ -21,7 +21,7 @@ export const BLANK_SLIDE_HEIGHT = 540;
 export const BLANK_SLIDE_GAP = 160;
 
 export function activateSlideFrameTool(api: SlideFrameApi): void {
-  api.updateFrameRendering({ outline: true, name: true, clip: true });
+  api.updateFrameRendering({ outline: true, name: true, clip: false });
   api.setActiveTool({ type: "frame" });
   api.setToast({ message: SLIDE_FRAME_HINT });
 }
@@ -81,7 +81,7 @@ export function addBlankSlideFrame(
     { regenerateIds: false },
   ) as [ExcalidrawFrameElement];
 
-  api.updateFrameRendering({ outline: true, name: true, clip: true });
+  api.updateFrameRendering({ outline: true, name: true, clip: false });
   api.setActiveTool({ type: "selection" });
   api.updateScene({
     elements: [...elements, frame],
@@ -95,6 +95,6 @@ export function addBlankSlideFrame(
     animate: true,
     duration: 240,
   });
-  api.setToast({ message: "Slide added — start drawing inside the frame." });
+  api.setToast({ message: "Slide added — draw on or beyond the frame." });
   return frame;
 }

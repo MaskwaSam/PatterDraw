@@ -136,6 +136,96 @@ async function autosavedFrameVisibility(page: import("@playwright/test").Page): 
   });
 }
 
+async function autosavedSlideOverflow(page: import("@playwright/test").Page): Promise<{
+  ownsFrame: boolean;
+  crossesFrameEdge: boolean;
+} | null> {
+  return page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const project = await new Promise<{
+      activeSceneId: string;
+      scenes: Record<string, {
+        elements: Array<{
+          id: string;
+          type?: string;
+          x?: number;
+          y?: number;
+          width?: number;
+          height?: number;
+          frameId?: string | null;
+        }>;
+      }>;
+    } | undefined>((resolve, reject) => {
+      const transaction = database.transaction("keyval", "readonly");
+      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    if (!project) return null;
+    const scene = project.scenes[project.activeSceneId];
+    const frame = scene?.elements.find((element) => element.type === "frame");
+    const stroke = [...(scene?.elements || [])].reverse().find((element) => element.type === "freedraw");
+    if (!frame || !stroke) return null;
+    const frameLeft = frame.x || 0;
+    const frameTop = frame.y || 0;
+    const frameRight = frameLeft + (frame.width || 0);
+    const frameBottom = frameTop + (frame.height || 0);
+    const strokeLeft = stroke.x || 0;
+    const strokeTop = stroke.y || 0;
+    const strokeRight = strokeLeft + (stroke.width || 0);
+    const strokeBottom = strokeTop + (stroke.height || 0);
+    return {
+      ownsFrame: stroke.frameId === frame.id,
+      crossesFrameEdge: strokeLeft < frameLeft
+        || strokeTop < frameTop
+        || strokeRight > frameRight
+        || strokeBottom > frameBottom,
+    };
+  });
+}
+
+async function autosavedSlideDeletion(page: import("@playwright/test").Page): Promise<{
+  slideCount: number;
+  frameCount: number;
+  rectangleCount: number;
+  framedRectangleCount: number;
+} | null> {
+  return page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const project = await new Promise<{
+      activeSceneId: string;
+      slideOrder: unknown[];
+      scenes: Record<string, {
+        elements: Array<{ type?: string; frameId?: string | null }>;
+      }>;
+    } | undefined>((resolve, reject) => {
+      const transaction = database.transaction("keyval", "readonly");
+      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    if (!project) return null;
+    const elements = project.scenes[project.activeSceneId]?.elements || [];
+    const rectangles = elements.filter((element) => element.type === "rectangle");
+    return {
+      slideCount: project.slideOrder.length,
+      frameCount: elements.filter((element) => element.type === "frame").length,
+      rectangleCount: rectangles.length,
+      framedRectangleCount: rectangles.filter((element) => Boolean(element.frameId)).length,
+    };
+  });
+}
+
 test.beforeEach(async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
@@ -247,6 +337,43 @@ test("moves board zoom and history controls into the footer", async ({ page }) =
   expect((zoomBox?.x || 0) + (zoomBox?.width || 0)).toBeLessThanOrEqual(actionsBox?.x || 0);
 });
 
+test("moves slide zoom and history controls into the footer", async ({ page }) => {
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  const nativeFooterControls = page.locator(".editor-host .layer-ui__wrapper__footer-left");
+  await expect(nativeFooterControls).toBeHidden();
+
+  const zoomControls = page.getByRole("group", { name: "Slides zoom controls" });
+  await expect(zoomControls).toBeVisible();
+  await expect(page.locator('.statusbar .footer-history-button[aria-label="Undo"]')).toBeVisible();
+  await expect(page.locator('.statusbar .footer-history-button[aria-label="Redo"]')).toBeVisible();
+  await expect(page.getByRole("button", { name: "Present", exact: true })).toBeVisible();
+
+  const resetZoom = page.locator(".statusbar .footer-reset-zoom");
+  const initialZoom = await resetZoom.textContent();
+  await page.locator('.statusbar button[aria-label="Zoom in"]').click();
+  await expect(resetZoom).not.toHaveText(initialZoom || "");
+
+  const footerBox = await page.locator(".statusbar").boundingBox();
+  const zoomBox = await zoomControls.boundingBox();
+  expect(footerBox).not.toBeNull();
+  expect(zoomBox).not.toBeNull();
+  expect(Math.abs(
+    (zoomBox?.x || 0) + (zoomBox?.width || 0) / 2
+      - ((footerBox?.x || 0) + (footerBox?.width || 0) / 2),
+  )).toBeLessThanOrEqual(2);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const phoneFooter = await page.locator(".statusbar").boundingBox();
+  const phoneZoom = await zoomControls.boundingBox();
+  const phoneActions = await page.locator(".statusbar-actions").boundingBox();
+  expect(phoneFooter).not.toBeNull();
+  expect(phoneZoom).not.toBeNull();
+  expect(phoneActions).not.toBeNull();
+  expect((phoneZoom?.x || 0) + (phoneZoom?.width || 0)).toBeLessThanOrEqual(phoneActions?.x || 0);
+  expect((phoneActions?.x || 0) + (phoneActions?.width || 0))
+    .toBeLessThanOrEqual((phoneFooter?.x || 0) + (phoneFooter?.width || 0));
+});
+
 test("hides and restores the navigation by button or keyboard shortcut", async ({ page }) => {
   const shell = page.locator(".app-shell");
   const navigation = page.locator(".topbar");
@@ -270,6 +397,31 @@ test("hides and restores the navigation by button or keyboard shortcut", async (
   await expect(navigation).toHaveCount(0);
   await page.getByRole("button", { name: "Show navigation", exact: true }).click();
   await expect(navigation).toBeVisible();
+});
+
+test("hides and restores the footer by button or keyboard shortcut", async ({ page }) => {
+  const shell = page.locator(".app-shell");
+  const footer = page.locator(".statusbar");
+  const editorHost = page.locator(".editor-host");
+  const initialEditor = await editorHost.boundingBox();
+  expect(initialEditor).not.toBeNull();
+
+  await page.getByRole("button", { name: "Hide footer", exact: true }).click();
+  await expect(footer).toHaveCount(0);
+  await expect(shell).toHaveClass(/is-footer-hidden/);
+  await expect(page.getByRole("button", { name: "Show footer", exact: true })).toBeVisible();
+  const expandedEditor = await editorHost.boundingBox();
+  expect(expandedEditor).not.toBeNull();
+  expect(expandedEditor?.height || 0).toBeGreaterThan((initialEditor?.height || 0) + 35);
+
+  await page.keyboard.press("Control+Shift+F");
+  await expect(footer).toBeVisible();
+  await expect(shell).not.toHaveClass(/is-footer-hidden/);
+
+  await page.keyboard.press("Control+Shift+F");
+  await expect(footer).toHaveCount(0);
+  await page.getByRole("button", { name: "Show footer", exact: true }).click();
+  await expect(footer).toBeVisible();
 });
 
 test("keeps the Slides Present control contained at desktop and phone widths", async ({ page }) => {
@@ -319,6 +471,94 @@ test("toggles slide frames for a cleaner board without removing slides", async (
     .toHaveAttribute("aria-pressed", "true");
   await expect.poll(() => autosavedFrameVisibility(page)).toBe(true);
   await expect(page.locator(".slide-thumbnail")).toHaveCount(1);
+});
+
+test("deletes the selected slide frame while preserving its board content", async ({ page }) => {
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Delete selected slide", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Add slide", exact: true }).click();
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(1);
+  const selectedSlideWrap = page.locator(".slide-thumbnail-wrap").filter({
+    has: page.locator(".slide-thumbnail.is-selected"),
+  });
+  const slideDelete = selectedSlideWrap.getByRole("button", { name: "Delete selected slide", exact: true });
+  await expect(slideDelete).toBeVisible();
+  await expect(slideDelete).toHaveText("");
+  await expect(slideDelete.locator("svg")).toHaveCount(1);
+
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  await dragNearBoardCenter(page);
+  await expect.poll(() => autosavedSlideDeletion(page)).toMatchObject({
+    slideCount: 1,
+    frameCount: 1,
+    rectangleCount: 1,
+    framedRectangleCount: 1,
+  });
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("The frame will be removed, but its board content will stay.");
+    await dialog.accept();
+  });
+  await slideDelete.click();
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Delete selected slide", exact: true })).toHaveCount(0);
+  await expect.poll(() => autosavedSlideDeletion(page), { timeout: 8_000 }).toEqual({
+    slideCount: 0,
+    frameCount: 0,
+    rectangleCount: 1,
+    framedRectangleCount: 0,
+  });
+
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(0);
+  await expect.poll(() => autosavedSlideDeletion(page)).toEqual({
+    slideCount: 0,
+    frameCount: 0,
+    rectangleCount: 1,
+    framedRectangleCount: 0,
+  });
+});
+
+test("keeps a released slide stroke visible beyond its frame", async ({ page }) => {
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.getByRole("button", { name: "Add slide", exact: true }).click();
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(1);
+  await page.waitForTimeout(350);
+
+  await page.getByTestId("toolbar-freedraw").check({ force: true });
+  const bounds = await page.locator(".editor-host").boundingBox();
+  if (!bounds) throw new Error("Editor host has no visible bounds.");
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + bounds.width - 3, bounds.y + bounds.height / 2, { steps: 16 });
+  await page.mouse.up();
+
+  await expect.poll(() => autosavedSlideOverflow(page), { timeout: 8_000 }).toMatchObject({
+    ownsFrame: true,
+    crossesFrameEdge: true,
+  });
+  await expect.poll(() => page.evaluate(() => {
+    let darkPixels = 0;
+    for (const canvas of document.querySelectorAll<HTMLCanvasElement>(".editor-host canvas")) {
+      if (canvas.width < 300 || canvas.height < 300) continue;
+      const context = canvas.getContext("2d");
+      if (!context) continue;
+      const startX = Math.floor(canvas.width * 0.92);
+      const startY = Math.floor(canvas.height * 0.4);
+      const width = canvas.width - startX;
+      const height = Math.floor(canvas.height * 0.2);
+      const pixels = context.getImageData(startX, startY, width, height).data;
+      for (let offset = 0; offset < pixels.length; offset += 4) {
+        if (pixels[offset + 3] > 100
+          && pixels[offset] < 100
+          && pixels[offset + 1] < 100
+          && pixels[offset + 2] < 100) darkPixels += 1;
+      }
+    }
+    return darkPixels;
+  }), { timeout: 5_000 }).toBeGreaterThan(40);
 });
 
 test("previews existing content geometrically enclosed by a frame", async ({ page }) => {
@@ -411,6 +651,74 @@ test("previews existing content geometrically enclosed by a frame", async ({ pag
   });
   expect(colouredPixels).toBeGreaterThan(1_000);
   await expect(slide2.locator(".slide-caption")).toHaveText("Slide 2");
+});
+
+test("fits the first slide after presentation layout opens", async ({ page }) => {
+  const common = {
+    angle: 0,
+    strokeColor: "#1e1e1e",
+    backgroundColor: "transparent",
+    fillStyle: "solid",
+    strokeWidth: 2,
+    strokeStyle: "solid",
+    roughness: 1,
+    opacity: 100,
+    groupIds: [],
+    frameId: null,
+    roundness: null,
+    seed: 1,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    boundElements: null,
+    updated: 1,
+    link: null,
+    locked: false,
+  };
+  const frame = (id: string, name: string, x: number, index: string) => ({
+    ...common,
+    id,
+    type: "frame",
+    x,
+    y: 100,
+    width: 960,
+    height: 540,
+    name,
+    index,
+  });
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "presentation-first-fit.excalidraw",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({
+      type: "excalidraw",
+      version: 2,
+      source: "local",
+      elements: [
+        frame("first-frame", "Slide 1", 0, "a0"),
+        frame("second-frame", "Slide 2", 1200, "a1"),
+      ],
+      appState: {},
+      files: {},
+    })),
+  });
+
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 2");
+  await expect.poll(() => page.locator(".editor-region").getAttribute("data-presentation-zoom"))
+    .not.toBeNull();
+  await page.waitForTimeout(450);
+  const firstEntryZoom = Number(await page.locator(".editor-region").getAttribute("data-presentation-zoom"));
+
+  await page.getByRole("button", { name: "Next slide", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("2 / 2");
+  await page.waitForTimeout(450);
+  await page.getByRole("button", { name: "Previous slide", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 2");
+  await page.waitForTimeout(450);
+  const returnZoom = Number(await page.locator(".editor-region").getAttribute("data-presentation-zoom"));
+
+  expect(firstEntryZoom).toBeCloseTo(returnZoom, 0);
 });
 
 test("docks the drawing toolbar and resizes or hides the PDF page rail", async ({ page }) => {
@@ -560,6 +868,72 @@ test("adds a blank PDF page, preserves it in the project, and exports it", async
   for await (const chunk of exportedPdf) pdfChunks.push(Buffer.from(chunk));
   const exported = await PDFDocument.load(Buffer.concat(pdfChunks));
   expect(exported.getPageCount()).toBe(2);
+});
+
+test("deletes the selected PDF page without renumbering its source page", async ({ page }) => {
+  test.setTimeout(60_000);
+  const document = await PDFDocument.create();
+  document.addPage([612, 792]);
+  document.addPage([612, 792]);
+  const bytes = await document.save();
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "delete-pages.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(bytes),
+  });
+
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await expect(pages).toHaveCount(2, { timeout: 15_000 });
+  await expect(pages.first()).toHaveClass(/is-selected/);
+  const pageDelete = pages.first().getByRole("button", { name: "Delete selected page", exact: true });
+  await expect(pageDelete).toBeVisible();
+  await expect(pageDelete).toHaveText("");
+  await expect(pageDelete.locator("svg")).toHaveCount(1);
+  await expect(pages.nth(1).getByRole("button", { name: "Delete selected page", exact: true })).toHaveCount(0);
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("Delete output page 1?");
+    await dialog.accept();
+  });
+  await pageDelete.click();
+
+  await expect(pages).toHaveCount(1);
+  await expect(pages.first()).toHaveClass(/is-selected/);
+  await expect(pages.first()).toContainText("Original page 2");
+  await expect(page.locator(".page-status")).toContainText("Page 1 of 1");
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  const pdfDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: /Annotated PDF — expand pages/ }).click();
+  const exportedPdf = await (await pdfDownload).createReadStream();
+  const pdfChunks: Buffer[] = [];
+  for await (const chunk of exportedPdf) pdfChunks.push(Buffer.from(chunk));
+  const exported = await PDFDocument.load(Buffer.concat(pdfChunks));
+  expect(exported.getPageCount()).toBe(1);
+
+  const saveDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  const savedProject = await (await saveDownload).createReadStream();
+  const savedChunks: Buffer[] = [];
+  for await (const chunk of savedProject) savedChunks.push(Buffer.from(chunk));
+  const savedBytes = Buffer.concat(savedChunks);
+
+  await page.reload();
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "deleted-page-roundtrip.canvasclassroom",
+    mimeType: "application/vnd.canvas-classroom+zip",
+    buffer: savedBytes,
+  });
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(pages).toHaveCount(1, { timeout: 15_000 });
+  await expect(pages.first()).toContainText("Original page 2");
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("Delete output page 1?");
+    await dialog.accept();
+  });
+  await page.getByRole("button", { name: "Delete selected page", exact: true }).click();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
 });
 
 test("adds a blank slide with a live preview without remounting or covering the editor", async ({ page }) => {

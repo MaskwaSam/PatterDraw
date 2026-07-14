@@ -1,5 +1,5 @@
 import type { ClassroomProject, ClassroomSlide } from "../types";
-import { DragIcon, EyeIcon, EyeOffIcon, FrameIcon, PlusIcon } from "./Icons";
+import { DragIcon, EyeIcon, EyeOffIcon, FrameIcon, PlusIcon, TrashIcon } from "./Icons";
 import { SlidePreview } from "./SlidePreview";
 
 interface SlideRailProps {
@@ -9,6 +9,7 @@ interface SlideRailProps {
   onDrawFrame: () => void;
   onOpenSlide: (slide: ClassroomSlide) => void;
   onMoveSlide: (slideId: string, targetId: string) => void;
+  onDeleteSlide: (slide: ClassroomSlide) => void;
   framesVisible: boolean;
   onToggleFrames: () => void;
 }
@@ -20,6 +21,7 @@ export function SlideRail({
   onDrawFrame,
   onOpenSlide,
   onMoveSlide,
+  onDeleteSlide,
   framesVisible,
   onToggleFrames,
 }: SlideRailProps) {
@@ -59,25 +61,37 @@ export function SlideRail({
         {project.slideOrder.length ? project.slideOrder.map((slide, index) => {
           const selected = slide.id === activeSlideId;
           return (
-            <button
-              key={slide.id}
-              type="button"
-              className={`slide-thumbnail ${selected ? "is-selected" : ""}`}
-              draggable
-              aria-current={selected ? "page" : undefined}
-              aria-label={`Open slide ${index + 1}: ${slide.title}`}
-              onDragStart={(event) => event.dataTransfer.setData("text/plain", slide.id)}
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={(event) => onMoveSlide(event.dataTransfer.getData("text/plain"), slide.id)}
-              onClick={() => onOpenSlide(slide)}
-            >
-              <span className="slide-number" aria-hidden="true">{index + 1}</span>
-              <span className="slide-thumbnail-content">
-                <SlidePreview scene={project.scenes[slide.sceneId]} frameId={slide.frameId} />
-                <span className="slide-caption">{slide.title}</span>
-              </span>
-              <DragIcon className="drag-handle" />
-            </button>
+            <div className="slide-thumbnail-wrap" key={slide.id}>
+              <button
+                type="button"
+                className={`slide-thumbnail ${selected ? "is-selected" : ""}`}
+                draggable
+                aria-current={selected ? "page" : undefined}
+                aria-label={`Open slide ${index + 1}: ${slide.title}`}
+                onDragStart={(event) => event.dataTransfer.setData("text/plain", slide.id)}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => onMoveSlide(event.dataTransfer.getData("text/plain"), slide.id)}
+                onClick={() => onOpenSlide(slide)}
+              >
+                <span className="slide-number" aria-hidden="true">{index + 1}</span>
+                <span className="slide-thumbnail-content">
+                  <SlidePreview scene={project.scenes[slide.sceneId]} frameId={slide.frameId} />
+                  <span className="slide-caption">{slide.title}</span>
+                </span>
+                <DragIcon className="drag-handle" />
+              </button>
+              {selected ? (
+                <button
+                  className="thumbnail-delete-button slide-thumbnail-delete"
+                  type="button"
+                  aria-label="Delete selected slide"
+                  title="Delete selected slide"
+                  onClick={() => onDeleteSlide(slide)}
+                >
+                  <TrashIcon />
+                </button>
+              ) : null}
+            </div>
           );
         }) : (
           <div className="rail-empty">

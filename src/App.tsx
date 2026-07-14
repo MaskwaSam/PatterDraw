@@ -28,6 +28,7 @@ import { MermaidDialog } from "./components/MermaidDialog";
 import {
   EnterFullscreenIcon,
   ExitFullscreenIcon,
+  HideBottomBarIcon,
   InkIcon,
   MinusIcon,
   NextIcon,
@@ -35,6 +36,7 @@ import {
   PresentIcon,
   PreviousIcon,
   RedoIcon,
+  ShowBottomBarIcon,
   ShowPanelIcon,
   ShowTopBarIcon,
   UndoIcon,
@@ -206,6 +208,7 @@ export default function App() {
   const [isPdfToolbarVisible, setIsPdfToolbarVisible] = useState(true);
   const [areSlideFramesVisible, setAreSlideFramesVisible] = useState(true);
   const [isNavigationVisible, setIsNavigationVisible] = useState(true);
+  const [isFooterVisible, setIsFooterVisible] = useState(true);
   const [equationEditor, setEquationEditor] = useState<EquationEditorState | null>(null);
   const [mermaidEditor, setMermaidEditor] = useState<MermaidEditorState | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -258,13 +261,16 @@ export default function App() {
 
   useEffect(() => {
     if (presentation) return;
-    const toggleNavigation = (event: KeyboardEvent) => {
-      if (event.repeat || !event.shiftKey || (!event.ctrlKey && !event.metaKey) || event.key.toLowerCase() !== "h") return;
+    const toggleChrome = (event: KeyboardEvent) => {
+      if (event.repeat || !event.shiftKey || (!event.ctrlKey && !event.metaKey)) return;
+      const key = event.key.toLowerCase();
+      if (key !== "h" && key !== "f") return;
       event.preventDefault();
-      setIsNavigationVisible((visible) => !visible);
+      if (key === "h") setIsNavigationVisible((visible) => !visible);
+      else setIsFooterVisible((visible) => !visible);
     };
-    window.addEventListener("keydown", toggleNavigation, true);
-    return () => window.removeEventListener("keydown", toggleNavigation, true);
+    window.addEventListener("keydown", toggleChrome, true);
+    return () => window.removeEventListener("keydown", toggleChrome, true);
   }, [presentation]);
 
   useEffect(() => {
@@ -281,7 +287,7 @@ export default function App() {
   const runSlideFrameAction = useCallback((action: SlideFrameAction) => {
     if (!api) return;
     slideFramesVisibleRef.current = true;
-    api.updateFrameRendering({ enabled: true });
+    api.updateFrameRendering({ enabled: true, clip: false });
     setAreSlideFramesVisible(true);
     setProject((current) => current && current.slideFramesVisible === false ? {
       ...current,
@@ -306,7 +312,7 @@ export default function App() {
       appState: scene.appState as unknown as AppState,
       captureUpdate: CaptureUpdateAction.NEVER,
     });
-    api.updateFrameRendering({ enabled: slideFramesVisibleRef.current });
+    api.updateFrameRendering({ enabled: slideFramesVisibleRef.current, clip: false });
     api.history.clear();
     window.requestAnimationFrame(() => {
       switchingSceneRef.current = false;
@@ -705,9 +711,34 @@ export default function App() {
     try { await shellRef.current?.requestFullscreen(); } catch { /* Fullscreen can be browser-blocked. */ }
   }, [activeSlideId, api, project, setPresentationIndex, workspaceMode]);
 
+  const presentationSlide = presentation && project
+    ? project.slideOrder[presentation.index]
+    : null;
+
+  useEffect(() => {
+    if (
+      !api
+      || !presentationSlide
+      || presentationSlide.sceneId !== project?.activeSceneId
+    ) return;
+
+    let refreshFrame = 0;
+    let focusFrame = 0;
+    refreshFrame = window.requestAnimationFrame(() => {
+      api.refresh();
+      focusFrame = window.requestAnimationFrame(() => {
+        focusSlide(api, presentationSlide.frameId, false);
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(refreshFrame);
+      window.cancelAnimationFrame(focusFrame);
+    };
+  }, [api, isFullscreen, presentationSlide?.frameId, presentationSlide?.sceneId, project?.activeSceneId]);
+
   const stopPresentation = useCallback(() => {
     setPresentation(null);
-    api?.updateFrameRendering({ outline: true, name: true, clip: true });
+    api?.updateFrameRendering({ outline: true, name: true, clip: false });
     api?.setActiveTool({ type: "selection" });
     if (document.fullscreenElement) void document.exitFullscreen();
   }, [api]);
@@ -883,7 +914,7 @@ export default function App() {
     if (!api) return;
     const visible = !api.getAppState().frameRendering.enabled;
     slideFramesVisibleRef.current = visible;
-    api.updateFrameRendering({ enabled: visible });
+    api.updateFrameRendering({ enabled: visible, clip: false });
     if (!visible) {
       api.updateScene({
         appState: {
@@ -902,6 +933,56 @@ export default function App() {
     } : current);
   }, [api]);
 
+  const deleteSlide = useCallback((slide: ClassroomSlide) => {
+    if (!api || !project) return;
+    if (!window.confirm(`Delete ${slide.title}? The frame will be removed, but its board content will stay.`)) return;
+
+    const slideIndex = project.slideOrder.findIndex((candidate) => candidate.id === slide.id);
+    const remainingSlides = project.slideOrder.filter((candidate) => candidate.id !== slide.id);
+    const nextSlide = remainingSlides[Math.min(slideIndex, remainingSlides.length - 1)] || null;
+    const isActiveScene = slide.sceneId === activeSceneIdRef.current;
+
+    if (isActiveScene) {
+      switchingSceneRef.current = true;
+      const nextElements = api.getSceneElements()
+        .filter((element) => element.id !== slide.frameId)
+        .map((element) => element.frameId === slide.frameId
+          ? newElementWith(element, { frameId: null })
+          : element);
+      api.updateScene({
+        elements: nextElements,
+        appState: {
+          selectedElementIds: {},
+          selectedGroupIds: {},
+          editingFrame: null,
+        },
+        captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+      });
+    }
+
+    setProject((current) => {
+      if (!current?.scenes[slide.sceneId]) return current;
+      const scene = current.scenes[slide.sceneId];
+      const elements = scene.elements
+        .filter((element) => element.id !== slide.frameId)
+        .map((element) => element.frameId === slide.frameId
+          ? { ...element, frameId: null }
+          : element);
+      return {
+        ...current,
+        updatedAt: nowIso(),
+        scenes: { ...current.scenes, [slide.sceneId]: { ...scene, elements } },
+        slideOrder: current.slideOrder.filter((candidate) => candidate.id !== slide.id),
+      };
+    });
+    setActiveSlideId(nextSlide?.id || null);
+    api.setToast({ message: "Slide deleted. Its content is still on the board." });
+    window.requestAnimationFrame(() => {
+      switchingSceneRef.current = false;
+      if (nextSlide) openSlide(nextSlide);
+    });
+  }, [api, openSlide, project]);
+
   const reorderPdfPage = useCallback((movingId: string, targetId: string, edge: PdfPageDropEdge) => {
     setProject((current) => current ? {
       ...current,
@@ -917,6 +998,54 @@ export default function App() {
       pdfPageOrder: shiftPdfPage(reconcilePdfPageOrder(current), sceneId, direction),
     } : current);
   }, []);
+
+  const deletePdfPage = useCallback((sceneId: string) => {
+    if (!project) return;
+    const scene = project.scenes[sceneId];
+    if (!scene?.pdfPage) return;
+    const order = reconcilePdfPageOrder(project);
+    const pageIndex = order.indexOf(sceneId);
+    if (pageIndex < 0) return;
+    if (!window.confirm(`Delete output page ${pageIndex + 1}? This removes the page and its annotations from the project.`)) return;
+
+    const remainingOrder = order.filter((candidate) => candidate !== sceneId);
+    let nextSceneId = remainingOrder[Math.min(pageIndex, remainingOrder.length - 1)] || boardSceneId(project);
+    let replacementScene: SerializedScene | null = null;
+    if (!nextSceneId) {
+      const blank = createBlankProject();
+      nextSceneId = blank.activeSceneId;
+      replacementScene = blank.scenes[blank.activeSceneId];
+    }
+    const documentId = scene.pdfPage.documentId;
+    const documentStillUsed = Object.values(project.scenes).some(
+      (candidate) => candidate.id !== sceneId && candidate.pdfPage?.documentId === documentId,
+    );
+
+    setProject((current) => {
+      if (!current?.scenes[sceneId]) return current;
+      const scenes = { ...current.scenes };
+      delete scenes[sceneId];
+      if (replacementScene) scenes[replacementScene.id] = replacementScene;
+      const pdfDocuments = { ...current.pdfDocuments };
+      if (!documentStillUsed) delete pdfDocuments[documentId];
+      return {
+        ...current,
+        updatedAt: nowIso(),
+        activeSceneId: nextSceneId,
+        scenes,
+        pdfPageOrder: remainingOrder,
+        pdfDocuments,
+      };
+    });
+    if (!documentStillUsed) {
+      setPdfBytes((current) => {
+        const next = { ...current };
+        delete next[documentId];
+        return next;
+      });
+    }
+    if (!remainingOrder.length) setWorkspaceMode("board");
+  }, [project]);
 
   const addPdfPage = useCallback(async () => {
     const workspace = currentScene?.pdfPage;
@@ -975,7 +1104,7 @@ export default function App() {
   return (
     <div
       ref={shellRef}
-      className={`app-shell ${workspaceModeClassName(workspaceMode)} ${workspaceMode === "pdf" && !isPdfRailVisible ? "is-pdf-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfToolbarVisible ? "is-pdf-toolbar-hidden" : ""} ${!isNavigationVisible ? "is-nav-hidden" : ""} ${presentation ? "is-presenting" : ""}`}
+      className={`app-shell ${workspaceModeClassName(workspaceMode)} ${workspaceMode === "pdf" && !isPdfRailVisible ? "is-pdf-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfToolbarVisible ? "is-pdf-toolbar-hidden" : ""} ${!isNavigationVisible ? "is-nav-hidden" : ""} ${!isFooterVisible ? "is-footer-hidden" : ""} ${presentation ? "is-presenting" : ""}`}
       style={{ "--pdf-rail-width": `${pdfRailWidth}px` } as CSSProperties}
     >
       {!presentation && isNavigationVisible && (
@@ -1003,6 +1132,7 @@ export default function App() {
           onDrawFrame={drawSlideFrame}
           onOpenSlide={openSlide}
           onMoveSlide={(slideId, targetId) => setProject((current) => current ? { ...current, slideOrder: moveSlide(current.slideOrder, slideId, targetId) } : current)}
+          onDeleteSlide={deleteSlide}
           framesVisible={areSlideFramesVisible}
           onToggleFrames={toggleSlideFrames}
         />
@@ -1016,6 +1146,7 @@ export default function App() {
           onMovePage={reorderPdfPage}
           onShiftPage={shiftPdfPagePosition}
           onAddPage={() => void addPdfPage()}
+          onDeletePage={deletePdfPage}
           width={pdfRailWidth}
           onWidthChange={setPdfRailWidth}
           onHide={() => setIsPdfRailVisible(false)}
@@ -1035,6 +1166,17 @@ export default function App() {
             title="Show navigation (Ctrl/⌘ + Shift + H)"
           >
             <ShowTopBarIcon />
+          </button>
+        )}
+        {!presentation && !isFooterVisible && (
+          <button
+            className="footer-show"
+            type="button"
+            onClick={() => setIsFooterVisible(true)}
+            aria-label="Show footer"
+            title="Show footer (Ctrl/⌘ + Shift + F)"
+          >
+            <ShowBottomBarIcon />
           </button>
         )}
         <div ref={editorHostRef} className="editor-host">
@@ -1058,9 +1200,18 @@ export default function App() {
             />
           )}
         </div>
-        {!presentation && (
+        {!presentation && isFooterVisible && (
           <footer className="statusbar">
             <div className="page-status">
+              <button
+                className="footer-hide"
+                type="button"
+                aria-label="Hide footer"
+                title="Hide footer (Ctrl/⌘ + Shift + F)"
+                onClick={() => setIsFooterVisible(false)}
+              >
+                <HideBottomBarIcon />
+              </button>
               {workspaceMode === "pdf" && !isPdfRailVisible && (
                 <button
                   className="pdf-rail-show"
@@ -1083,18 +1234,20 @@ export default function App() {
                 ? <span>{project.slideOrder.length} slide{project.slideOrder.length === 1 ? "" : "s"}</span>
                 : <span>Board</span>}
             </div>
-            {workspaceMode !== "slides" ? (
-              <div className="footer-zoom-controls" aria-label={`${workspaceMode === "pdf" ? "PDF" : "Board"} zoom controls`}>
-                <button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => clickEditorControl(".zoom-out-button")}><MinusIcon /></button>
-                <button className="footer-reset-zoom" type="button" aria-label="Reset zoom" title="Reset zoom" onClick={() => clickEditorControl(".reset-zoom-button")}>{zoom}%</button>
-                <button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => clickEditorControl(".zoom-in-button")}><PlusIcon /></button>
-              </div>
-            ) : <span className="zoom-status">{zoom}%</span>}
+            <div className="footer-zoom-controls" role="group" aria-label={`${workspaceMode === "pdf" ? "PDF" : workspaceMode === "slides" ? "Slides" : "Board"} zoom controls`}>
+              <button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => clickEditorControl(".zoom-out-button")}><MinusIcon /></button>
+              <button className="footer-reset-zoom" type="button" aria-label="Reset zoom" title="Reset zoom" onClick={() => clickEditorControl(".reset-zoom-button")}>{zoom}%</button>
+              <button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => clickEditorControl(".zoom-in-button")}><PlusIcon /></button>
+            </div>
             <div className="statusbar-actions">
               {workspaceMode === "slides" && (
-                <button className="present-button" type="button" onClick={startPresentation} title="Start presentation">
-                  <PresentIcon /><span>Present</span>
-                </button>
+                <>
+                  <button className="present-button" type="button" onClick={startPresentation} title="Start presentation">
+                    <PresentIcon /><span>Present</span>
+                  </button>
+                  <button className="footer-history-button" type="button" aria-label="Undo" title="Undo" onClick={() => clickEditorControl('[data-testid="button-undo"]')}><UndoIcon /></button>
+                  <button className="footer-history-button" type="button" aria-label="Redo" title="Redo" onClick={() => clickEditorControl('[data-testid="button-redo"]')}><RedoIcon /></button>
+                </>
               )}
               {workspaceMode === "pdf" && (
                 <>

@@ -49,6 +49,12 @@ export const HideTopBarIcon = (props: IconProps) => (
 export const ShowTopBarIcon = (props: IconProps) => (
   <IconBase {...props}><rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M3.5 10h17m-12-3 3.5 3.5L15.5 7"/></IconBase>
 );
+export const HideBottomBarIcon = (props: IconProps) => (
+  <IconBase {...props}><rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M3.5 14h17m-12-6 3.5 3.5L15.5 8"/></IconBase>
+);
+export const ShowBottomBarIcon = (props: IconProps) => (
+  <IconBase {...props}><rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M3.5 14h17m-12 3 3.5-3.5 3.5 3.5"/></IconBase>
+);
 export const ChevronDownIcon = (props: IconProps) => (
   <IconBase {...props}><path d="m7 9 5 5 5-5"/></IconBase>
 );
@@ -93,6 +99,9 @@ export const DownIcon = (props: IconProps) => (
 );
 export const CloseIcon = (props: IconProps) => (
   <IconBase {...props}><path d="M6 6l12 12M18 6 6 18"/></IconBase>
+);
+export const TrashIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></IconBase>
 );
 export const LaserIcon = (props: IconProps) => (
   <IconBase {...props}><path d="m14 4-2 8-8 2 6 2 2 6 2-8 8-2-6-2z"/></IconBase>

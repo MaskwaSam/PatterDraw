@@ -230,12 +230,13 @@ button { color: inherit; }
 .draw-frame-button svg,
 .toggle-frames-button svg { width: 16px; height: 16px; }
 .rail-scroll { min-height: 0; overflow: auto; padding: 4px 12px 18px; }
+.slide-thumbnail-wrap { position: relative; }
 .slide-thumbnail {
   width: 100%;
   position: relative;
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) 16px;
-  align-items: center;
+  align-items: start;
   gap: 6px;
   margin: 0 0 12px;
   padding: 5px 4px;
@@ -245,7 +246,7 @@ button { color: inherit; }
   text-align: left;
   cursor: pointer;
 }
-.slide-number { color: #59657a; font-size: 11px; text-align: center; }
+.slide-number { padding-top: 8px; color: #59657a; font-size: 11px; text-align: center; }
 .slide-thumbnail-content { min-width: 0; display: grid; gap: 5px; }
 .slide-preview {
   width: 100%;
@@ -268,7 +269,29 @@ button { color: inherit; }
 .slide-thumbnail.is-selected .slide-preview { border: 2px solid var(--accent); box-shadow: 0 0 0 2px #dbe7ff; }
 .slide-thumbnail:hover { background: #f5f7fa; }
 .slide-thumbnail:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.drag-handle { width: 15px; height: 20px; color: #8590a3; }
+.thumbnail-delete-button {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid #e2a9a9;
+  border-radius: 6px;
+  background: #fff;
+  color: #9b2f2f;
+  cursor: pointer;
+}
+.thumbnail-delete-button:hover { border-color: #c96e6e; background: #fff0f0; }
+.thumbnail-delete-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.slide-thumbnail-delete {
+  position: absolute;
+  z-index: 2;
+  top: 38px;
+  left: 0;
+  width: 27px;
+  height: 27px;
+  box-shadow: 0 1px 4px rgb(23 32 51 / 14%);
+}
+.slide-thumbnail-delete svg { width: 15px; height: 15px; }
+.drag-handle { align-self: center; width: 15px; height: 20px; color: #8590a3; }
 .page-thumbnail {
   width: 100%;
   display: grid;
@@ -339,8 +362,29 @@ button { color: inherit; }
 .topbar-show:hover { border-color: #8fa1ba; background: #fff; }
 .topbar-show:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .topbar-show svg { width: 17px; height: 17px; }
+.footer-show {
+  position: fixed;
+  z-index: 70;
+  right: 12px;
+  bottom: 0;
+  width: 40px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid #b9c4d3;
+  border-bottom: 0;
+  border-radius: 9px 9px 0 0;
+  background: rgb(255 255 255 / 96%);
+  color: #34405a;
+  box-shadow: 0 -4px 14px rgb(15 23 42 / 14%);
+  cursor: pointer;
+}
+.footer-show:hover { border-color: #8fa1ba; background: #fff; }
+.footer-show:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.footer-show svg { width: 17px; height: 17px; }
 .pdf-rail-help { margin: 0; padding: 0 18px 12px; color: var(--muted); font-size: 10px; line-height: 1.45; }
-.pdf-rail-actions { padding: 10px 12px; border-top: 1px solid var(--border); background: #fff; }
+.pdf-rail-actions { display: grid; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--border); background: #fff; }
 .pdf-add-page {
   width: 100%;
   min-height: 35px;
@@ -349,14 +393,12 @@ button { color: inherit; }
   justify-content: center;
   gap: 7px;
   padding: 0 10px;
-  border: 1px solid #204aa5;
   border-radius: 7px;
-  background: var(--accent);
-  color: #fff;
   font-size: 12px;
   font-weight: 700;
   cursor: pointer;
 }
+.pdf-add-page { border: 1px solid #204aa5; background: var(--accent); color: #fff; }
 .pdf-add-page:hover { background: #204aa5; }
 .pdf-add-page:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .pdf-add-page svg { width: 16px; height: 16px; }
@@ -404,6 +446,15 @@ button { color: inherit; }
 .pdf-page-actions button:disabled { opacity: .3; cursor: default; }
 .pdf-page-actions svg,
 .pdf-drag-handle svg { width: 15px; height: 15px; }
+.pdf-page-delete {
+  position: absolute;
+  z-index: 2;
+  top: 35px;
+  left: 3px;
+  width: 27px;
+  height: 27px;
+}
+.pdf-page-delete svg { width: 15px; height: 15px; }
 .pdf-drag-handle { cursor: grab; }
 .pdf-drag-handle:active { cursor: grabbing; }
 .rail-empty { display: grid; justify-items: center; gap: 8px; padding: 22px 8px; text-align: center; color: var(--muted); font-size: 12px; line-height: 1.45; }
@@ -424,6 +475,7 @@ button { color: inherit; }
   background: var(--workspace);
   position: relative;
 }
+.is-footer-hidden .editor-region { grid-template-rows: minmax(0, 1fr) 0; }
 .is-slide-mode .editor-region,
 .is-pdf-mode .editor-region { grid-column: 2; }
 .is-pdf-mode.is-pdf-rail-hidden .editor-region { grid-column: 1; }
@@ -438,6 +490,7 @@ button { color: inherit; }
 .editor-host .excalidraw [data-testid="library-button"],
 .editor-host .excalidraw .library-button { display: none !important; }
 .is-board-mode .editor-host .layer-ui__wrapper__footer-left,
+.is-slide-mode .editor-host .layer-ui__wrapper__footer-left,
 .is-pdf-mode .editor-host .layer-ui__wrapper__footer-left { display: none !important; }
 
 .editor-host .excalidraw .buttonList:has(input[name="stroke-width"]) {
@@ -531,7 +584,8 @@ button { color: inherit; }
 }
 .footer-zoom-controls button,
 .footer-history-button,
-.pdf-toolbar-toggle {
+.pdf-toolbar-toggle,
+.footer-hide {
   width: 32px;
   height: 32px;
   display: grid;
@@ -544,15 +598,18 @@ button { color: inherit; }
 }
 .footer-zoom-controls button:hover,
 .footer-history-button:hover,
-.pdf-toolbar-toggle:hover { background: #e8ecf2; }
+.pdf-toolbar-toggle:hover,
+.footer-hide:hover { background: #e8ecf2; }
 .footer-zoom-controls button:focus-visible,
 .footer-history-button:focus-visible,
-.pdf-toolbar-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pdf-toolbar-toggle:focus-visible,
+.footer-hide:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .pdf-toolbar-toggle.is-active { color: #204aa5; background: var(--accent-soft); }
 .footer-zoom-controls .footer-reset-zoom { width: 52px; font-size: 12px; font-variant-numeric: tabular-nums; }
 .footer-zoom-controls svg,
 .footer-history-button svg,
-.pdf-toolbar-toggle svg { width: 16px; height: 16px; }
+.pdf-toolbar-toggle svg,
+.footer-hide svg { width: 16px; height: 16px; }
 .statusbar-actions { justify-self: end; display: flex; align-items: center; gap: 6px; }
 .present-button,
 .fullscreen-button {
@@ -878,6 +935,7 @@ button { color: inherit; }
   .file-actions .export-options-button { width: 27px; }
   .statusbar { grid-template-columns: minmax(0, 1fr) auto; padding-inline: 8px; }
   .is-board-mode .statusbar,
+  .is-slide-mode .statusbar,
   .is-pdf-mode .statusbar { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
   .zoom-status { display: none; }
   .is-pdf-mode .page-status { gap: 3px; }
@@ -888,6 +946,9 @@ button { color: inherit; }
   .statusbar-actions { gap: 4px; }
   .statusbar-actions button { width: 34px; justify-content: center; padding: 0; }
   .statusbar-actions button span { display: none; }
+  .is-slide-mode .statusbar-actions { gap: 2px; }
+  .is-slide-mode .statusbar-actions button { width: 30px; }
+  .is-slide-mode .statusbar-actions .present-button { width: 34px; }
   .presentation-controls {
     width: calc(100% - 16px);
     bottom: 8px;
