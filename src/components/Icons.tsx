@@ -1,0 +1,108 @@
+import type { SVGProps } from "react";
+
+type IconProps = SVGProps<SVGSVGElement>;
+
+function IconBase({ children, ...props }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
+      {children}
+    </svg>
+  );
+}
+
+export const OpenIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M3.5 7.5h6l2-2h9v13h-17z"/><path d="m3.5 10 17-.1-3 8.6h-14z"/></IconBase>
+);
+export const SaveIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M5 3.5h12l2 2V20H5z"/><path d="M8 3.5v6h8v-6M8 20v-7h8v7"/></IconBase>
+);
+export const ExportIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M12 15V3m0 0L8 7m4-4 4 4"/><path d="M5 11v9h14v-9"/></IconBase>
+);
+export const EquationIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M4 6h7M4 18h7M7.5 6v12M14 8l6 8M20 8l-6 8"/></IconBase>
+);
+export const MermaidIcon = (props: IconProps) => (
+  <IconBase {...props}><rect x="3" y="4" width="7" height="5" rx="1"/><rect x="14" y="15" width="7" height="5" rx="1"/><path d="M6.5 9v4h11v2M17.5 9v3M14 12h7"/></IconBase>
+);
+export const SlidesIcon = (props: IconProps) => (
+  <IconBase {...props}><rect x="3.5" y="4" width="17" height="13" rx="1"/><path d="M8 21l4-4 4 4M8 9h8M8 12h5"/></IconBase>
+);
+export const BoardIcon = (props: IconProps) => (
+  <IconBase {...props}><rect x="3.5" y="3.5" width="17" height="17" rx="2"/><path d="M7 8h10M7 12h6M7 16h8"/></IconBase>
+);
+export const FrameIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><rect x="7" y="7" width="10" height="10" rx="1"/></IconBase>
+);
+export const PdfIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M6 2.5h8l4 4V21H6z"/><path d="M14 2.5v4h4M8.5 11.5h7M8.5 15h7M8.5 18.5h4"/></IconBase>
+);
+export const HidePanelIcon = (props: IconProps) => (
+  <IconBase {...props}><rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M9 4v16m7-12-4 4 4 4"/></IconBase>
+);
+export const ShowPanelIcon = (props: IconProps) => (
+  <IconBase {...props}><rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M9 4v16m3-12 4 4-4 4"/></IconBase>
+);
+export const HideTopBarIcon = (props: IconProps) => (
+  <IconBase {...props}><rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M3.5 10h17m-12 6 3.5-3.5 3.5 3.5"/></IconBase>
+);
+export const ShowTopBarIcon = (props: IconProps) => (
+  <IconBase {...props}><rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M3.5 10h17m-12-3 3.5 3.5L15.5 7"/></IconBase>
+);
+export const ChevronDownIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="m7 9 5 5 5-5"/></IconBase>
+);
+export const PlusIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M12 5v14M5 12h14"/></IconBase>
+);
+export const MinusIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M5 12h14"/></IconBase>
+);
+export const UndoIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M9 7 4 12l5 5"/><path d="M5 12h8a6 6 0 0 1 6 6"/></IconBase>
+);
+export const RedoIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="m15 7 5 5-5 5"/><path d="M19 12h-8a6 6 0 0 0-6 6"/></IconBase>
+);
+export const PresentIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M3 4h18v12H3zM8 21l4-5 4 5"/></IconBase>
+);
+export const EnterFullscreenIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M9 4H4v5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></IconBase>
+);
+export const ExitFullscreenIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M4 9h5V4M20 9h-5V4M15 20v-5h5M9 20v-5H4"/></IconBase>
+);
+export const MoreIcon = (props: IconProps) => (
+  <IconBase {...props}><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></IconBase>
+);
+export const DragIcon = (props: IconProps) => (
+  <IconBase {...props}><circle cx="8" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="16" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="8" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="16" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="8" cy="18" r="1" fill="currentColor" stroke="none"/><circle cx="16" cy="18" r="1" fill="currentColor" stroke="none"/></IconBase>
+);
+export const PreviousIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="m14 6-6 6 6 6"/></IconBase>
+);
+export const NextIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="m10 6 6 6-6 6"/></IconBase>
+);
+export const UpIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="m6 14 6-6 6 6"/></IconBase>
+);
+export const DownIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="m6 10 6 6 6-6"/></IconBase>
+);
+export const CloseIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M6 6l12 12M18 6 6 18"/></IconBase>
+);
+export const LaserIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="m14 4-2 8-8 2 6 2 2 6 2-8 8-2-6-2z"/></IconBase>
+);
+export const InkIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="m4 19 4.5-1 9.7-9.7-3.5-3.5L5 14.5zM13.5 6l3.5 3.5"/></IconBase>
+);
+export const EyeIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z"/><circle cx="12" cy="12" r="2.5"/></IconBase>
+);
+export const EyeOffIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="m3 3 18 18M10.6 6.1A10.8 10.8 0 0 1 12 6c6 0 9.5 6 9.5 6a16.7 16.7 0 0 1-2.2 2.8M6.2 6.2C3.8 7.8 2.5 12 2.5 12s3.5 6 9.5 6c1.5 0 2.8-.4 4-1M9.9 9.9a3 3 0 0 0 4.2 4.2"/></IconBase>
+);
