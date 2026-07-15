@@ -289,9 +289,11 @@ async function autosavedMathToolSnapshot(
   id: string;
   localSafeSvg: boolean;
   locked: boolean;
+  measurementLabelFontSize: string | null;
   metadata: Record<string, unknown>;
   pageWidth: number;
   sceneId: string;
+  scaleCaptionFontSize: string | null;
   width: number;
   x: number;
   y: number;
@@ -341,12 +343,16 @@ async function autosavedMathToolSnapshot(
       let svg = "";
       let captionFontSize: string | null = null;
       let degreeLabelFontSize: string | null = null;
+      let measurementLabelFontSize: string | null = null;
+      let scaleCaptionFontSize: string | null = null;
       if (dataUrl.startsWith("data:image/svg+xml;base64,")) {
         try {
           svg = atob(dataUrl.slice(dataUrl.indexOf(",") + 1));
           const svgDocument = new DOMParser().parseFromString(svg, "image/svg+xml");
           captionFontSize = svgDocument.querySelector('[data-part="caption"]')?.getAttribute("font-size") || null;
           degreeLabelFontSize = svgDocument.querySelector('[data-part="degree-labels"]')?.getAttribute("font-size") || null;
+          measurementLabelFontSize = svgDocument.querySelector('[data-part="measurement-labels"]')?.getAttribute("font-size") || null;
+          scaleCaptionFontSize = svgDocument.querySelector('[data-part="scale-captions"]')?.getAttribute("font-size") || null;
         } catch {
           svg = "";
         }
@@ -366,9 +372,11 @@ async function autosavedMathToolSnapshot(
           && !/<(?:script|iframe|foreignObject)\b/i.test(svg)
           && !/\b(?:href|src)\s*=/i.test(svg),
         locked: Boolean(tool.locked),
+        measurementLabelFontSize,
         metadata,
         pageWidth: scene.pdfPage?.width || 0,
         sceneId,
+        scaleCaptionFontSize,
         width: tool.width || 0,
         x: tool.x || 0,
         y: tool.y || 0,
@@ -1313,6 +1321,7 @@ test("inserts and persists a Letter-calibrated ruler from Math tools", async ({ 
     height: 90,
     localSafeSvg: true,
     locked: false,
+    measurementLabelFontSize: "12",
     metadata: {
       schemaVersion: 1,
       kind: "ruler",
@@ -1324,6 +1333,7 @@ test("inserts and persists a Letter-calibrated ruler from Math tools", async ({ 
       metricLengthCentimetres: 30,
     },
     pageWidth: 612,
+    scaleCaptionFontSize: "12",
     width: 864,
   });
   const inserted = await autosavedMathToolSnapshot(page, "ruler");
@@ -1358,6 +1368,8 @@ test("inserts and persists a Letter-calibrated ruler from Math tools", async ({ 
     x: moved?.x,
     y: moved?.y,
     localSafeSvg: true,
+    measurementLabelFontSize: "12",
+    scaleCaptionFontSize: "12",
   });
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   expect(externalRequests).toEqual([]);

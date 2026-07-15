@@ -35,6 +35,12 @@ describe("dual-scale ruler", () => {
       30 * PDF_POINTS_PER_CENTIMETRE,
       3,
     );
+    expect(document.querySelector('[data-part="measurement-labels"]')?.getAttribute("font-size")).toBe("12");
+    expect(document.querySelector('[data-part="scale-captions"]')?.getAttribute("font-size")).toBe("12");
+    expect(document.querySelector('text[data-label-unit="cm"]')?.getAttribute("y")).toBe("32");
+    expect(document.querySelector('text[data-label-unit="in"]')?.getAttribute("y")).toBe("65");
+    expect(document.querySelector('text[data-scale-caption="cm"]')?.getAttribute("y")).toBe("43");
+    expect(document.querySelector('text[data-scale-caption="in"]')?.getAttribute("y")).toBe("54");
   });
 
   it("creates a local SVG data URL without executable or linked content", () => {
