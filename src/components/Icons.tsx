@@ -22,6 +22,15 @@ export const ExportIcon = (props: IconProps) => (
 export const EquationIcon = (props: IconProps) => (
   <IconBase {...props}><path d="M4 6h7M4 18h7M7.5 6v12M14 8l6 8M20 8l-6 8"/></IconBase>
 );
+export const MathToolsIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M4 18 18 4l2 2L6 20z"/><path d="m8 16-2-2m5-1-2-2m5-1-2-2"/><circle cx="6" cy="6" r="2.5"/></IconBase>
+);
+export const RulerIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M3.5 14.5 14.5 3.5l6 6-11 11z"/><path d="m8 13-2-2m5-1-2-2m5-1-2-2m3 5-2-2"/></IconBase>
+);
+export const ProtractorIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M3 18a9 9 0 0 1 18 0H3Z"/><path d="M12 18V9m-6.5 9 .8-3m11.4 3-.8-3m-7.8 3 .3-2m5.5 2-.3-2"/></IconBase>
+);
 export const MermaidIcon = (props: IconProps) => (
   <IconBase {...props}><rect x="3" y="4" width="7" height="5" rx="1"/><rect x="14" y="15" width="7" height="5" rx="1"/><path d="M6.5 9v4h11v2M17.5 9v3M14 12h7"/></IconBase>
 );

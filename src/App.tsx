@@ -23,6 +23,8 @@ import { SlideRail } from "./components/SlideRail";
 import { PDF_RAIL_DEFAULT_WIDTH, PdfPageRail } from "./components/PdfPageRail";
 import { PresentationOverlay } from "./components/PresentationOverlay";
 import { StrokeWidthExtensions } from "./components/StrokeWidthExtensions";
+import { MathToolsMenuExtension } from "./components/MathToolsMenuExtension";
+import { MathToolsDialog } from "./components/MathToolsDialog";
 import { EquationDialog } from "./components/EquationDialog";
 import { MermaidDialog } from "./components/MermaidDialog";
 import {
@@ -79,6 +81,18 @@ import { sanitizeProject, sanitizeScene, sanitizeWebLink } from "./lib/safety";
 import { openExternalWebLink } from "./lib/offline-network";
 import { activateSlideFrameTool, addBlankSlideFrame } from "./lib/slide-frame-tool";
 import {
+  createDualScaleRulerAsset,
+  PDF_POINTS_PER_INCH,
+  RULER_LENGTH_CENTIMETRES,
+  RULER_LENGTH_INCHES,
+} from "./lib/math-tools/ruler";
+import {
+  createProtractorAsset,
+  PROTRACTOR_DIAMETER_INCHES,
+  PROTRACTOR_MAX_ANGLE_DEGREES,
+  PROTRACTOR_SMALLEST_DIVISION_DEGREES,
+} from "./lib/math-tools/protractor";
+import {
   activatePresentationInk,
   DEFAULT_PRESENTATION_INK_COLOUR,
   DEFAULT_PRESENTATION_INK_WIDTH,
@@ -106,6 +120,8 @@ type MermaidEditorState = { targetDiagramId: string | null; initialSource: strin
 type SlideFrameAction =
   | { kind: "add"; frameId: string; title: string }
   | { kind: "draw" };
+type MathToolAsset = { dataUrl: string; height: number; width: number };
+type MathToolMetadata = Record<string, boolean | number | string>;
 
 const CLASSROOM_UI_OPTIONS: ExcalidrawProps["UIOptions"] = {
   canvasActions: {
@@ -218,6 +234,7 @@ export default function App() {
   const [isFooterVisible, setIsFooterVisible] = useState(true);
   const [equationEditor, setEquationEditor] = useState<EquationEditorState | null>(null);
   const [mermaidEditor, setMermaidEditor] = useState<MermaidEditorState | null>(null);
+  const [isMathToolsOpen, setIsMathToolsOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
   const editorHostRef = useRef<HTMLDivElement>(null);
@@ -230,6 +247,17 @@ export default function App() {
   const presentationInkStartElementIdsRef = useRef<ReadonlySet<string> | null>(null);
   const activeToolTypeRef = useRef<string | null>(null);
   const roughnessBeforeLineRef = useRef<number | null>(null);
+  const focusAfterMathToolsRef = useRef<"editor" | "trigger" | null>(null);
+
+  useEffect(() => {
+    if (isMathToolsOpen || !focusAfterMathToolsRef.current) return;
+    const focusTarget = focusAfterMathToolsRef.current;
+    focusAfterMathToolsRef.current = null;
+    const selector = focusTarget === "editor"
+      ? ".excalidraw"
+      : ".App-toolbar__extra-tools-trigger";
+    editorHostRef.current?.querySelector<HTMLElement>(selector)?.focus();
+  }, [isMathToolsOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -436,6 +464,7 @@ export default function App() {
     pendingSlideFrameActionRef.current = null;
     setEquationEditor(null);
     setMermaidEditor(null);
+    setIsMathToolsOpen(false);
   }, [project]);
 
   const handleFile = useCallback(async (file: File) => {
@@ -537,6 +566,107 @@ export default function App() {
     });
     setMermaidEditor(null);
   }, [api]);
+
+  const openMathTools = useCallback(() => {
+    setExportOpen(false);
+    setEquationEditor(null);
+    setMermaidEditor(null);
+    setIsMathToolsOpen(true);
+  }, []);
+
+  const closeMathTools = useCallback(() => {
+    focusAfterMathToolsRef.current = "trigger";
+    setIsMathToolsOpen(false);
+  }, []);
+
+  const insertMathTool = useCallback((
+    asset: MathToolAsset,
+    metadata: MathToolMetadata,
+    toastMessage: string,
+  ) => {
+    if (!api) return;
+    try {
+      const fileId = createLocalId() as FileId;
+      const file: BinaryFileData = {
+        id: fileId,
+        mimeType: "image/svg+xml",
+        dataURL: asset.dataUrl as DataURL,
+        created: Date.now(),
+      };
+      const appState = api.getAppState();
+      const center = viewportCoordsToSceneCoords(
+        {
+          clientX: appState.offsetLeft + appState.width / 2,
+          clientY: appState.offsetTop + appState.height / 2,
+        },
+        appState,
+      );
+      const toolId = createLocalId();
+      const [tool] = convertToExcalidrawElements(
+        [{
+          id: toolId,
+          type: "image",
+          x: center.x - asset.width / 2,
+          y: center.y - asset.height / 2,
+          width: asset.width,
+          height: asset.height,
+          fileId,
+          status: "saved",
+          strokeColor: "transparent",
+          backgroundColor: "transparent",
+          customData: {
+            classroomMathTool: {
+              schemaVersion: 1,
+              calibration: "pdf-points",
+              naturalWidth: asset.width,
+              naturalHeight: asset.height,
+              sceneUnitsPerInch: PDF_POINTS_PER_INCH,
+              ...metadata,
+            },
+          },
+        }],
+        { regenerateIds: false },
+      );
+      api.addFiles([file]);
+      api.setActiveTool({ type: "selection" });
+      api.updateScene({
+        elements: [...api.getSceneElements(), tool],
+        appState: { selectedElementIds: { [tool.id]: true } },
+        captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+      });
+      focusAfterMathToolsRef.current = "editor";
+      setIsMathToolsOpen(false);
+      api.setToast({ message: toastMessage });
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, [api]);
+
+  const insertRuler = useCallback(() => {
+    insertMathTool(
+      createDualScaleRulerAsset(),
+      {
+        kind: "ruler",
+        imperialLengthInches: RULER_LENGTH_INCHES,
+        metricLengthCentimetres: RULER_LENGTH_CENTIMETRES,
+      },
+      "Calibrated ruler added.",
+    );
+  }, [insertMathTool]);
+
+  const insertProtractor = useCallback(() => {
+    insertMathTool(
+      createProtractorAsset(),
+      {
+        kind: "protractor",
+        diameterInches: PROTRACTOR_DIAMETER_INCHES,
+        angleRangeDegrees: PROTRACTOR_MAX_ANGLE_DEGREES,
+        smallestDivisionDegrees: PROTRACTOR_SMALLEST_DIVISION_DEGREES,
+        dualScale: true,
+      },
+      "Calibrated protractor added.",
+    );
+  }, [insertMathTool]);
 
   const insertEquation = useCallback((rendered: RenderedLatex) => {
     if (!api) return;
@@ -1289,11 +1419,17 @@ export default function App() {
             UIOptions={CLASSROOM_UI_OPTIONS}
           />
           {api && (
-            <StrokeWidthExtensions
-              api={api}
-              editorHost={editorHostRef.current}
-              strokeWidth={strokeWidth}
-            />
+            <>
+              <StrokeWidthExtensions
+                api={api}
+                editorHost={editorHostRef.current}
+                strokeWidth={strokeWidth}
+              />
+              <MathToolsMenuExtension
+                editorHost={editorHostRef.current}
+                onOpen={openMathTools}
+              />
+            </>
           )}
         </div>
         {!presentation && isFooterVisible && (
@@ -1439,6 +1575,13 @@ export default function App() {
           editing={!!mermaidEditor.targetDiagramId}
           onCancel={() => setMermaidEditor(null)}
           onSubmit={insertMermaid}
+        />
+      )}
+      {isMathToolsOpen && (
+        <MathToolsDialog
+          onCancel={closeMathTools}
+          onInsertProtractor={insertProtractor}
+          onInsertRuler={insertRuler}
         />
       )}
       {busyMessage && <div className="busy-overlay" role="status"><span className="spinner" />{busyMessage}</div>}

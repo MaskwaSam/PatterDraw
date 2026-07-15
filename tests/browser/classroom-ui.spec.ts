@@ -276,6 +276,108 @@ async function autosavedWorkspaceSummary(page: import("@playwright/test").Page):
   });
 }
 
+async function autosavedMathToolSnapshot(
+  page: import("@playwright/test").Page,
+  kind: "protractor" | "ruler",
+): Promise<{
+  backgroundLocked: boolean;
+  backgroundWidth: number;
+  captionFontSize: string | null;
+  degreeLabelFontSize: string | null;
+  fileMimeType: string | null;
+  height: number;
+  id: string;
+  localSafeSvg: boolean;
+  locked: boolean;
+  metadata: Record<string, unknown>;
+  pageWidth: number;
+  sceneId: string;
+  width: number;
+  x: number;
+  y: number;
+} | null> {
+  return page.evaluate(async (toolKind) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const project = await new Promise<{
+      scenes: Record<string, {
+        elements: Array<{
+          customData?: { classroomMathTool?: Record<string, unknown> };
+          fileId?: string | null;
+          height?: number;
+          id: string;
+          isDeleted?: boolean;
+          locked?: boolean;
+          type?: string;
+          width?: number;
+          x?: number;
+          y?: number;
+        }>;
+        files: Record<string, { dataURL?: string; mimeType?: string }>;
+        pdfPage?: { backgroundElementId: string; width: number };
+      }>;
+    } | undefined>((resolve, reject) => {
+      const transaction = database.transaction("keyval", "readonly");
+      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    if (!project) return null;
+
+    for (const [sceneId, scene] of Object.entries(project.scenes)) {
+      const tool = scene.elements.find((element) =>
+        !element.isDeleted
+        && element.type === "image"
+        && element.customData?.classroomMathTool?.kind === toolKind,
+      );
+      if (!tool) continue;
+      const metadata = tool.customData?.classroomMathTool || {};
+      const file = tool.fileId ? scene.files[tool.fileId] : undefined;
+      const dataUrl = file?.dataURL || "";
+      let svg = "";
+      let captionFontSize: string | null = null;
+      let degreeLabelFontSize: string | null = null;
+      if (dataUrl.startsWith("data:image/svg+xml;base64,")) {
+        try {
+          svg = atob(dataUrl.slice(dataUrl.indexOf(",") + 1));
+          const svgDocument = new DOMParser().parseFromString(svg, "image/svg+xml");
+          captionFontSize = svgDocument.querySelector('[data-part="caption"]')?.getAttribute("font-size") || null;
+          degreeLabelFontSize = svgDocument.querySelector('[data-part="degree-labels"]')?.getAttribute("font-size") || null;
+        } catch {
+          svg = "";
+        }
+      }
+      const background = scene.pdfPage
+        ? scene.elements.find((element) => element.id === scene.pdfPage?.backgroundElementId)
+        : undefined;
+      return {
+        backgroundLocked: Boolean(background?.locked),
+        backgroundWidth: background?.width || 0,
+        captionFontSize,
+        degreeLabelFontSize,
+        fileMimeType: file?.mimeType || null,
+        height: tool.height || 0,
+        id: tool.id,
+        localSafeSvg: Boolean(svg)
+          && !/<(?:script|iframe|foreignObject)\b/i.test(svg)
+          && !/\b(?:href|src)\s*=/i.test(svg),
+        locked: Boolean(tool.locked),
+        metadata,
+        pageWidth: scene.pdfPage?.width || 0,
+        sceneId,
+        width: tool.width || 0,
+        x: tool.x || 0,
+        y: tool.y || 0,
+      };
+    }
+    return null;
+  }, kind);
+}
+
 async function autosavedFrameVisibility(page: import("@playwright/test").Page): Promise<boolean | null> {
   return page.evaluate(async () => {
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
@@ -1121,6 +1223,234 @@ test("docks the drawing toolbar and resizes or hides the PDF page rail", async (
   await showPages.click();
   await expect(rail).toBeVisible();
   expect((await rail.boundingBox())?.width || 0).toBeCloseTo(resizedWidth, 0);
+});
+
+test("inserts and persists a Letter-calibrated ruler from Math tools", async ({ page }) => {
+  test.setTimeout(60_000);
+  const consoleErrors: string[] = [];
+  const externalRequests: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== "http://127.0.0.1:5173") {
+      externalRequests.push(request.url());
+    }
+  });
+
+  await openTestPdf(page);
+  const extraToolsTrigger = page.locator(".App-toolbar__extra-tools-trigger");
+  await extraToolsTrigger.click();
+  const extraToolsMenu = page.locator(".App-toolbar__extra-tools-dropdown");
+  const mathTools = page.getByTestId("toolbar-math-tools");
+  await expect(extraToolsMenu).toBeVisible();
+  await expect(mathTools).toBeVisible();
+  await expect(mathTools).not.toHaveAttribute("role", "menuitem");
+  await expect(mathTools.locator("xpath=ancestor::*[contains(@class, 'dropdown-menu-container')]")).toHaveCount(1);
+
+  const triggerBox = await extraToolsTrigger.boundingBox();
+  const menuBox = await extraToolsMenu.boundingBox();
+  expect(triggerBox).not.toBeNull();
+  expect(menuBox).not.toBeNull();
+  expect((menuBox?.y || 0) + (menuBox?.height || 0)).toBeLessThanOrEqual(triggerBox?.y || 0);
+
+  await mathTools.click();
+  await expect(extraToolsMenu).toBeHidden();
+  const dialog = page.getByRole("dialog", { name: "Math tools", exact: true });
+  await expect(dialog).toBeVisible();
+  const rulerButton = page.getByTestId("math-tool-ruler");
+  const protractorButton = page.getByTestId("math-tool-protractor");
+  await expect(rulerButton).toBeFocused();
+  await expect(rulerButton.locator("img")).toHaveAttribute("src", /^data:image\/svg\+xml;base64,/);
+  await expect(protractorButton.locator("img")).toHaveAttribute("src", /^data:image\/svg\+xml;base64,/);
+
+  const desktopRulerBox = await rulerButton.boundingBox();
+  const desktopProtractorBox = await protractorButton.boundingBox();
+  expect(desktopRulerBox).not.toBeNull();
+  expect(desktopProtractorBox).not.toBeNull();
+  expect(desktopProtractorBox?.y).toBeCloseTo(desktopRulerBox?.y || 0, 0);
+  expect(desktopProtractorBox?.width).toBeCloseTo(desktopRulerBox?.width || 0, 0);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobileDialogBox = await dialog.boundingBox();
+  const mobileRulerBox = await rulerButton.boundingBox();
+  const mobileProtractorBox = await protractorButton.boundingBox();
+  expect(mobileDialogBox).not.toBeNull();
+  expect((mobileDialogBox?.x || 0) + (mobileDialogBox?.width || 0)).toBeLessThanOrEqual(390);
+  expect((mobileDialogBox?.y || 0) + (mobileDialogBox?.height || 0)).toBeLessThanOrEqual(844);
+  expect(mobileProtractorBox?.x).toBeCloseTo(mobileRulerBox?.x || 0, 0);
+  expect(mobileProtractorBox?.y || 0).toBeGreaterThan((mobileRulerBox?.y || 0) + (mobileRulerBox?.height || 0));
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  const closeMathTools = page.getByRole("button", { name: "Close math tools" });
+  await page.keyboard.press("Tab");
+  await expect(protractorButton).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(closeMathTools).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(rulerButton).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(closeMathTools).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(protractorButton).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(extraToolsTrigger).toBeFocused();
+
+  await extraToolsTrigger.click();
+  await mathTools.click();
+  await expect(dialog).toBeVisible();
+  await expect(rulerButton).toBeFocused();
+  await rulerButton.click();
+  await expect(dialog).toBeHidden();
+
+  await expect.poll(() => autosavedMathToolSnapshot(page, "ruler")).toMatchObject({
+    backgroundLocked: true,
+    backgroundWidth: 612,
+    fileMimeType: "image/svg+xml",
+    height: 90,
+    localSafeSvg: true,
+    locked: false,
+    metadata: {
+      schemaVersion: 1,
+      kind: "ruler",
+      calibration: "pdf-points",
+      naturalWidth: 864,
+      naturalHeight: 90,
+      sceneUnitsPerInch: 72,
+      imperialLengthInches: 12,
+      metricLengthCentimetres: 30,
+    },
+    pageWidth: 612,
+    width: 864,
+  });
+  const inserted = await autosavedMathToolSnapshot(page, "ruler");
+  expect(inserted).not.toBeNull();
+  expect((inserted?.width || 0) / (inserted?.pageWidth || 1)).toBeCloseTo(24 / 17, 10);
+
+  await expect(page.locator(".editor-host .excalidraw")).toBeFocused();
+  await page.keyboard.press("Shift+ArrowRight");
+  await page.keyboard.press("Shift+ArrowDown");
+  await expect.poll(async () => {
+    const moved = await autosavedMathToolSnapshot(page, "ruler");
+    return Boolean(
+      moved
+      && moved.id === inserted?.id
+      && moved.x > (inserted?.x || 0)
+      && moved.y > (inserted?.y || 0)
+      && moved.width === 864
+      && moved.height === 90,
+    );
+  }).toBe(true);
+  const moved = await autosavedMathToolSnapshot(page, "ruler");
+
+  await page.reload();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/);
+  await expect.poll(() => autosavedMathToolSnapshot(page, "ruler")).toMatchObject({
+    id: moved?.id,
+    sceneId: moved?.sceneId,
+    width: 864,
+    height: 90,
+    x: moved?.x,
+    y: moved?.y,
+    localSafeSvg: true,
+  });
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(externalRequests).toEqual([]);
+  expect(consoleErrors).toEqual([]);
+});
+
+test("inserts and persists a Letter-calibrated protractor from Math tools", async ({ page }) => {
+  test.setTimeout(60_000);
+  const consoleErrors: string[] = [];
+  const externalRequests: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== "http://127.0.0.1:5173") {
+      externalRequests.push(request.url());
+    }
+  });
+
+  await openTestPdf(page);
+  const extraToolsTrigger = page.locator(".App-toolbar__extra-tools-trigger");
+  await extraToolsTrigger.click();
+  await page.getByTestId("toolbar-math-tools").click();
+  const dialog = page.getByRole("dialog", { name: "Math tools", exact: true });
+  const protractorButton = page.getByTestId("math-tool-protractor");
+  await expect(dialog).toBeVisible();
+  await expect(protractorButton).toBeVisible();
+  await protractorButton.click();
+  await expect(dialog).toBeHidden();
+
+  await expect.poll(() => autosavedMathToolSnapshot(page, "protractor")).toMatchObject({
+    backgroundLocked: true,
+    backgroundWidth: 612,
+    captionFontSize: "16",
+    degreeLabelFontSize: "16",
+    fileMimeType: "image/svg+xml",
+    height: 216,
+    localSafeSvg: true,
+    locked: false,
+    metadata: {
+      schemaVersion: 1,
+      kind: "protractor",
+      calibration: "pdf-points",
+      naturalWidth: 432,
+      naturalHeight: 216,
+      sceneUnitsPerInch: 72,
+      diameterInches: 6,
+      angleRangeDegrees: 180,
+      smallestDivisionDegrees: 1,
+      dualScale: true,
+    },
+    pageWidth: 612,
+    width: 432,
+  });
+  const inserted = await autosavedMathToolSnapshot(page, "protractor");
+  expect(inserted).not.toBeNull();
+  expect((inserted?.width || 0) / (inserted?.pageWidth || 1)).toBeCloseTo(12 / 17, 10);
+
+  await expect(page.locator(".editor-host .excalidraw")).toBeFocused();
+  await page.keyboard.press("Shift+ArrowRight");
+  await page.keyboard.press("Shift+ArrowDown");
+  await expect.poll(async () => {
+    const moved = await autosavedMathToolSnapshot(page, "protractor");
+    return Boolean(
+      moved
+      && moved.id === inserted?.id
+      && moved.x > (inserted?.x || 0)
+      && moved.y > (inserted?.y || 0)
+      && moved.width === 432
+      && moved.height === 216,
+    );
+  }).toBe(true);
+  const moved = await autosavedMathToolSnapshot(page, "protractor");
+
+  await page.reload();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/);
+  await expect.poll(() => autosavedMathToolSnapshot(page, "protractor")).toMatchObject({
+    captionFontSize: "16",
+    degreeLabelFontSize: "16",
+    id: moved?.id,
+    sceneId: moved?.sceneId,
+    width: 432,
+    height: 216,
+    x: moved?.x,
+    y: moved?.y,
+    localSafeSvg: true,
+  });
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(externalRequests).toEqual([]);
+  expect(consoleErrors).toEqual([]);
 });
 
 test("navigates PDF pages with the left and right arrow keys", async ({ page }) => {
