@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ClassroomProject, SerializedScene } from "../types";
-import { assertSafeProject, sanitizeProject, sanitizeScene } from "./safety";
+import { assertSafeProject, sanitizeProject, sanitizeScene, sanitizeWebLink } from "./safety";
 
 const scene = (elements: readonly Record<string, unknown>[]): SerializedScene => ({
   id: "scene-1",
@@ -11,14 +11,26 @@ const scene = (elements: readonly Record<string, unknown>[]): SerializedScene =>
 });
 
 describe("student safety", () => {
-  it("removes iframe and embeddable elements and strips links", () => {
+  it("removes iframe and embeddable elements while preserving safe web links", () => {
     const safe = sanitizeScene(scene([
-      { id: "shape", type: "rectangle", link: "https://example.com" },
+      { id: "shape", type: "rectangle", link: "https://example.com/lesson" },
+      { id: "unsafe", type: "rectangle", link: "javascript:alert(1)" },
       { id: "embed", type: "embeddable", link: "https://example.com" },
       { id: "iframe", type: "iframe" },
       { id: "generated", type: "magicframe" },
     ]));
-    expect(safe.elements).toEqual([{ id: "shape", type: "rectangle", link: null }]);
+    expect(safe.elements).toEqual([
+      { id: "shape", type: "rectangle", link: "https://example.com/lesson" },
+      { id: "unsafe", type: "rectangle", link: null },
+    ]);
+  });
+
+  it("allows only HTTP and HTTPS hyperlink schemes", () => {
+    expect(sanitizeWebLink(" https://example.com/lesson ")).toBe("https://example.com/lesson");
+    expect(sanitizeWebLink("http://localhost:5173/help")).toBe("http://localhost:5173/help");
+    expect(sanitizeWebLink("mailto:teacher@example.com")).toBeNull();
+    expect(sanitizeWebLink("javascript:alert(1)")).toBeNull();
+    expect(sanitizeWebLink("data:text/html,unsafe")).toBeNull();
   });
 
   it("sanitizes every scene in a project", () => {

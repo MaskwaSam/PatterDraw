@@ -3,6 +3,7 @@ import {
   filterOfflineFontSources,
   installOfflineNavigationGuard,
   isAllowedOfflineUrl,
+  openExternalWebLink,
 } from "./offline-network";
 
 describe("offline network policy", () => {
@@ -30,10 +31,13 @@ describe("offline network policy", () => {
     installOfflineNavigationGuard(document);
     const external = document.createElement("a");
     external.href = "https://example.test/mermaid-docs";
+    let externalHandlerRan = false;
+    external.addEventListener("click", () => { externalHandlerRan = true; });
     document.body.append(external);
     const externalClick = new MouseEvent("click", { bubbles: true, cancelable: true });
     external.dispatchEvent(externalClick);
     expect(externalClick.defaultPrevented).toBe(true);
+    expect(externalHandlerRan).toBe(true);
 
     const local = document.createElement("a");
     local.href = "#local-help";
@@ -41,5 +45,22 @@ describe("offline network policy", () => {
     const localClick = new MouseEvent("click", { bubbles: true, cancelable: true });
     local.dispatchEvent(localClick);
     expect(localClick.defaultPrevented).toBe(false);
+  });
+
+  it("opens validated web links only through the explicit link action", () => {
+    let openedUrl = "";
+    let openedTarget = "";
+    const openedWindow = { opener: window } as unknown as WindowProxy;
+    const opener = (url: string, target: string) => {
+      openedUrl = url;
+      openedTarget = target;
+      return openedWindow;
+    };
+
+    expect(openExternalWebLink("https://example.test/lesson", opener)).toBe(true);
+    expect(openedUrl).toBe("https://example.test/lesson");
+    expect(openedTarget).toBe("_blank");
+    expect(openedWindow.opener).toBeNull();
+    expect(openExternalWebLink("javascript:alert(1)", opener)).toBe(false);
   });
 });

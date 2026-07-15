@@ -68,9 +68,77 @@ async function pdfPageHorizontalCenterError(page: import("@playwright/test").Pag
   });
 }
 
-async function openTestPdf(page: import("@playwright/test").Page) {
+async function renderedRightEdgeDarkPixels(page: import("@playwright/test").Page): Promise<number> {
+  const screenshot = await page.screenshot({ type: "png" });
+  const screenshotDataUrl = `data:image/png;base64,${screenshot.toString("base64")}`;
+  return page.evaluate(async (imageUrl) => {
+    const image = new Image();
+    image.src = imageUrl;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d");
+    if (!context) return 0;
+    context.drawImage(image, 0, 0);
+    let darkPixels = 0;
+    const startX = Math.floor(canvas.width * 0.96);
+    const startY = Math.floor(canvas.height * 0.35);
+    const width = canvas.width - startX;
+    const height = Math.floor(canvas.height * 0.35);
+    const pixels = context.getImageData(startX, startY, width, height).data;
+    for (let offset = 0; offset < pixels.length; offset += 4) {
+      if (
+        pixels[offset + 3] > 100
+        && pixels[offset] < 100
+        && pixels[offset + 1] < 100
+        && pixels[offset + 2] < 100
+      ) darkPixels += 1;
+    }
+    return darkPixels;
+  }, screenshotDataUrl);
+}
+
+async function renderedRedPixelsNear(
+  page: import("@playwright/test").Page,
+  xRatio: number,
+  yRatio: number,
+): Promise<number> {
+  const screenshot = await page.screenshot({ type: "png" });
+  const screenshotDataUrl = `data:image/png;base64,${screenshot.toString("base64")}`;
+  return page.evaluate(async ({ imageUrl, xRatio, yRatio }) => {
+    const image = new Image();
+    image.src = imageUrl;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d");
+    if (!context) return 0;
+    context.drawImage(image, 0, 0);
+    const size = 12;
+    const pixels = context.getImageData(
+      Math.floor(canvas.width * xRatio) - size / 2,
+      Math.floor(canvas.height * yRatio) - size / 2,
+      size,
+      size,
+    ).data;
+    let redPixels = 0;
+    for (let offset = 0; offset < pixels.length; offset += 4) {
+      if (
+        pixels[offset + 3] > 100
+        && pixels[offset] > 180
+        && pixels[offset + 1] < 100
+        && pixels[offset + 2] < 100
+      ) redPixels += 1;
+    }
+    return redPixels;
+  }, { imageUrl: screenshotDataUrl, xRatio, yRatio });
+}
+
+async function openTestPdf(page: import("@playwright/test").Page, pageCount = 1) {
   const document = await PDFDocument.create();
-  document.addPage([612, 792]);
+  for (let index = 0; index < pageCount; index += 1) document.addPage([612, 792]);
   const bytes = await document.save();
   await page.locator('input[type="file"]').setInputFiles({
     name: "toolbar-position.pdf",
@@ -78,7 +146,7 @@ async function openTestPdf(page: import("@playwright/test").Page) {
     buffer: Buffer.from(bytes),
   });
   await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, { timeout: 15_000 });
-  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1, { timeout: 15_000 });
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(pageCount, { timeout: 15_000 });
 }
 
 async function autosavedFreedrawStroke(page: import("@playwright/test").Page): Promise<{
@@ -110,6 +178,100 @@ async function autosavedFreedrawStroke(page: import("@playwright/test").Page): P
     return {
       strokeColor: stroke.strokeColor || null,
       strokeWidth: stroke.strokeWidth ?? null,
+    };
+  });
+}
+
+async function autosavedElementRoughness(
+  page: import("@playwright/test").Page,
+  type: string,
+): Promise<number | null> {
+  return page.evaluate(async (elementType) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const project = await new Promise<{
+      activeSceneId: string;
+      scenes: Record<string, {
+        elements: Array<{ type?: string; roughness?: number }>;
+      }>;
+    } | undefined>((resolve, reject) => {
+      const transaction = database.transaction("keyval", "readonly");
+      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    if (!project) return null;
+    const scene = project.scenes[project.activeSceneId];
+    const element = [...(scene?.elements || [])].reverse().find((candidate) => candidate.type === elementType);
+    return element?.roughness ?? null;
+  }, type);
+}
+
+async function autosavedWebLink(page: import("@playwright/test").Page): Promise<{
+  link: string | null;
+  blockedElementCount: number;
+} | null> {
+  return page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const project = await new Promise<{
+      activeSceneId: string;
+      scenes: Record<string, {
+        elements: Array<{ type?: string; link?: string | null }>;
+      }>;
+    } | undefined>((resolve, reject) => {
+      const transaction = database.transaction("keyval", "readonly");
+      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    if (!project) return null;
+    const elements = project.scenes[project.activeSceneId]?.elements || [];
+    const linkedElement = [...elements].reverse().find((element) => Boolean(element.link));
+    return {
+      link: linkedElement?.link || null,
+      blockedElementCount: elements.filter(
+        (element) => element.type === "embeddable" || element.type === "iframe" || element.type === "magicframe",
+      ).length,
+    };
+  });
+}
+
+async function autosavedWorkspaceSummary(page: import("@playwright/test").Page): Promise<{
+  activeIsPdf: boolean;
+  boardSceneCount: number;
+  pdfPageCount: number;
+} | null> {
+  return page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const project = await new Promise<{
+      activeSceneId: string;
+      scenes: Record<string, { pdfPage?: unknown }>;
+    } | undefined>((resolve, reject) => {
+      const transaction = database.transaction("keyval", "readonly");
+      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    if (!project) return null;
+    const scenes = Object.values(project.scenes);
+    return {
+      activeIsPdf: Boolean(project.scenes[project.activeSceneId]?.pdfPage),
+      boardSceneCount: scenes.filter((scene) => !scene.pdfPage).length,
+      pdfPageCount: scenes.filter((scene) => Boolean(scene.pdfPage)).length,
     };
   });
 }
@@ -189,6 +351,51 @@ async function autosavedSlideOverflow(page: import("@playwright/test").Page): Pr
   });
 }
 
+async function autosavedPresentationInkStack(page: import("@playwright/test").Page): Promise<{
+  colours: string[];
+  frameIds: Array<string | null>;
+  latestIsTop: boolean;
+  allInkIsAboveSlideContent: boolean;
+} | null> {
+  return page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const project = await new Promise<{
+      activeSceneId: string;
+      scenes: Record<string, {
+        elements: Array<{
+          id: string;
+          type?: string;
+          strokeColor?: string;
+          frameId?: string | null;
+          isDeleted?: boolean;
+        }>;
+      }>;
+    } | undefined>((resolve, reject) => {
+      const transaction = database.transaction("keyval", "readonly");
+      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    if (!project) return null;
+    const elements = (project.scenes[project.activeSceneId]?.elements || [])
+      .filter((element) => !element.isDeleted);
+    const ink = elements.filter((element) => element.type === "freedraw");
+    const firstInkIndex = elements.findIndex((element) => element.type === "freedraw");
+    return {
+      colours: ink.map((element) => element.strokeColor || ""),
+      frameIds: ink.map((element) => element.frameId || null),
+      latestIsTop: Boolean(ink.length) && elements.at(-1)?.id === ink.at(-1)?.id,
+      allInkIsAboveSlideContent: firstInkIndex >= 0
+        && elements.slice(firstInkIndex).every((element) => element.type === "freedraw"),
+    };
+  });
+}
+
 async function autosavedSlideDeletion(page: import("@playwright/test").Page): Promise<{
   slideCount: number;
   frameCount: number;
@@ -264,6 +471,71 @@ test("exposes native stroke colour and drawing weight controls", async ({ page }
   await expect(heavyStroke).toBeChecked();
   await dragOnBoard(page, { x: 340, y: 250 }, { x: 520, y: 340 });
   await expect.poll(() => autosavedFreedrawStroke(page)).toMatchObject({ strokeWidth: 3 });
+});
+
+test("defaults line drawings to no sloppiness without changing other shape tools", async ({ page }) => {
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  const sloppinessOptions = page.locator('input[name="sloppiness"]');
+  await expect(sloppinessOptions).toHaveCount(3);
+  await sloppinessOptions.nth(2).check({ force: true });
+
+  await page.getByTestId("toolbar-line").check({ force: true });
+  await expect(sloppinessOptions.nth(0)).toBeChecked();
+
+  await dragOnBoard(page, { x: 300, y: 210 }, { x: 560, y: 350 });
+  await expect.poll(() => autosavedElementRoughness(page, "line")).toBe(0);
+
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  await expect(sloppinessOptions.nth(2)).toBeChecked();
+  await dragOnBoard(page, { x: 340, y: 250 }, { x: 520, y: 390 });
+  await expect.poll(() => autosavedElementRoughness(page, "rectangle")).toBe(2);
+});
+
+test("adds and explicitly opens safe web links without enabling embeds", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  await page.context().route("https://example.test/**", async (route) => {
+    await route.fulfill({ status: 200, contentType: "text/html", body: "Linked classroom resource" });
+  });
+
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  await dragOnBoard(page, { x: 320, y: 230 }, { x: 560, y: 390 });
+  await page.keyboard.press("ControlOrMeta+k");
+  const linkInput = page.locator(".excalidraw-hyperlinkContainer-input");
+  await expect(linkInput).toBeVisible();
+  await linkInput.fill("https://example.test/class-resource");
+  await linkInput.press("Enter");
+
+  const link = page.locator(".excalidraw-hyperlinkContainer-link");
+  await expect(link).toHaveText("https://example.test/class-resource");
+  await expect.poll(() => autosavedWebLink(page)).toEqual({
+    link: "https://example.test/class-resource",
+    blockedElementCount: 0,
+  });
+  await expect.poll(() => page.evaluate(async () => {
+    try {
+      await fetch("https://example.test/background-request");
+      return "allowed";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  })).toContain("blocks external network access");
+
+  const popupPromise = page.waitForEvent("popup");
+  await link.click();
+  const popup = await popupPromise;
+  await expect(popup).toHaveURL("https://example.test/class-resource");
+  await popup.close();
+
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect.poll(() => autosavedWebLink(page)).toEqual({
+    link: "https://example.test/class-resource",
+    blockedElementCount: 0,
+  });
+  expect(consoleErrors).toEqual([]);
 });
 
 test("toggles fullscreen from the bottom-right status bar", async ({ page }) => {
@@ -521,44 +793,45 @@ test("deletes the selected slide frame while preserving its board content", asyn
   });
 });
 
-test("keeps a released slide stroke visible beyond its frame", async ({ page }) => {
+test("keeps presentation ink visible beyond its frame when the stroke starts inside", async ({ page }) => {
   await page.getByRole("button", { name: "Slides", exact: true }).click();
   await page.getByRole("button", { name: "Add slide", exact: true }).click();
   await expect(page.locator(".slide-thumbnail")).toHaveCount(1);
   await page.waitForTimeout(350);
 
-  await page.getByTestId("toolbar-freedraw").check({ force: true });
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 1");
+  await page.getByRole("button", { name: "Ink", exact: true }).click();
   const bounds = await page.locator(".editor-host").boundingBox();
   if (!bounds) throw new Error("Editor host has no visible bounds.");
   await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
   await page.mouse.down();
   await page.mouse.move(bounds.x + bounds.width - 3, bounds.y + bounds.height / 2, { steps: 16 });
+  await page.mouse.move(bounds.x + bounds.width - 3, bounds.y + bounds.height * 0.65, { steps: 8 });
   await page.mouse.up();
 
   await expect.poll(() => autosavedSlideOverflow(page), { timeout: 8_000 }).toMatchObject({
-    ownsFrame: true,
+    ownsFrame: false,
     crossesFrameEdge: true,
   });
-  await expect.poll(() => page.evaluate(() => {
-    let darkPixels = 0;
-    for (const canvas of document.querySelectorAll<HTMLCanvasElement>(".editor-host canvas")) {
-      if (canvas.width < 300 || canvas.height < 300) continue;
-      const context = canvas.getContext("2d");
-      if (!context) continue;
-      const startX = Math.floor(canvas.width * 0.92);
-      const startY = Math.floor(canvas.height * 0.4);
-      const width = canvas.width - startX;
-      const height = Math.floor(canvas.height * 0.2);
-      const pixels = context.getImageData(startX, startY, width, height).data;
-      for (let offset = 0; offset < pixels.length; offset += 4) {
-        if (pixels[offset + 3] > 100
-          && pixels[offset] < 100
-          && pixels[offset + 1] < 100
-          && pixels[offset + 2] < 100) darkPixels += 1;
-      }
-    }
-    return darkPixels;
-  }), { timeout: 5_000 }).toBeGreaterThan(40);
+  await expect.poll(() => renderedRightEdgeDarkPixels(page), { timeout: 5_000 }).toBeGreaterThan(40);
+
+  await page.getByRole("button", { name: "Red ink", exact: true }).click();
+  await page.mouse.move(bounds.x + bounds.width * 0.75, bounds.y + bounds.height * 0.42);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + bounds.width * 0.75, bounds.y + bounds.height * 0.58, { steps: 12 });
+  await page.mouse.up();
+
+  await expect.poll(() => autosavedPresentationInkStack(page), { timeout: 8_000 }).toEqual({
+    colours: ["#1b1b1f", "#e03131"],
+    frameIds: [null, null],
+    latestIsTop: true,
+    allInkIsAboveSlideContent: true,
+  });
+  await expect.poll(
+    () => renderedRedPixelsNear(page, 0.75, 0.5),
+    { timeout: 5_000 },
+  ).toBeGreaterThan(3);
 });
 
 test("previews existing content geometrically enclosed by a frame", async ({ page }) => {
@@ -721,6 +994,32 @@ test("fits the first slide after presentation layout opens", async ({ page }) =>
   expect(firstEntryZoom).toBeCloseTo(returnZoom, 0);
 });
 
+test("refreshes a PDF-active autosave back to the board without losing the PDF", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  await openTestPdf(page);
+  await expect.poll(() => autosavedWorkspaceSummary(page)).toEqual({
+    activeIsPdf: true,
+    boardSceneCount: 1,
+    pdfPageCount: 1,
+  });
+
+  await page.reload();
+  await expect(page).toHaveTitle("Canvas Classroom");
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await expect(page.locator(".page-status")).toContainText("Board");
+
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/);
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1);
+  await expect(page.locator("#pdf-page-rail .pdf-page-item").first()).toHaveClass(/is-selected/);
+  expect(consoleErrors).toEqual([]);
+});
+
 test("docks the drawing toolbar and resizes or hides the PDF page rail", async ({ page }) => {
   test.setTimeout(60_000);
   const toolbar = page.locator(".shapes-section");
@@ -822,6 +1121,40 @@ test("docks the drawing toolbar and resizes or hides the PDF page rail", async (
   await showPages.click();
   await expect(rail).toBeVisible();
   expect((await rail.boundingBox())?.width || 0).toBeCloseTo(resizedWidth, 0);
+});
+
+test("navigates PDF pages with the left and right arrow keys", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  await expect(page).toHaveTitle("Canvas Classroom");
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  await openTestPdf(page, 3);
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  const pageStatus = page.locator(".page-status");
+  await expect(pages.nth(0)).toHaveClass(/is-selected/);
+  await expect(pageStatus).toContainText("Page 1 of 3");
+
+  await page.locator(".editor-host").click({ position: { x: 600, y: 400 } });
+  await page.keyboard.press("ArrowRight");
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await expect(pageStatus).toContainText("Page 2 of 3");
+
+  await page.keyboard.press("ArrowRight");
+  await expect(pages.nth(2)).toHaveClass(/is-selected/);
+  await expect(pageStatus).toContainText("Page 3 of 3");
+
+  await page.keyboard.press("ArrowLeft");
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await expect(pageStatus).toContainText("Page 2 of 3");
+
+  const resizeHandle = page.getByRole("separator", { name: "Resize PDF pages" });
+  await resizeHandle.focus();
+  await resizeHandle.press("ArrowRight");
+  await expect(resizeHandle).toHaveAttribute("aria-valuenow", "240");
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  expect(consoleErrors).toEqual([]);
 });
 
 test("adds a blank PDF page, preserves it in the project, and exports it", async ({ page }) => {

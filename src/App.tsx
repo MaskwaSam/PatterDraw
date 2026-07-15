@@ -75,16 +75,23 @@ import {
   moveSlide,
   reconcileSlides,
 } from "./lib/slides";
-import { isRemoteUrl, sanitizeProject, sanitizeScene } from "./lib/safety";
+import { sanitizeProject, sanitizeScene, sanitizeWebLink } from "./lib/safety";
+import { openExternalWebLink } from "./lib/offline-network";
 import { activateSlideFrameTool, addBlankSlideFrame } from "./lib/slide-frame-tool";
 import {
   activatePresentationInk,
   DEFAULT_PRESENTATION_INK_COLOUR,
   DEFAULT_PRESENTATION_INK_WIDTH,
+  promoteNewPresentationInk,
   type PresentationInkColour,
   type PresentationInkWidth,
 } from "./lib/presentation-ink";
-import { boardSceneId, workspaceModeClassName, type WorkspaceMode } from "./lib/workspace-mode";
+import {
+  boardSceneId,
+  projectForBoardStartup,
+  workspaceModeClassName,
+  type WorkspaceMode,
+} from "./lib/workspace-mode";
 import "./styles.css";
 
 type SaveStatus = "saved" | "saving" | "error";
@@ -220,6 +227,9 @@ export default function App() {
   const pendingCreatedFrameIdRef = useRef<string | null>(null);
   const pendingSlideFrameActionRef = useRef<SlideFrameAction | null>(null);
   const slideFramesVisibleRef = useRef(true);
+  const presentationInkStartElementIdsRef = useRef<ReadonlySet<string> | null>(null);
+  const activeToolTypeRef = useRef<string | null>(null);
+  const roughnessBeforeLineRef = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -230,7 +240,7 @@ export default function App() {
           const framesVisible = loaded.project.slideFramesVisible !== false;
           slideFramesVisibleRef.current = framesVisible;
           setAreSlideFramesVisible(framesVisible);
-          setProject(loaded.project);
+          setProject(projectForBoardStartup(loaded.project));
           setPdfBytes(loaded.pdfBytes);
         } else {
           setProject(createBlankProject());
@@ -348,12 +358,38 @@ export default function App() {
     setStrokeWidth(appState.currentItemStrokeWidth);
     setAreSlideFramesVisible(appState.frameRendering.enabled);
     if (switchingSceneRef.current) return;
+    const activeToolType = appState.activeTool.type;
+    const previousToolType = activeToolTypeRef.current;
+    if (activeToolType === "line" && previousToolType !== "line") {
+      activeToolTypeRef.current = activeToolType;
+      roughnessBeforeLineRef.current = appState.currentItemRoughness;
+      if (appState.currentItemRoughness !== 0) {
+        api?.updateScene({
+          appState: { currentItemRoughness: 0 },
+          captureUpdate: CaptureUpdateAction.NEVER,
+        });
+        return;
+      }
+    } else if (activeToolType !== "line" && previousToolType === "line") {
+      activeToolTypeRef.current = activeToolType;
+      const restoredRoughness = roughnessBeforeLineRef.current;
+      roughnessBeforeLineRef.current = null;
+      if (restoredRoughness !== null && appState.currentItemRoughness !== restoredRoughness) {
+        api?.updateScene({
+          appState: { currentItemRoughness: restoredRoughness },
+          captureUpdate: CaptureUpdateAction.NEVER,
+        });
+        return;
+      }
+    } else {
+      activeToolTypeRef.current = activeToolType;
+    }
     const containsBlockedContent = elements.some(
       (element) =>
         element.type === "embeddable" ||
         element.type === "iframe" ||
         element.type === "magicframe" ||
-        !!element.link,
+        (!!element.link && !sanitizeWebLink(element.link)),
     );
     if (containsBlockedContent) {
       const safeElements = elements
@@ -363,10 +399,12 @@ export default function App() {
             element.type !== "iframe" &&
             element.type !== "magicframe",
         )
-        .map((element) => element.link ? { ...element, link: null } : element) as readonly ExcalidrawElement[];
+        .map((element) => element.link && !sanitizeWebLink(element.link)
+          ? { ...element, link: null }
+          : element) as readonly ExcalidrawElement[];
       switchingSceneRef.current = true;
       api?.updateScene({ elements: safeElements, captureUpdate: CaptureUpdateAction.NEVER });
-      api?.setToast({ message: "Web links, embeds, and generated frames are disabled." });
+      api?.setToast({ message: "Only HTTP and HTTPS links are allowed. Web embeds remain disabled." });
       window.requestAnimationFrame(() => { switchingSceneRef.current = false; });
       return;
     }
@@ -705,7 +743,7 @@ export default function App() {
       inkWidth: DEFAULT_PRESENTATION_INK_WIDTH,
     });
     api.setToast(null);
-    api.updateFrameRendering({ outline: false, name: false, clip: true });
+    api.updateFrameRendering({ enabled: true, outline: false, name: false, clip: true });
     api.setActiveTool({ type: "laser" });
     setPresentationIndex(index);
     try { await shellRef.current?.requestFullscreen(); } catch { /* Fullscreen can be browser-blocked. */ }
@@ -724,13 +762,21 @@ export default function App() {
 
     let refreshFrame = 0;
     let focusFrame = 0;
-    refreshFrame = window.requestAnimationFrame(() => {
-      api.refresh();
-      focusFrame = window.requestAnimationFrame(() => {
-        focusSlide(api, presentationSlide.frameId, false);
+    const fitSlide = () => {
+      window.cancelAnimationFrame(refreshFrame);
+      window.cancelAnimationFrame(focusFrame);
+      refreshFrame = window.requestAnimationFrame(() => {
+        api.updateFrameRendering({ enabled: true, outline: false, name: false, clip: true });
+        api.refresh();
+        focusFrame = window.requestAnimationFrame(() => {
+          focusSlide(api, presentationSlide.frameId, false);
+        });
       });
-    });
+    };
+    fitSlide();
+    window.addEventListener("resize", fitSlide);
     return () => {
+      window.removeEventListener("resize", fitSlide);
       window.cancelAnimationFrame(refreshFrame);
       window.cancelAnimationFrame(focusFrame);
     };
@@ -738,7 +784,13 @@ export default function App() {
 
   const stopPresentation = useCallback(() => {
     setPresentation(null);
-    api?.updateFrameRendering({ outline: true, name: true, clip: false });
+    api?.updateFrameRendering({
+      enabled: slideFramesVisibleRef.current,
+      outline: true,
+      name: true,
+      clip: false,
+    });
+    setAreSlideFramesVisible(slideFramesVisibleRef.current);
     api?.setActiveTool({ type: "selection" });
     if (document.fullscreenElement) void document.exitFullscreen();
   }, [api]);
@@ -795,8 +847,24 @@ export default function App() {
 
   const syncPresentationInkOnPointerDown = useCallback(() => {
     if (!api || presentation?.tool !== "freedraw") return;
+    presentationInkStartElementIdsRef.current = new Set(api.getSceneElements().map((element) => element.id));
     activatePresentationInk(api, presentation.inkColour, presentation.inkWidth);
   }, [api, presentation?.inkColour, presentation?.inkWidth, presentation?.tool]);
+
+  const finishPresentationInkStroke = useCallback(() => {
+    const elementIdsBeforeStroke = presentationInkStartElementIdsRef.current;
+    presentationInkStartElementIdsRef.current = null;
+    if (!api || !elementIdsBeforeStroke || presentation?.tool !== "freedraw") return;
+    window.requestAnimationFrame(() => {
+      const elements = api.getSceneElements();
+      const promoted = promoteNewPresentationInk(elements, elementIdsBeforeStroke);
+      if (promoted === elements) return;
+      api.updateScene({
+        elements: promoted,
+        captureUpdate: CaptureUpdateAction.NEVER,
+      });
+    });
+  }, [api, presentation?.tool]);
 
   const currentScene = project ? project.scenes[project.activeSceneId] : null;
   const pdfScenes = useMemo(() => project
@@ -805,6 +873,30 @@ export default function App() {
   const pageIndex = currentScene?.pdfPage
     ? pdfScenes.findIndex((scene) => scene.id === currentScene.id)
     : -1;
+
+  useEffect(() => {
+    if (workspaceMode !== "pdf" || presentation || pageIndex < 0) return;
+    const navigatePdfWithArrowKeys = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented
+        || event.altKey
+        || event.ctrlKey
+        || event.metaKey
+        || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")
+      ) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest(
+        'input, textarea, select, button, [contenteditable="true"], [role="textbox"], [role="dialog"], [role="menu"], [role="listbox"], [role="separator"]',
+      )) return;
+      const nextIndex = pageIndex + (event.key === "ArrowLeft" ? -1 : 1);
+      const nextPage = pdfScenes[nextIndex];
+      if (!nextPage) return;
+      event.preventDefault();
+      openScene(nextPage.id);
+    };
+    window.addEventListener("keydown", navigatePdfWithArrowKeys, true);
+    return () => window.removeEventListener("keydown", navigatePdfWithArrowKeys, true);
+  }, [openScene, pageIndex, pdfScenes, presentation, workspaceMode]);
 
   useEffect(() => {
     if (!api || workspaceMode !== "pdf" || !currentScene?.pdfPage) return;
@@ -1081,11 +1173,6 @@ export default function App() {
   }, [currentScene?.pdfPage, project]);
 
   const handlePaste = useCallback<NonNullable<ExcalidrawProps["onPaste"]>>((_data, event) => {
-    const text = event?.clipboardData?.getData("text/plain")?.trim();
-    if (text && isRemoteUrl(text)) {
-      api?.setToast({ message: "Web links and remote embeds are disabled in the classroom build." });
-      return false;
-    }
     const html = event?.clipboardData?.getData("text/html");
     if (html && /<(?:iframe|script|object|embed)\b/i.test(html)) {
       api?.setToast({ message: "Embedded web content is disabled." });
@@ -1094,9 +1181,16 @@ export default function App() {
     return true;
   }, [api]);
 
-  const handleLinkOpen = useCallback<NonNullable<ExcalidrawProps["onLinkOpen"]>>((_element, event) => {
+  const handleLinkOpen = useCallback<NonNullable<ExcalidrawProps["onLinkOpen"]>>((element, event) => {
     event.preventDefault();
-    api?.setToast({ message: "Web links are disabled in the classroom build." });
+    const link = sanitizeWebLink(element.link);
+    if (!link) {
+      api?.setToast({ message: "Only HTTP and HTTPS links can be opened." });
+      return;
+    }
+    if (!openExternalWebLink(link)) {
+      api?.setToast({ message: "The browser blocked this link. Allow pop-ups to open it." });
+    }
   }, [api]);
 
   if (!project || !currentScene) return <div className="loading-screen">Opening Canvas Classroom…</div>;
@@ -1156,6 +1250,8 @@ export default function App() {
         className="editor-region"
         data-presentation-zoom={presentation ? zoom : undefined}
         onPointerDownCapture={syncPresentationInkOnPointerDown}
+        onPointerUp={finishPresentationInkStroke}
+        onPointerCancel={finishPresentationInkStroke}
       >
         {!presentation && !isNavigationVisible && (
           <button

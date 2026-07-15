@@ -17,6 +17,18 @@ export function isRemoteUrl(value: unknown): boolean {
   );
 }
 
+export function sanitizeWebLink(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const candidate = value.trim();
+  if (!candidate) return null;
+  try {
+    const url = new URL(candidate);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
 export function isSafeLocalImageSource(value: unknown): value is string {
   if (typeof value !== "string") return false;
   const candidate = value.trim();
@@ -50,7 +62,7 @@ export function sanitizeScene(scene: SerializedScene): SerializedScene {
     .filter((element) => element.type !== "embeddable" && element.type !== "iframe" && element.type !== "magicframe")
     .map((element) => {
       const next = { ...element };
-      if ("link" in next) next.link = null;
+      if ("link" in next) next.link = sanitizeWebLink(next.link);
       if ("customData" in next && next.customData && typeof next.customData === "object") {
         const customData = { ...(next.customData as Record<string, unknown>) };
         delete customData.url;

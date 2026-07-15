@@ -1,7 +1,11 @@
 import type { CaptureUpdateAction } from "@excalidraw/excalidraw";
+import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 
-type PresentationInkApi = Pick<ExcalidrawImperativeAPI, "getAppState" | "setActiveTool" | "updateScene">;
+type PresentationInkApi = Pick<
+  ExcalidrawImperativeAPI,
+  "getAppState" | "setActiveTool" | "updateFrameRendering" | "updateScene"
+>;
 
 export const PRESENTATION_INK_COLOURS = [
   { label: "Black", value: "#1b1b1f" },
@@ -31,12 +35,36 @@ export function presentationInkSceneWidth(screenWidth: PresentationInkWidth, zoo
   return screenWidth / Math.max(zoom, 0.01);
 }
 
+export function promoteNewPresentationInk(
+  elements: readonly ExcalidrawElement[],
+  elementIdsBeforeStroke: ReadonlySet<string>,
+): readonly ExcalidrawElement[] {
+  const newInkIds = new Set(
+    elements
+      .filter((element) => !element.isDeleted && element.type === "freedraw" && !elementIdsBeforeStroke.has(element.id))
+      .map((element) => element.id),
+  );
+  if (!newInkIds.size) return elements;
+  const ink = elements
+    .filter((element) => newInkIds.has(element.id))
+    .map((element) => element.frameId ? {
+      ...element,
+      frameId: null,
+      version: element.version + 1,
+    } as ExcalidrawElement : element);
+  return [
+    ...elements.filter((element) => !newInkIds.has(element.id)),
+    ...ink,
+  ];
+}
+
 export function activatePresentationInk(
   api: PresentationInkApi,
   colour: PresentationInkColour,
   screenWidth: PresentationInkWidth,
 ): void {
   const sceneWidth = presentationInkSceneWidth(screenWidth, api.getAppState().zoom.value);
+  api.updateFrameRendering({ clip: false });
   api.updateScene({
     appState: {
       currentItemStrokeColor: colour,

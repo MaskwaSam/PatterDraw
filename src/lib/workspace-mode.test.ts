@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ClassroomProject, SerializedScene } from "../types";
-import { boardSceneId, workspaceModeClassName } from "./workspace-mode";
+import { boardSceneId, projectForBoardStartup, workspaceModeClassName } from "./workspace-mode";
 
 describe("workspace mode layout", () => {
   it.each([
@@ -47,5 +47,20 @@ describe("board scene routing", () => {
 
   it("reports when a project contains only PDF pages", () => {
     expect(boardSceneId(project("page", { page: scene("page", true) }))).toBeNull();
+  });
+
+  it("opens an autosaved PDF-active project on its existing board scene", () => {
+    const saved = project("page", { page: scene("page", true), board: scene("board") });
+    const started = projectForBoardStartup(saved);
+    expect(started.activeSceneId).toBe("board");
+    expect(started.scenes.page).toBe(saved.scenes.page);
+  });
+
+  it("adds a board scene when an autosave contains only PDF pages", () => {
+    const saved = project("page", { page: scene("page", true) });
+    const started = projectForBoardStartup(saved);
+    expect(started.activeSceneId).not.toBe("page");
+    expect(started.scenes[started.activeSceneId]?.pdfPage).toBeUndefined();
+    expect(started.scenes.page).toBe(saved.scenes.page);
   });
 });
