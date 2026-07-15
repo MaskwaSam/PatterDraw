@@ -50,8 +50,8 @@ describe("semicircular protractor", () => {
     expect(document.querySelector('text[data-scale="counterclockwise"][data-angle-position="0"]')?.textContent).toBe("180");
     expect(document.querySelector('text[data-scale="clockwise"][data-angle-position="90"]')?.textContent).toBe("90");
     expect(document.querySelector('text[data-scale="counterclockwise"][data-angle-position="90"]')?.textContent).toBe("90");
-    expect(document.querySelector('[data-part="degree-labels"]')?.getAttribute("font-size")).toBe("16");
-    expect(document.querySelector('[data-part="caption"]')?.getAttribute("font-size")).toBe("16");
+    expect(document.querySelector('[data-part="degree-labels"]')?.getAttribute("font-size")).toBe("14");
+    expect(document.querySelector('[data-part="caption"]')?.getAttribute("font-size")).toBe("14");
   });
 
   it("creates a local SVG data URL without executable or linked content", () => {

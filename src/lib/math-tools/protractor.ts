@@ -81,14 +81,14 @@ export function createProtractorAsset(): ProtractorAsset {
     `<path data-part="inner-label-guide" d="${arcPath(PROTRACTOR_RADIUS_POINTS - 59)}" opacity="0.32"/>`,
     degreeTicks(),
     `</g>`,
-    `<g data-part="degree-labels" fill="#153f4a" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="650">${degreeLabels()}</g>`,
+    `<g data-part="degree-labels" fill="#153f4a" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="650">${degreeLabels()}</g>`,
     `<line data-part="baseline" x1="1" y1="${PROTRACTOR_RADIUS_POINTS}" x2="${PROTRACTOR_WIDTH_POINTS - 1}" y2="${PROTRACTOR_RADIUS_POINTS}" stroke="#174c58" stroke-width="1.4"/>`,
     `<g data-part="centre-mark" fill="none" stroke="#174c58" stroke-width="1.2">`,
     `<circle cx="${PROTRACTOR_RADIUS_POINTS}" cy="${PROTRACTOR_RADIUS_POINTS}" r="4.5" fill="#fff" fill-opacity="0.82"/>`,
     `<line x1="${PROTRACTOR_RADIUS_POINTS - 11}" y1="${PROTRACTOR_RADIUS_POINTS}" x2="${PROTRACTOR_RADIUS_POINTS + 11}" y2="${PROTRACTOR_RADIUS_POINTS}"/>`,
     `<line x1="${PROTRACTOR_RADIUS_POINTS}" y1="${PROTRACTOR_RADIUS_POINTS - 11}" x2="${PROTRACTOR_RADIUS_POINTS}" y2="${PROTRACTOR_RADIUS_POINTS}"/>`,
     `</g>`,
-    `<text data-part="caption" x="${PROTRACTOR_RADIUS_POINTS}" y="${PROTRACTOR_RADIUS_POINTS - 18}" text-anchor="middle" fill="#235866" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="700" letter-spacing="0.8">DEGREES</text>`,
+    `<text data-part="caption" x="${PROTRACTOR_RADIUS_POINTS}" y="${PROTRACTOR_RADIUS_POINTS - 18}" text-anchor="middle" fill="#235866" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" letter-spacing="0.8">DEGREES</text>`,
     `</svg>`,
   ].join("");
   return {

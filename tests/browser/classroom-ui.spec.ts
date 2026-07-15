@@ -1392,8 +1392,8 @@ test("inserts and persists a Letter-calibrated protractor from Math tools", asyn
   await expect.poll(() => autosavedMathToolSnapshot(page, "protractor")).toMatchObject({
     backgroundLocked: true,
     backgroundWidth: 612,
-    captionFontSize: "16",
-    degreeLabelFontSize: "16",
+    captionFontSize: "14",
+    degreeLabelFontSize: "14",
     fileMimeType: "image/svg+xml",
     height: 216,
     localSafeSvg: true,
@@ -1438,8 +1438,8 @@ test("inserts and persists a Letter-calibrated protractor from Math tools", asyn
   await page.getByRole("button", { name: "PDF", exact: true }).click();
   await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/);
   await expect.poll(() => autosavedMathToolSnapshot(page, "protractor")).toMatchObject({
-    captionFontSize: "16",
-    degreeLabelFontSize: "16",
+    captionFontSize: "14",
+    degreeLabelFontSize: "14",
     id: moved?.id,
     sceneId: moved?.sceneId,
     width: 432,
