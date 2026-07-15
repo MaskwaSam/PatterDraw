@@ -1,6 +1,12 @@
 import { expect, test } from "@playwright/test";
 import { PDFDocument } from "pdf-lib";
 
+async function enableExperimentalMathTools(page: import("@playwright/test").Page) {
+  const toggle = page.getByRole("switch", { name: "Experimental features" });
+  if (!await toggle.isChecked()) await toggle.check();
+  await expect(page.getByTestId("math-tool-instruments-tab")).toBeVisible();
+}
+
 async function dragOnBoard(page: import("@playwright/test").Page, startOffset: { x: number; y: number }, endOffset: { x: number; y: number }) {
   const bounds = await page.locator(".editor-host").boundingBox();
   if (!bounds) throw new Error("Editor host has no visible bounds.");
@@ -278,7 +284,7 @@ async function autosavedWorkspaceSummary(page: import("@playwright/test").Page):
 
 async function autosavedMathToolSnapshot(
   page: import("@playwright/test").Page,
-  kind: "protractor" | "ruler",
+  kind: "angle-measurement" | "cartesian-plane" | "compass" | "function-plot" | "geometry-stencil" | "grid" | "number-line" | "protractor" | "ruler" | "set-square" | "unit-circle",
 ): Promise<{
   backgroundLocked: boolean;
   backgroundWidth: number;
@@ -289,6 +295,9 @@ async function autosavedMathToolSnapshot(
   id: string;
   localSafeSvg: boolean;
   locked: boolean;
+  mathJaxAngleLabelCount: number;
+  mathJaxCoordinateLabelCount: number;
+  mathJaxPathCount: number;
   measurementLabelFontSize: string | null;
   metadata: Record<string, unknown>;
   pageWidth: number;
@@ -345,6 +354,9 @@ async function autosavedMathToolSnapshot(
       let degreeLabelFontSize: string | null = null;
       let measurementLabelFontSize: string | null = null;
       let scaleCaptionFontSize: string | null = null;
+      let mathJaxAngleLabelCount = 0;
+      let mathJaxCoordinateLabelCount = 0;
+      let mathJaxPathCount = 0;
       if (dataUrl.startsWith("data:image/svg+xml;base64,")) {
         try {
           svg = atob(dataUrl.slice(dataUrl.indexOf(",") + 1));
@@ -353,6 +365,9 @@ async function autosavedMathToolSnapshot(
           degreeLabelFontSize = svgDocument.querySelector('[data-part="degree-labels"]')?.getAttribute("font-size") || null;
           measurementLabelFontSize = svgDocument.querySelector('[data-part="measurement-labels"]')?.getAttribute("font-size") || null;
           scaleCaptionFontSize = svgDocument.querySelector('[data-part="scale-captions"]')?.getAttribute("font-size") || null;
+          mathJaxAngleLabelCount = svgDocument.querySelectorAll('svg[data-angle-label][data-label-renderer="mathjax"]').length;
+          mathJaxCoordinateLabelCount = svgDocument.querySelectorAll('svg[data-coordinate-label][data-label-renderer="mathjax"]').length;
+          mathJaxPathCount = svgDocument.querySelectorAll('svg[data-label-renderer="mathjax"] path').length;
         } catch {
           svg = "";
         }
@@ -372,6 +387,9 @@ async function autosavedMathToolSnapshot(
           && !/<(?:script|iframe|foreignObject)\b/i.test(svg)
           && !/\b(?:href|src)\s*=/i.test(svg),
         locked: Boolean(tool.locked),
+        mathJaxAngleLabelCount,
+        mathJaxCoordinateLabelCount,
+        mathJaxPathCount,
         measurementLabelFontSize,
         metadata,
         pageWidth: scene.pdfPage?.width || 0,
@@ -406,6 +424,149 @@ async function autosavedFrameVisibility(page: import("@playwright/test").Page): 
     if (!project) return null;
     return project.slideFramesVisible ?? null;
   });
+}
+
+async function autosavedMathToolSetSnapshot(
+  page: import("@playwright/test").Page,
+  kind: "algebra-tile" | "fraction-piece" | "integer-chip" | "probability-piece",
+): Promise<{
+  angles: number[];
+  count: number;
+  fileCount: number;
+  fileIds: string[];
+  independent: boolean;
+  lockedCount: number;
+  localSafe: boolean;
+  metadata: Record<string, unknown>[];
+  pieceIndexes: number[];
+  positions: Array<{ id: string; x: number; y: number }>;
+  setIds: string[];
+} | null> {
+  return page.evaluate(async (toolKind) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const project = await new Promise<{
+      activeSceneId: string;
+      scenes: Record<string, {
+        elements: Array<{
+          angle?: number;
+          customData?: { classroomMathTool?: Record<string, unknown> };
+          fileId?: string;
+          groupIds?: string[];
+          id: string;
+          isDeleted?: boolean;
+          locked?: boolean;
+          type?: string;
+          x?: number;
+          y?: number;
+        }>;
+        files: Record<string, { dataURL?: string; mimeType?: string }>;
+      }>;
+    } | undefined>((resolve, reject) => {
+      const transaction = database.transaction("keyval", "readonly");
+      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    if (!project) return null;
+    const scene = project.scenes[project.activeSceneId];
+    if (!scene) return null;
+    const elements = scene.elements.filter((element) =>
+      !element.isDeleted && element.type === "image" && element.customData?.classroomMathTool?.kind === toolKind,
+    );
+    const metadata = elements.map((element) => element.customData?.classroomMathTool || {});
+    const referencedFiles = new Set(elements.map((element) => element.fileId).filter(Boolean));
+    return {
+      angles: elements.map((element) => element.angle || 0),
+      count: elements.length,
+      fileCount: referencedFiles.size,
+      fileIds: elements.map((element) => element.fileId || ""),
+      independent: new Set(elements.map((element) => element.id)).size === elements.length && elements.every((element) => !element.groupIds?.length),
+      lockedCount: elements.filter((element) => element.locked).length,
+      localSafe: elements.every((element) => {
+        const file = element.fileId ? scene.files[element.fileId] : undefined;
+        const dataUrl = file?.dataURL || "";
+        if (file?.mimeType !== "image/svg+xml" || !dataUrl.startsWith("data:image/svg+xml;base64,")) return false;
+        const svg = atob(dataUrl.slice(dataUrl.indexOf(",") + 1));
+        return !/<(?:script|iframe|foreignObject)\b/i.test(svg) && !/\b(?:href|src)\s*=/i.test(svg);
+      }),
+      metadata,
+      pieceIndexes: metadata.map((item) => Number(item.pieceIndex)),
+      positions: elements.map((element) => ({ id: element.id, x: element.x || 0, y: element.y || 0 })),
+      setIds: [...new Set(metadata.map((item) => String(item.setId)))],
+    };
+  }, kind);
+}
+
+async function autosavedTransformationSnapshot(page: import("@playwright/test").Page): Promise<{
+  count: number;
+  finiteGeometry: boolean;
+  originalSourcesRemain: boolean;
+  rectangleCount: number;
+  transformationTypes: string[];
+} | null> {
+  return page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const project = await new Promise<{
+      activeSceneId: string;
+      scenes: Record<string, { elements: Array<{ customData?: { classroomMathTool?: Record<string, unknown> }; height?: number; id: string; isDeleted?: boolean; type?: string; width?: number; x?: number; y?: number }> }>;
+    } | undefined>((resolve, reject) => {
+      const transaction = database.transaction("keyval", "readonly");
+      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    if (!project) return null;
+    const elements = project.scenes[project.activeSceneId]?.elements.filter((element) => !element.isDeleted) || [];
+    const transformed = elements.filter((element) => element.customData?.classroomMathTool?.kind === "transformation");
+    const ids = new Set(elements.map((element) => element.id));
+    return {
+      count: transformed.length,
+      finiteGeometry: transformed.every((element) => [element.x, element.y, element.width, element.height].every((value) => typeof value === "number" && Number.isFinite(value) && (value === element.x || value === element.y || value > 0))),
+      originalSourcesRemain: transformed.every((element) => ids.has(String(element.customData?.classroomMathTool?.sourceElementId))),
+      rectangleCount: elements.filter((element) => element.type === "rectangle").length,
+      transformationTypes: transformed.map((element) => String(element.customData?.classroomMathTool?.transformationType)),
+    };
+  });
+}
+
+async function autosavedMathToolElementSummary(
+  page: import("@playwright/test").Page,
+  kind: string,
+): Promise<{ imageCount: number; nativeMinX: number; nativeEllipseCount: number; parts: string[] } | null> {
+  return page.evaluate(async (toolKind) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const project = await new Promise<{
+      activeSceneId: string;
+      scenes: Record<string, { elements: Array<{ customData?: { classroomMathTool?: { kind?: string }; classroomMathToolPart?: string }; isDeleted?: boolean; type?: string; x?: number }> }>;
+    } | undefined>((resolve, reject) => {
+      const request = database.transaction("keyval", "readonly").objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    if (!project) return null;
+    const elements = project.scenes[project.activeSceneId]?.elements.filter((element) => !element.isDeleted && element.customData?.classroomMathTool?.kind === toolKind) || [];
+    return {
+      imageCount: elements.filter((element) => element.type === "image").length,
+      nativeMinX: Math.min(...elements.filter((element) => element.type === "ellipse").map((element) => element.x || 0)),
+      nativeEllipseCount: elements.filter((element) => element.type === "ellipse").length,
+      parts: elements.map((element) => element.customData?.classroomMathToolPart || "image"),
+    };
+  }, kind);
 }
 
 async function autosavedSlideOverflow(page: import("@playwright/test").Page): Promise<{
@@ -1269,6 +1430,12 @@ test("inserts and persists a Letter-calibrated ruler from Math tools", async ({ 
   await expect(dialog).toBeVisible();
   const rulerButton = page.getByTestId("math-tool-ruler");
   const protractorButton = page.getByTestId("math-tool-protractor");
+  const experimentalToggle = page.getByRole("switch", { name: "Experimental features" });
+  await expect(experimentalToggle).not.toBeChecked();
+  await expect(page.getByTestId("math-tool-instruments-tab")).toHaveCount(0);
+  await expect(page.getByTestId("math-tool-set-square")).toHaveCount(0);
+  await expect(dialog).not.toContainText("Dual-scale ruler for calibrated PDF measurement");
+  await expect(dialog).not.toContainText("Inserted at 72 points per inch");
   await expect(rulerButton).toBeFocused();
   await expect(rulerButton.locator("img")).toHaveAttribute("src", /^data:image\/svg\+xml;base64,/);
   await expect(protractorButton.locator("img")).toHaveAttribute("src", /^data:image\/svg\+xml;base64,/);
@@ -1297,12 +1464,6 @@ test("inserts and persists a Letter-calibrated ruler from Math tools", async ({ 
   await expect(protractorButton).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(closeMathTools).toBeFocused();
-  await page.keyboard.press("Tab");
-  await expect(rulerButton).toBeFocused();
-  await page.keyboard.press("Shift+Tab");
-  await expect(closeMathTools).toBeFocused();
-  await page.keyboard.press("Shift+Tab");
-  await expect(protractorButton).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   await expect(extraToolsTrigger).toBeFocused();
@@ -1463,6 +1624,701 @@ test("inserts and persists a Letter-calibrated protractor from Math tools", asyn
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   expect(externalRequests).toEqual([]);
   expect(consoleErrors).toEqual([]);
+});
+
+test("configures, inserts, and persists the static advanced math-tool release", async ({ page }) => {
+  test.setTimeout(180_000);
+  const consoleErrors: string[] = [];
+  const externalRequests: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== "http://127.0.0.1:5173") externalRequests.push(request.url());
+  });
+
+  const openMathTools = async () => {
+    await page.locator(".App-toolbar__extra-tools-trigger").click();
+    await page.getByTestId("toolbar-math-tools").click();
+    await expect(page.getByRole("dialog", { name: "Math tools", exact: true })).toBeVisible();
+  };
+
+  await openMathTools();
+  const dialog = page.getByRole("dialog", { name: "Math tools", exact: true });
+  const experimentalToggle = page.getByRole("switch", { name: "Experimental features" });
+  await expect(experimentalToggle).not.toBeChecked();
+  await expect(page.getByTestId("math-tool-ruler")).toBeVisible();
+  await expect(page.getByTestId("math-tool-protractor")).toBeVisible();
+  await expect(page.getByTestId("math-tool-set-square")).toHaveCount(0);
+  await expect(page.getByTestId("math-tool-graphs-tab")).toHaveCount(0);
+  await experimentalToggle.check();
+  await expect(page.getByTestId("math-tool-set-square")).toBeVisible();
+  await page.getByRole("button", { name: "Close math tools" }).click();
+  await openMathTools();
+  await expect(experimentalToggle).toBeChecked();
+  await expect(page.getByTestId("math-tool-instruments-tab")).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByTestId("math-tool-graphs-tab")).toHaveAttribute("aria-selected", "false");
+  await expect(page.getByTestId("math-tool-manipulatives-tab")).toHaveAttribute("aria-selected", "false");
+  await page.getByTestId("math-tool-instruments-tab").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByTestId("math-tool-graphs-tab")).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByTestId("math-tool-manipulatives-tab")).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Home");
+  await expect(page.getByTestId("math-tool-instruments-tab")).toHaveAttribute("aria-selected", "true");
+  await experimentalToggle.uncheck();
+  await expect(page.getByTestId("math-tool-set-square")).toHaveCount(0);
+  await expect(page.getByTestId("math-tool-graphs-tab")).toHaveCount(0);
+  await experimentalToggle.check();
+  await page.getByTestId("math-tool-set-square").click();
+  const setSquareForm = page.getByTestId("math-tool-config-set-square");
+  await expect(setSquareForm).toBeVisible();
+  await setSquareForm.getByLabel("Triangle").selectOption("30-60-90");
+  await expect(setSquareForm.locator("img")).toHaveAttribute("src", /^data:image\/svg\+xml;base64,/);
+  await setSquareForm.getByRole("button", { name: "Insert", exact: true }).click();
+  await expect.poll(() => autosavedMathToolSnapshot(page, "set-square")).toMatchObject({
+    fileMimeType: "image/svg+xml",
+    localSafeSvg: true,
+    metadata: { kind: "set-square", category: "instruments", variant: "30-60-90", calibration: "pdf-points", sceneUnitsPerInch: 72 },
+  });
+
+  await openMathTools();
+  await page.getByTestId("math-tool-geometry-stencil").click();
+  await expect.poll(() => autosavedMathToolSnapshot(page, "geometry-stencil")).toMatchObject({
+    localSafeSvg: true,
+    metadata: { kind: "geometry-stencil", category: "instruments", stencilVersion: 1, calibration: "pdf-points" },
+  });
+
+  await openMathTools();
+  await page.getByTestId("math-tool-graphs-tab").click();
+  await expect(page.getByTestId("math-tool-graphs-tab")).toHaveAttribute("aria-selected", "true");
+  for (const id of ["cartesian-plane", "number-line", "unit-circle", "function-plotter", "grid", "transformation-tool"]) {
+    await expect(page.getByTestId(`math-tool-${id}`).locator("img")).toHaveAttribute("src", /^data:image\/svg\+xml;base64,/);
+  }
+  await page.getByTestId("math-tool-cartesian-plane").click();
+  const planeForm = page.getByTestId("math-tool-config-cartesian-plane");
+  await planeForm.getByLabel("x maximum").fill("-10");
+  await expect(planeForm.getByRole("alert")).toContainText("minimum must be less");
+  await expect(planeForm.getByRole("button", { name: "Insert", exact: true })).toBeDisabled();
+  await planeForm.getByLabel("x maximum").fill("6");
+  await planeForm.getByLabel("x minimum").fill("0");
+  await planeForm.getByLabel("y minimum").fill("0");
+  await planeForm.getByLabel("y maximum").fill("8");
+  await planeForm.getByRole("button", { name: "Insert", exact: true }).click();
+  await expect.poll(() => autosavedMathToolSnapshot(page, "cartesian-plane")).toMatchObject({
+    localSafeSvg: true,
+    metadata: { kind: "cartesian-plane", category: "graphs", xMin: 0, xMax: 6, yMin: 0, yMax: 8, showQuadrantLabels: true, calibration: "logical-units" },
+  });
+
+  await openMathTools();
+  await page.getByTestId("math-tool-graphs-tab").click();
+  await page.getByTestId("math-tool-number-line").click();
+  const numberLineForm = page.getByTestId("math-tool-config-number-line");
+  await numberLineForm.getByLabel("Minimum").fill("-2");
+  await numberLineForm.getByLabel("Maximum").fill("2");
+  await numberLineForm.getByLabel("Major step").fill("0.5");
+  await numberLineForm.getByLabel("Label format").selectOption("fraction");
+  await numberLineForm.getByRole("button", { name: "Insert", exact: true }).click();
+  await expect.poll(() => autosavedMathToolSnapshot(page, "number-line")).toMatchObject({
+    localSafeSvg: true,
+    metadata: { kind: "number-line", category: "graphs", minimum: -2, maximum: 2, majorStep: 0.5, labelFormat: "fraction" },
+  });
+
+  await openMathTools();
+  await page.getByTestId("math-tool-graphs-tab").click();
+  await page.getByTestId("math-tool-unit-circle").click();
+  const unitCircleForm = page.getByTestId("math-tool-config-unit-circle");
+  await unitCircleForm.getByRole("button", { name: "Insert", exact: true }).click();
+  await expect.poll(() => autosavedMathToolSnapshot(page, "unit-circle")).toMatchObject({
+    localSafeSvg: true,
+    mathJaxAngleLabelCount: 16,
+    mathJaxCoordinateLabelCount: 16,
+    metadata: { kind: "unit-circle", category: "graphs", labelMode: "both", showCoordinates: true },
+  });
+  expect((await autosavedMathToolSnapshot(page, "unit-circle"))?.mathJaxPathCount).toBeGreaterThan(0);
+
+  await openMathTools();
+  await page.getByTestId("math-tool-graphs-tab").click();
+  await page.getByTestId("math-tool-function-plotter").click();
+  const functionForm = page.getByTestId("math-tool-config-function-plot");
+  await functionForm.getByLabel("Function y =").fill("window.alert(1)");
+  await expect(functionForm.getByRole("alert")).toContainText("Assignments");
+  await expect(functionForm.getByRole("button", { name: "Insert", exact: true })).toBeDisabled();
+  await functionForm.getByLabel("Function y =").fill("sin(x) + x/4");
+  await functionForm.getByRole("button", { name: "Insert", exact: true }).click();
+  await expect.poll(() => autosavedMathToolSnapshot(page, "function-plot")).toMatchObject({
+    localSafeSvg: true,
+    metadata: { kind: "function-plot", category: "graphs", expression: "sin(x)+x/4", parserVersion: 1, sampleCount: 401 },
+  });
+  const originalFunctionPlot = await autosavedMathToolSnapshot(page, "function-plot");
+
+  await openMathTools();
+  const functionEditForm = page.getByTestId("math-tool-config-function-plot");
+  await expect(functionEditForm.getByLabel("Function y =")).toHaveValue("sin(x)+x/4");
+  await functionEditForm.getByLabel("Function y =").fill("cos(x)");
+  await functionEditForm.getByRole("button", { name: "Update", exact: true }).click();
+  await expect.poll(() => autosavedMathToolSnapshot(page, "function-plot")).toMatchObject({
+    id: originalFunctionPlot?.id,
+    localSafeSvg: true,
+    metadata: { kind: "function-plot", expression: "cos(x)", parserVersion: 1, sampleCount: 401 },
+  });
+
+  await openMathTools();
+  await page.getByRole("button", { name: "All tools", exact: false }).click();
+  await page.getByTestId("math-tool-graphs-tab").click();
+  await page.getByTestId("math-tool-grid").click();
+  const gridForm = page.getByTestId("math-tool-config-grid");
+  await gridForm.getByLabel("Grid type").selectOption("polar");
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobileDialogBox = await dialog.boundingBox();
+  expect(mobileDialogBox).not.toBeNull();
+  expect((mobileDialogBox?.x || 0) + (mobileDialogBox?.width || 0)).toBeLessThanOrEqual(390);
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await gridForm.getByRole("button", { name: "Insert", exact: true }).click();
+  await expect.poll(() => autosavedMathToolSnapshot(page, "grid")).toMatchObject({
+    localSafeSvg: true,
+    metadata: { kind: "grid", category: "graphs", variant: "polar", rings: 8, rays: 24 },
+  });
+
+  await page.reload();
+  for (const kind of ["set-square", "geometry-stencil", "cartesian-plane", "number-line", "unit-circle", "function-plot", "grid"] as const) {
+    await expect.poll(() => autosavedMathToolSnapshot(page, kind)).not.toBeNull();
+  }
+
+  const saveDownload = page.waitForEvent("download");
+  await page.getByTitle("Download a complete classroom project").click();
+  const savedProjectStream = await (await saveDownload).createReadStream();
+  const savedProjectChunks: Buffer[] = [];
+  for await (const chunk of savedProjectStream) savedProjectChunks.push(Buffer.from(chunk));
+  const savedProject = Buffer.concat(savedProjectChunks);
+  expect(savedProject.byteLength).toBeGreaterThan(1_000);
+
+  await page.reload();
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "advanced-static-math-tools.canvasclassroom",
+    mimeType: "application/vnd.canvas-classroom+zip",
+    buffer: savedProject,
+  });
+  for (const kind of ["set-square", "geometry-stencil", "cartesian-plane", "number-line", "unit-circle", "function-plot", "grid"] as const) {
+    await expect.poll(() => autosavedMathToolSnapshot(page, kind)).not.toBeNull();
+  }
+
+  const boardDownload = page.waitForEvent("download");
+  await page.locator(".export-split > button").first().click();
+  const boardExport = await boardDownload;
+  expect(boardExport.suggestedFilename()).toMatch(/full-board\.png$/);
+  const boardStream = await boardExport.createReadStream();
+  const boardChunks: Buffer[] = [];
+  for await (const chunk of boardStream) boardChunks.push(Buffer.from(chunk));
+  expect(Buffer.concat(boardChunks).byteLength).toBeGreaterThan(1_000);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
+  expect(externalRequests).toEqual([]);
+});
+
+test("batch-inserts independent fraction, algebra, integer, and probability manipulatives", async ({ page }) => {
+  test.setTimeout(90_000);
+  const consoleErrors: string[] = [];
+  const externalRequests: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== "http://127.0.0.1:5173") externalRequests.push(request.url());
+  });
+
+  const openManipulatives = async () => {
+    await page.locator(".App-toolbar__extra-tools-trigger").click();
+    await page.getByTestId("toolbar-math-tools").click();
+    await enableExperimentalMathTools(page);
+    await page.getByTestId("math-tool-manipulatives-tab").click();
+  };
+
+  await openManipulatives();
+  for (const id of ["fraction-kit", "algebra-tiles", "integer-chips", "probability-kit"]) {
+    await expect(page.getByTestId(`math-tool-${id}`).locator("img")).toHaveAttribute("src", /^data:image\/svg\+xml;base64,/);
+  }
+  await page.getByTestId("math-tool-fraction-kit").click();
+  const fractionForm = page.getByTestId("math-tool-config-fraction-piece");
+  await fractionForm.getByLabel("Representation").selectOption("circle");
+  await fractionForm.getByLabel("Maximum denominator").fill("4");
+  await fractionForm.getByRole("button", { name: "Insert", exact: true }).click();
+  await expect.poll(() => autosavedMathToolSetSnapshot(page, "fraction-piece")).toMatchObject({
+    count: 10,
+    independent: true,
+    localSafe: true,
+    pieceIndexes: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  });
+  expect((await autosavedMathToolSetSnapshot(page, "fraction-piece"))?.setIds).toHaveLength(1);
+
+  await page.locator(".editor-host .excalidraw").focus();
+  await page.keyboard.press("Meta+z");
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "fraction-piece"))?.count || 0).toBe(0);
+  await page.keyboard.press("Meta+Shift+z");
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "fraction-piece"))?.count || 0).toBe(10);
+
+  const beforeIndividualEdit = await autosavedMathToolSetSnapshot(page, "fraction-piece");
+  await page.locator(".editor-host .excalidraw").focus();
+  await page.keyboard.press("Escape");
+  const editorBox = await page.locator(".editor-host").boundingBox();
+  if (!editorBox) throw new Error("Editor host has no visible bounds.");
+  await page.mouse.click(
+    editorBox.x + editorBox.width / 2 - (3 * 122 + 108) / 2 + 54,
+    editorBox.y + editorBox.height / 2 - (2 * 122 + 108) / 2 + 54,
+  );
+  await page.keyboard.press("Shift+ArrowRight");
+  await expect.poll(async () => {
+    const after = await autosavedMathToolSetSnapshot(page, "fraction-piece");
+    return after?.positions.filter((position, index) => position.x !== beforeIndividualEdit?.positions[index]?.x || position.y !== beforeIndividualEdit?.positions[index]?.y).length || 0;
+  }).toBe(1);
+  await page.keyboard.press("Meta+Shift+l");
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "fraction-piece"))?.lockedCount || 0).toBe(1);
+  await page.keyboard.press("Meta+Shift+l");
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "fraction-piece"))?.lockedCount || 0).toBe(0);
+
+  await openManipulatives();
+  await page.getByTestId("math-tool-algebra-tiles").click();
+  const algebraForm = page.getByTestId("math-tool-config-algebra-tile");
+  await algebraForm.getByLabel("Positive units").fill("2");
+  await algebraForm.getByLabel("Negative units").fill("1");
+  await algebraForm.getByLabel("Positive x tiles").fill("1");
+  await algebraForm.getByLabel("Negative x tiles").fill("1");
+  await algebraForm.getByLabel("Positive x² tiles").fill("1");
+  await algebraForm.getByLabel("Negative x² tiles").fill("0");
+  await algebraForm.getByRole("button", { name: "Insert", exact: true }).click();
+  await expect.poll(() => autosavedMathToolSetSnapshot(page, "algebra-tile")).toMatchObject({ count: 6, independent: true, localSafe: true });
+
+  await openManipulatives();
+  await page.getByTestId("math-tool-integer-chips").click();
+  const chipForm = page.getByTestId("math-tool-config-integer-chip");
+  await chipForm.getByLabel("Positive chips").fill("4");
+  await chipForm.getByLabel("Negative chips").fill("3");
+  await chipForm.getByRole("button", { name: "Insert", exact: true }).click();
+  await expect.poll(() => autosavedMathToolSetSnapshot(page, "integer-chip")).toMatchObject({ count: 7, independent: true, localSafe: true });
+
+  await openManipulatives();
+  await page.getByTestId("math-tool-probability-kit").click();
+  const probabilityForm = page.getByTestId("math-tool-config-probability-piece");
+  await probabilityForm.getByLabel("Cards 1–10").check();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const dialog = page.getByRole("dialog", { name: "Math tools", exact: true });
+  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await probabilityForm.getByRole("button", { name: "Insert", exact: true }).click();
+  await expect.poll(() => autosavedMathToolSetSnapshot(page, "probability-piece")).toMatchObject({ count: 19, independent: true, localSafe: true });
+
+  await page.reload();
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "fraction-piece"))?.count || 0).toBe(10);
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "algebra-tile"))?.count || 0).toBe(6);
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "integer-chip"))?.count || 0).toBe(7);
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.count || 0).toBe(19);
+
+  const saveDownload = page.waitForEvent("download");
+  await page.getByTitle("Download a complete classroom project").click();
+  const savedProjectStream = await (await saveDownload).createReadStream();
+  const savedProjectChunks: Buffer[] = [];
+  for await (const chunk of savedProjectStream) savedProjectChunks.push(Buffer.from(chunk));
+  const savedProject = Buffer.concat(savedProjectChunks);
+  expect(savedProject.byteLength).toBeGreaterThan(1_000);
+
+  await page.reload();
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "advanced-manipulatives.canvasclassroom",
+    mimeType: "application/vnd.canvas-classroom+zip",
+    buffer: savedProject,
+  });
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "fraction-piece"))?.count || 0).toBe(10);
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "algebra-tile"))?.count || 0).toBe(6);
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "integer-chip"))?.count || 0).toBe(7);
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.count || 0).toBe(19);
+
+  const boardDownload = page.waitForEvent("download");
+  await page.locator(".export-split > button").first().click();
+  const boardExport = await boardDownload;
+  expect(boardExport.suggestedFilename()).toMatch(/full-board\.png$/);
+  const boardStream = await boardExport.createReadStream();
+  const boardChunks: Buffer[] = [];
+  for await (const chunk of boardStream) boardChunks.push(Buffer.from(chunk));
+  expect(Buffer.concat(boardChunks).byteLength).toBeGreaterThan(1_000);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
+  expect(externalRequests).toEqual([]);
+});
+
+test("rolls selected dice and flips selected coins locally in one undoable update", async ({ page }) => {
+  test.setTimeout(75_000);
+  const consoleErrors: string[] = [];
+  const externalRequests: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== "http://127.0.0.1:5173") externalRequests.push(request.url());
+  });
+
+  const openProbabilityKit = async () => {
+    await page.locator(".App-toolbar__extra-tools-trigger").click();
+    await page.getByTestId("toolbar-math-tools").click();
+    await enableExperimentalMathTools(page);
+    await page.getByTestId("math-tool-manipulatives-tab").click();
+    await page.getByTestId("math-tool-probability-kit").click();
+    return page.getByTestId("math-tool-config-probability-piece");
+  };
+
+  let form = await openProbabilityKit();
+  await form.getByLabel("Heads and tails").uncheck();
+  await form.getByLabel("Eight-sector spinner").uncheck();
+  await form.getByRole("button", { name: "Insert", exact: true }).click();
+
+  const randomize = page.getByTestId("probability-randomize-selected");
+  await expect(randomize).toHaveText(/Roll selected/);
+  await expect(page.getByRole("toolbar", { name: "Selected probability pieces" })).toContainText("6 dice selected");
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.count || 0).toBe(6);
+  const beforeRoll = await autosavedMathToolSetSnapshot(page, "probability-piece");
+  await randomize.click();
+  await expect(page.getByText(/Rolled 6 dice:/)).toBeVisible();
+  await expect.poll(async () => {
+    const snapshot = await autosavedMathToolSetSnapshot(page, "probability-piece");
+    return snapshot?.metadata.every((metadata) => metadata.componentType !== "die" || /^[1-6]$/.test(String(metadata.faceOrValue))) && snapshot.fileIds.every((fileId, index) => fileId !== beforeRoll?.fileIds[index]);
+  }).toBe(true);
+  const afterRoll = await autosavedMathToolSetSnapshot(page, "probability-piece");
+
+  await page.locator(".editor-host .excalidraw").focus();
+  await page.keyboard.press("Meta+z");
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.fileIds).toEqual(beforeRoll?.fileIds);
+  await page.keyboard.press("Meta+Shift+z");
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.fileIds).toEqual(afterRoll?.fileIds);
+
+  form = await openProbabilityKit();
+  await form.getByLabel("Six die faces").uncheck();
+  await form.getByLabel("Eight-sector spinner").uncheck();
+  await form.getByRole("button", { name: "Insert", exact: true }).click();
+  await expect(randomize).toHaveText(/Flip selected/);
+  await expect(page.getByRole("toolbar", { name: "Selected probability pieces" })).toContainText("2 coins selected");
+  await randomize.click();
+  await expect(page.getByText(/Flipped 2 coins:/)).toBeVisible();
+  await expect.poll(async () => {
+    const snapshot = await autosavedMathToolSetSnapshot(page, "probability-piece");
+    return snapshot?.metadata.filter((metadata) => metadata.componentType === "coin").every((metadata) => ["Heads", "Tails"].includes(String(metadata.faceOrValue)));
+  }).toBe(true);
+
+  await page.locator(".editor-host .excalidraw").focus();
+  await page.keyboard.press("Meta+a");
+  await expect(randomize).toHaveText(/Randomize selected/);
+  await expect(page.getByRole("toolbar", { name: "Selected probability pieces" })).toContainText("6 dice and 2 coins selected");
+  await page.setViewportSize({ width: 390, height: 844 });
+  const toolbarBox = await page.getByRole("toolbar", { name: "Selected probability pieces" }).boundingBox();
+  expect(toolbarBox).not.toBeNull();
+  expect((toolbarBox?.x || 0) + (toolbarBox?.width || 0)).toBeLessThanOrEqual(390);
+  const beforeMixedRandomize = await autosavedMathToolSetSnapshot(page, "probability-piece");
+  await randomize.click();
+  await expect(page.getByText(/Randomized 6 dice and 2 coins:/)).toBeVisible();
+  await expect.poll(async () => {
+    const snapshot = await autosavedMathToolSetSnapshot(page, "probability-piece");
+    return snapshot?.fileIds.every((fileId, index) => fileId !== beforeMixedRandomize?.fileIds[index]);
+  }).toBe(true);
+
+  await page.reload();
+  await expect.poll(async () => {
+    const snapshot = await autosavedMathToolSetSnapshot(page, "probability-piece");
+    const diceValid = snapshot?.metadata.filter((metadata) => metadata.componentType === "die").every((metadata) => /^[1-6]$/.test(String(metadata.faceOrValue)));
+    const coinsValid = snapshot?.metadata.filter((metadata) => metadata.componentType === "coin").every((metadata) => ["Heads", "Tails"].includes(String(metadata.faceOrValue)));
+    return snapshot?.count === 8 && snapshot.localSafe && diceValid && coinsValid;
+  }).toBe(true);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
+  expect(externalRequests).toEqual([]);
+});
+
+test("animates a selected spinner and persists its numbered result", async ({ page }) => {
+  test.setTimeout(60_000);
+  const consoleErrors: string[] = [];
+  const externalRequests: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== "http://127.0.0.1:5173") externalRequests.push(request.url());
+  });
+
+  await page.locator(".App-toolbar__extra-tools-trigger").click();
+  await page.getByTestId("toolbar-math-tools").click();
+  await enableExperimentalMathTools(page);
+  await page.getByTestId("math-tool-manipulatives-tab").click();
+  await page.getByTestId("math-tool-probability-kit").click();
+  const form = page.getByTestId("math-tool-config-probability-piece");
+  await form.getByLabel("Six die faces").uncheck();
+  await form.getByLabel("Heads and tails").uncheck();
+  await form.getByRole("button", { name: "Insert", exact: true }).click();
+
+  const toolbar = page.getByRole("toolbar", { name: "Selected probability pieces" });
+  const spin = page.getByTestId("probability-randomize-selected");
+  await expect(toolbar).toContainText("1 spinner selected");
+  await expect(spin).toHaveText(/Spin selected/);
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.count || 0).toBe(1);
+  const beforeSpin = await autosavedMathToolSetSnapshot(page, "probability-piece");
+  expect(beforeSpin?.metadata[0]).toMatchObject({ componentType: "spinner", faceOrValue: "1-8", spinnerSectorCount: 8 });
+
+  await spin.click();
+  await expect(spin).toBeDisabled();
+  await expect(spin).toHaveText(/Spinning/);
+  await expect(toolbar).toHaveAttribute("aria-busy", "true");
+  const pointerOverlay = page.getByTestId("spinner-pointer-animation");
+  const pointerLayer = pointerOverlay.locator(".spinner-pointer-overlay__pointer");
+  await expect(pointerOverlay).toBeVisible();
+  await expect(pointerOverlay.locator(".spinner-pointer-overlay__wheel")).toHaveCSS("transform", "none");
+  const initialPointerTransform = await pointerLayer.evaluate((element) => getComputedStyle(element).transform);
+  await page.waitForTimeout(250);
+  await expect(spin).toBeDisabled();
+  const movingPointerTransform = await pointerLayer.evaluate((element) => getComputedStyle(element).transform);
+  expect(movingPointerTransform).not.toBe(initialPointerTransform);
+  await expect(page.getByText(/Spun 1 spinner: [1-8]\./)).toBeVisible();
+  await expect(pointerOverlay).toHaveCount(0);
+  await expect(spin).toBeEnabled();
+  await expect(spin).toHaveText(/Spin selected/);
+  await expect(toolbar).toHaveAttribute("aria-busy", "false");
+  await expect.poll(async () => {
+    const snapshot = await autosavedMathToolSetSnapshot(page, "probability-piece");
+    return snapshot?.fileIds[0] !== beforeSpin?.fileIds[0]
+      && /^[1-8]$/.test(String(snapshot?.metadata[0]?.faceOrValue))
+      && snapshot.localSafe;
+  }).toBe(true);
+  const afterSpin = await autosavedMathToolSetSnapshot(page, "probability-piece");
+  expect(afterSpin?.angles).toEqual(beforeSpin?.angles);
+
+  await page.locator(".editor-host .excalidraw").focus();
+  await page.keyboard.press("Meta+z");
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.fileIds).toEqual(beforeSpin?.fileIds);
+  await page.keyboard.press("Meta+Shift+z");
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.fileIds).toEqual(afterSpin?.fileIds);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const toolbarBox = await toolbar.boundingBox();
+  expect(toolbarBox).not.toBeNull();
+  expect((toolbarBox?.x || 0) + (toolbarBox?.width || 0)).toBeLessThanOrEqual(390);
+  await page.reload();
+  await expect.poll(async () => {
+    const snapshot = await autosavedMathToolSetSnapshot(page, "probability-piece");
+    return snapshot?.count === 1
+      && snapshot.localSafe
+      && snapshot.fileIds[0] === afterSpin?.fileIds[0]
+      && /^[1-8]$/.test(String(snapshot.metadata[0]?.faceOrValue));
+  }).toBe(true);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
+  expect(externalRequests).toEqual([]);
+});
+
+test("constructs compass arcs and measures angles in wrapper-owned board interaction mode", async ({ page }) => {
+  test.setTimeout(60_000);
+  const consoleErrors: string[] = [];
+  const externalRequests: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== "http://127.0.0.1:5173") externalRequests.push(request.url());
+  });
+
+  const openInstruments = async () => {
+    await page.locator(".App-toolbar__extra-tools-trigger").click();
+    await page.getByTestId("toolbar-math-tools").click();
+    await enableExperimentalMathTools(page);
+    await expect(page.getByTestId("math-tool-instruments-tab")).toHaveAttribute("aria-selected", "true");
+  };
+  const editor = page.locator(".editor-host");
+  const bounds = await editor.boundingBox();
+  if (!bounds) throw new Error("Editor host has no visible bounds.");
+
+  await openInstruments();
+  await page.getByTestId("math-tool-compass").click();
+  const compass = page.getByTestId("math-interaction-compass");
+  await expect(compass).toBeVisible();
+  await page.mouse.click(bounds.x + 260, bounds.y + 300);
+  await page.mouse.click(bounds.x + 380, bounds.y + 300);
+  await expect(compass).toContainText("2 of 2 points selected");
+  await compass.getByLabel("Full circle").uncheck();
+  await compass.getByLabel("Arc extent").fill("120");
+  await compass.getByLabel("Direction").selectOption("counterclockwise");
+  await compass.getByRole("button", { name: "Insert", exact: true }).click();
+  await expect(compass).toBeHidden();
+  await expect.poll(() => autosavedMathToolSnapshot(page, "compass")).toMatchObject({
+    localSafeSvg: true,
+    metadata: { kind: "compass", category: "instruments", calibration: "scene-geometry", fullCircle: false, direction: "counterclockwise", centerMark: true },
+  });
+  const compassSnapshot = await autosavedMathToolSnapshot(page, "compass");
+  expect(Number(compassSnapshot?.metadata.radiusSceneUnits)).toBeCloseTo(120, 0);
+  expect(Number(compassSnapshot?.metadata.endAngleDegrees) - Number(compassSnapshot?.metadata.startAngleDegrees)).toBeCloseTo(-120, 6);
+
+  await openInstruments();
+  await page.getByTestId("math-tool-angle-measurer").click();
+  const angle = page.getByTestId("math-interaction-angle-measurement");
+  await page.mouse.click(bounds.x + 300, bounds.y + 360);
+  await page.mouse.click(bounds.x + 420, bounds.y + 360);
+  await page.mouse.click(bounds.x + 300, bounds.y + 240);
+  await expect(angle).toContainText("3 of 3 points selected");
+  await angle.getByLabel("Decimal places").selectOption("0");
+  await angle.getByRole("button", { name: "Insert", exact: true }).click();
+  await expect.poll(() => autosavedMathToolSnapshot(page, "angle-measurement")).toMatchObject({
+    localSafeSvg: true,
+    metadata: { kind: "angle-measurement", category: "instruments", measuredDegrees: 90, precision: 0, reflex: false, commitAnnotation: true },
+  });
+
+  await openInstruments();
+  await page.getByTestId("math-tool-compass").click();
+  await page.mouse.click(bounds.x + 480, bounds.y + 300);
+  await page.mouse.click(bounds.x + 570, bounds.y + 300);
+  await page.getByTestId("math-interaction-compass").getByRole("button", { name: "Insert", exact: true }).click();
+  await expect.poll(() => autosavedMathToolElementSummary(page, "compass")).toMatchObject({
+    imageCount: 1,
+    nativeEllipseCount: 2,
+    parts: ["image", "construction", "center-mark"],
+  });
+  const beforeMove = await autosavedMathToolElementSummary(page, "compass");
+  await page.locator(".editor-host .excalidraw").focus();
+  await page.keyboard.press("Shift+ArrowRight");
+  await expect.poll(async () => (await autosavedMathToolElementSummary(page, "compass"))?.nativeMinX || 0).toBeGreaterThan(beforeMove?.nativeMinX || 0);
+
+  await openInstruments();
+  await page.getByTestId("math-tool-compass").click();
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect(page.getByTestId("math-interaction-compass")).toBeHidden();
+  await page.getByRole("button", { name: "Board", exact: true }).click();
+
+  await openInstruments();
+  await page.getByTestId("math-tool-compass").click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobilePanel = page.getByRole("dialog", { name: "Compass construction" });
+  const panelBox = await mobilePanel.boundingBox();
+  expect(panelBox).not.toBeNull();
+  expect((panelBox?.x || 0) + (panelBox?.width || 0)).toBeLessThanOrEqual(390);
+  await page.keyboard.press("Escape");
+  await expect(mobilePanel).toBeHidden();
+
+  await page.reload();
+  await expect.poll(() => autosavedMathToolSnapshot(page, "compass")).not.toBeNull();
+  await expect.poll(() => autosavedMathToolSnapshot(page, "angle-measurement")).not.toBeNull();
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
+  expect(externalRequests).toEqual([]);
+});
+
+test("constructs compass and angle annotations with touch input on mobile", async ({ browser }) => {
+  test.setTimeout(60_000);
+  const context = await browser.newContext({ baseURL: "http://127.0.0.1:5173", hasTouch: true, viewport: { width: 390, height: 844 } });
+  const page = await context.newPage();
+  const externalRequests: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== "http://127.0.0.1:5173") externalRequests.push(request.url());
+  });
+  await page.goto("/");
+  await page.locator(".editor-host .excalidraw").waitFor({ state: "visible" });
+  const editorBounds = await page.locator(".editor-host").boundingBox();
+  if (!editorBounds) throw new Error("Editor host has no visible mobile bounds.");
+
+  const openInstruments = async () => {
+    await page.locator(".App-toolbar__extra-tools-trigger").tap();
+    await page.getByTestId("toolbar-math-tools").tap();
+    await enableExperimentalMathTools(page);
+  };
+
+  await openInstruments();
+  await page.getByTestId("math-tool-compass").tap();
+  await page.touchscreen.tap(editorBounds.x + 110, editorBounds.y + 480);
+  await page.touchscreen.tap(editorBounds.x + 180, editorBounds.y + 480);
+  await page.getByTestId("math-interaction-compass").getByRole("button", { name: "Insert", exact: true }).tap();
+  await expect.poll(() => autosavedMathToolElementSummary(page, "compass")).toMatchObject({ nativeEllipseCount: 2 });
+
+  await openInstruments();
+  await page.getByTestId("math-tool-angle-measurer").tap();
+  await page.touchscreen.tap(editorBounds.x + 120, editorBounds.y + 520);
+  await page.touchscreen.tap(editorBounds.x + 200, editorBounds.y + 520);
+  await page.touchscreen.tap(editorBounds.x + 120, editorBounds.y + 420);
+  const anglePanel = page.getByTestId("math-interaction-angle-measurement");
+  await expect(anglePanel).toContainText("3 of 3 points selected");
+  await anglePanel.getByRole("button", { name: "Insert", exact: true }).tap();
+  await expect.poll(() => autosavedMathToolSnapshot(page, "angle-measurement")).toMatchObject({ metadata: { measuredDegrees: 90, unit: "degrees" } });
+  expect(externalRequests).toEqual([]);
+  await context.close();
+});
+
+test("copies selected objects through every supported transformation", async ({ page }) => {
+  test.setTimeout(75_000);
+  const consoleErrors: string[] = [];
+  const externalRequests: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== "http://127.0.0.1:5173") externalRequests.push(request.url());
+  });
+
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  await dragOnBoard(page, { x: 280, y: 220 }, { x: 400, y: 300 });
+
+  const openTransformation = async () => {
+    await page.locator(".App-toolbar__extra-tools-trigger").click();
+    await page.getByTestId("toolbar-math-tools").click();
+    await enableExperimentalMathTools(page);
+    await page.getByTestId("math-tool-graphs-tab").click();
+    await page.getByTestId("math-tool-transformation-tool").click();
+    const panel = page.getByTestId("math-interaction-transformation");
+    await expect(panel).toContainText("1 supported source object selected");
+    return panel;
+  };
+
+  let panel = await openTransformation();
+  await panel.getByLabel("Horizontal change").fill("150");
+  await panel.getByLabel("Vertical change").fill("40");
+  await panel.getByRole("button", { name: "Insert", exact: true }).click();
+  await expect.poll(() => autosavedTransformationSnapshot(page)).toMatchObject({ count: 1, rectangleCount: 2, finiteGeometry: true, originalSourcesRemain: true, transformationTypes: ["translate"] });
+
+  panel = await openTransformation();
+  await panel.getByRole("combobox", { name: "Transformation", exact: true }).selectOption("rotate");
+  await panel.getByLabel("Angle in degrees").fill("90");
+  await panel.getByRole("button", { name: "Insert", exact: true }).click();
+
+  panel = await openTransformation();
+  await panel.getByRole("combobox", { name: "Transformation", exact: true }).selectOption("reflect-vertical");
+  await panel.getByRole("button", { name: "Insert", exact: true }).click();
+
+  panel = await openTransformation();
+  await panel.getByRole("combobox", { name: "Transformation", exact: true }).selectOption("reflect-horizontal");
+  await panel.getByRole("button", { name: "Insert", exact: true }).click();
+
+  panel = await openTransformation();
+  await panel.getByRole("combobox", { name: "Transformation", exact: true }).selectOption("reflect-line");
+  await panel.getByLabel("Mirror line angle").fill("30");
+  await panel.getByRole("button", { name: "Insert", exact: true }).click();
+
+  panel = await openTransformation();
+  await panel.getByRole("combobox", { name: "Transformation", exact: true }).selectOption("dilate");
+  await panel.getByLabel("Scale factor").fill("1.5");
+  await panel.getByRole("button", { name: "Insert", exact: true }).click();
+  await expect.poll(() => autosavedTransformationSnapshot(page)).toMatchObject({
+    count: 6,
+    rectangleCount: 7,
+    finiteGeometry: true,
+    originalSourcesRemain: true,
+    transformationTypes: ["translate", "rotate", "reflect-vertical", "reflect-horizontal", "reflect-line", "dilate"],
+  });
+
+  panel = await openTransformation();
+  await panel.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(panel).toBeHidden();
+  await expect.poll(async () => (await autosavedTransformationSnapshot(page))?.count || 0).toBe(6);
+
+  await page.reload();
+  await expect.poll(() => autosavedTransformationSnapshot(page)).toMatchObject({ count: 6, rectangleCount: 7, finiteGeometry: true, originalSourcesRemain: true });
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
+  expect(externalRequests).toEqual([]);
 });
 
 test("navigates PDF pages with the left and right arrow keys", async ({ page }) => {

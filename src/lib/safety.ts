@@ -1,4 +1,5 @@
 import type { ClassroomProject, SerializedScene } from "../types";
+import { sanitizeClassroomMathToolMetadata } from "./math-tools/types";
 import { reconcilePdfPageOrder } from "./pdf/page-order";
 
 export const MAX_PROJECT_BYTES = 150 * 1024 * 1024;
@@ -67,6 +68,11 @@ export function sanitizeScene(scene: SerializedScene): SerializedScene {
         const customData = { ...(next.customData as Record<string, unknown>) };
         delete customData.url;
         delete customData.href;
+        if ("classroomMathTool" in customData) {
+          const mathTool = sanitizeClassroomMathToolMetadata(customData.classroomMathTool);
+          if (mathTool) customData.classroomMathTool = mathTool;
+          else delete customData.classroomMathTool;
+        }
         next.customData = customData;
       }
       return next;
@@ -122,6 +128,14 @@ export function assertSafeProject(project: ClassroomProject): void {
     if (!scene.id || !Array.isArray(scene.elements)) throw new Error("A scene is malformed.");
     if (scene.elements.some((element) => element.type === "embeddable" || element.type === "iframe" || element.type === "magicframe")) {
       throw new Error("Web embeds and generated frames are not supported in classroom projects.");
+    }
+    for (const element of scene.elements) {
+      const customData = element.customData;
+      if (customData && typeof customData === "object" && "classroomMathTool" in customData) {
+        if (!sanitizeClassroomMathToolMetadata((customData as Record<string, unknown>).classroomMathTool)) {
+          throw new Error("A math tool has invalid classroom metadata.");
+        }
+      }
     }
     if (scene.pdfPage) {
       const source = project.pdfDocuments[scene.pdfPage.documentId];

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ClassroomProject, SerializedScene } from "../types";
 import { assertSafeProject, sanitizeProject, sanitizeScene, sanitizeWebLink } from "./safety";
+import { MATH_TOOL_CATALOGUE } from "./math-tools/catalogue";
 
 const scene = (elements: readonly Record<string, unknown>[]): SerializedScene => ({
   id: "scene-1",
@@ -95,5 +96,29 @@ describe("student safety", () => {
       },
     } satisfies ClassroomProject;
     expect(() => assertSafeProject(project)).toThrow(/source-page index/);
+  });
+
+  it("preserves valid math metadata and strips or rejects invalid imported metadata", () => {
+    const generated = MATH_TOOL_CATALOGUE.find((tool) => tool.kind === "ruler")!.generate({ kind: "ruler" });
+    if ("pieces" in generated) throw new Error("Ruler must be a single tool.");
+    const ruler = generated.metadata;
+    const validScene = scene([{ id: "ruler", type: "image", customData: { classroomMathTool: ruler } }]);
+    expect((sanitizeScene(validScene).elements[0].customData as Record<string, unknown>).classroomMathTool).toEqual(ruler);
+
+    const invalidScene = scene([{ id: "bad", type: "image", customData: { classroomMathTool: { ...ruler, naturalWidth: -1 }, note: "keep" } }]);
+    expect(sanitizeScene(invalidScene).elements[0].customData).toEqual({ note: "keep" });
+
+    const project = {
+      schemaVersion: 1,
+      id: "project",
+      title: "Test",
+      createdAt: "2026-07-12T00:00:00.000Z",
+      updatedAt: "2026-07-12T00:00:00.000Z",
+      activeSceneId: "scene-1",
+      scenes: { "scene-1": invalidScene },
+      slideOrder: [],
+      pdfDocuments: {},
+    } satisfies ClassroomProject;
+    expect(() => assertSafeProject(project)).toThrow(/math tool/);
   });
 });

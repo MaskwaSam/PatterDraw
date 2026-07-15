@@ -55,7 +55,7 @@ if (!mainSource.includes("installLocalExcalidrawAssets()")) {
   findings.push("src/main.tsx:1 local Excalidraw asset path is not installed");
 }
 const indexSource = await readFile(path.join(root, "index.html"), "utf8");
-if (!indexSource.includes("connect-src 'self'") || !indexSource.includes("frame-src 'none'")) {
+if (!indexSource.includes("connect-src 'self'") || !indexSource.includes("frame-src 'none'") || !indexSource.includes("worker-src 'self' blob:")) {
   findings.push("index.html:1 restrictive CSP is missing");
 }
 const packageSource = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));

@@ -1,5 +1,7 @@
 # Roadmap
 
+The implementation-ready expansion plan for classroom instruments, graphs, manipulatives, and interactive constructions is tracked in the [Math tools backlog](./MATH_TOOLS_BACKLOG.md).
+
 ## Phase 1 — standalone hardening
 
 - Board-first editor, toggleable slide rail, OpenBoard-style PDF page rail/reordering, local LaTeX equation insertion/editing, no-AI Mermaid insertion/editing, and embedded full-board PNG export are implemented.

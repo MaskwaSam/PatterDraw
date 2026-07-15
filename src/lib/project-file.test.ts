@@ -3,6 +3,7 @@ import { strToU8, zipSync } from "fflate";
 import { createBlankProject } from "../types";
 import { decodeProjectFile, encodeProjectFile } from "./project-file";
 import { sanitizeProject } from "./safety";
+import { MATH_TOOL_CATALOGUE } from "./math-tools/catalogue";
 
 describe("classroom project files", () => {
   it("round-trips project metadata and original PDF bytes", () => {
@@ -93,5 +94,30 @@ describe("classroom project files", () => {
       "documents/pdf.pdf": bytes,
     });
     expect(decodeProjectFile(archive).project.pdfPageOrder).toEqual(["page"]);
+  });
+
+  it("round-trips every typed math-tool kind with its local SVG file", () => {
+    const project = createBlankProject(new Date("2026-07-15T12:00:00.000Z"));
+    const scene = project.scenes[project.activeSceneId];
+    const elements: Record<string, unknown>[] = [];
+    let index = 0;
+    for (const definition of MATH_TOOL_CATALOGUE) {
+      const generated = definition.generate(definition.defaultConfiguration);
+      const pieces = "pieces" in generated ? generated.pieces : [{ asset: generated.asset, metadata: generated.metadata }];
+      for (const piece of pieces) {
+        const fileId = `math-file-${index}`;
+        scene.files[fileId] = { id: fileId, mimeType: "image/svg+xml", dataURL: piece.asset.dataUrl };
+        elements.push({ id: `math-element-${index}`, type: "image", fileId, width: piece.asset.width, height: piece.asset.height, customData: { classroomMathTool: piece.metadata } });
+        index += 1;
+      }
+    }
+    scene.elements = elements;
+
+    const decoded = decodeProjectFile(encodeProjectFile(project, {})).project;
+    const metadata = decoded.scenes[decoded.activeSceneId].elements.map((element) => (element.customData as { classroomMathTool: Record<string, unknown> }).classroomMathTool);
+    expect(metadata).toHaveLength(index);
+    expect(new Set(metadata.map((item) => item.kind))).toEqual(new Set(MATH_TOOL_CATALOGUE.map((definition) => definition.kind)));
+    expect(Object.values(decoded.scenes[decoded.activeSceneId].files)).toHaveLength(index);
+    expect(Object.values(decoded.scenes[decoded.activeSceneId].files).every((file) => String(file.dataURL).startsWith("data:image/svg+xml;base64,"))).toBe(true);
   });
 });

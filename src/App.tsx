@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import {
   CaptureUpdateAction,
   convertToExcalidrawElements,
@@ -25,6 +25,9 @@ import { PresentationOverlay } from "./components/PresentationOverlay";
 import { StrokeWidthExtensions } from "./components/StrokeWidthExtensions";
 import { MathToolsMenuExtension } from "./components/MathToolsMenuExtension";
 import { MathToolsDialog } from "./components/MathToolsDialog";
+import { MathInteractionOverlay, type CapturedMathPoint } from "./components/MathInteractionOverlay";
+import { ProbabilityRandomizer } from "./components/ProbabilityRandomizer";
+import { SpinnerPointerOverlay, type SpinnerPointerAnimation } from "./components/SpinnerPointerOverlay";
 import { EquationDialog } from "./components/EquationDialog";
 import { MermaidDialog } from "./components/MermaidDialog";
 import {
@@ -81,17 +84,28 @@ import { sanitizeProject, sanitizeScene, sanitizeWebLink } from "./lib/safety";
 import { openExternalWebLink } from "./lib/offline-network";
 import { activateSlideFrameTool, addBlankSlideFrame } from "./lib/slide-frame-tool";
 import {
-  createDualScaleRulerAsset,
-  PDF_POINTS_PER_INCH,
-  RULER_LENGTH_CENTIMETRES,
-  RULER_LENGTH_INCHES,
-} from "./lib/math-tools/ruler";
+  sanitizeClassroomMathToolMetadata,
+  type GeneratedMathToolInsertion,
+  type MathToolConfiguration,
+} from "./lib/math-tools/types";
+import type { MathInteractionKind } from "./lib/math-tools/catalogue";
 import {
-  createProtractorAsset,
-  PROTRACTOR_DIAMETER_INCHES,
-  PROTRACTOR_MAX_ANGLE_DEGREES,
-  PROTRACTOR_SMALLEST_DIVISION_DEGREES,
-} from "./lib/math-tools/protractor";
+  createAngleMeasurement,
+  createCompassConstruction,
+  transformElementGeometry,
+  transformationMetadata,
+  type AngleMeasurementOptions,
+  type CompassOptions,
+  type TransformationOptions,
+} from "./lib/math-tools/interactive";
+import {
+  randomizeProbabilityPiece,
+  spinnerPointerAngle,
+  spinnerPointerAnimationEndAngle,
+  summarizeSelectedProbabilityPieces,
+  type ProbabilitySelectionSummary,
+} from "./lib/math-tools/probability-randomizer";
+import { createUnitCircleMathJaxAsset } from "./lib/math-tools/unit-circle-latex";
 import {
   activatePresentationInk,
   DEFAULT_PRESENTATION_INK_COLOUR,
@@ -117,12 +131,18 @@ type PresentationState = {
 };
 type EquationEditorState = { targetId: string | null; initialSource: string };
 type MermaidEditorState = { targetDiagramId: string | null; initialSource: string };
+type MathToolEditState = { targetId: string; initialConfiguration: MathToolConfiguration };
+type MathInteractionState = {
+  kind: MathInteractionKind;
+  points: CapturedMathPoint[];
+  compassOptions: CompassOptions;
+  angleOptions: AngleMeasurementOptions;
+  transformationOptions: TransformationOptions;
+  sourceElementIds: string[];
+};
 type SlideFrameAction =
   | { kind: "add"; frameId: string; title: string }
   | { kind: "draw" };
-type MathToolAsset = { dataUrl: string; height: number; width: number };
-type MathToolMetadata = Record<string, boolean | number | string>;
-
 const CLASSROOM_UI_OPTIONS: ExcalidrawProps["UIOptions"] = {
   canvasActions: {
     changeViewBackgroundColor: false,
@@ -135,6 +155,7 @@ const CLASSROOM_UI_OPTIONS: ExcalidrawProps["UIOptions"] = {
   },
   tools: { image: true },
 };
+const SPINNER_ANIMATION_DURATION_MS = 1_100;
 
 const renderNoEmbeddable: NonNullable<ExcalidrawProps["renderEmbeddable"]> = () => null;
 
@@ -235,6 +256,11 @@ export default function App() {
   const [equationEditor, setEquationEditor] = useState<EquationEditorState | null>(null);
   const [mermaidEditor, setMermaidEditor] = useState<MermaidEditorState | null>(null);
   const [isMathToolsOpen, setIsMathToolsOpen] = useState(false);
+  const [mathToolEdit, setMathToolEdit] = useState<MathToolEditState | null>(null);
+  const [mathInteraction, setMathInteraction] = useState<MathInteractionState | null>(null);
+  const [probabilitySelection, setProbabilitySelection] = useState<ProbabilitySelectionSummary | null>(null);
+  const [isProbabilitySpinning, setIsProbabilitySpinning] = useState(false);
+  const [spinnerPointerAnimations, setSpinnerPointerAnimations] = useState<SpinnerPointerAnimation[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
   const editorHostRef = useRef<HTMLDivElement>(null);
@@ -248,6 +274,7 @@ export default function App() {
   const activeToolTypeRef = useRef<string | null>(null);
   const roughnessBeforeLineRef = useRef<number | null>(null);
   const focusAfterMathToolsRef = useRef<"editor" | "trigger" | null>(null);
+  const probabilityRandomizingRef = useRef(false);
 
   useEffect(() => {
     if (isMathToolsOpen || !focusAfterMathToolsRef.current) return;
@@ -287,6 +314,10 @@ export default function App() {
     if (!project) return;
     activeSceneIdRef.current = project.activeSceneId;
   }, [project?.activeSceneId]);
+
+  useEffect(() => {
+    setMathInteraction(null);
+  }, [project?.activeSceneId, workspaceMode]);
 
   useEffect(() => {
     const syncFullscreenState = () => {
@@ -385,6 +416,12 @@ export default function App() {
     setZoom(Math.round(appState.zoom.value * 100));
     setStrokeWidth(appState.currentItemStrokeWidth);
     setAreSlideFramesVisible(appState.frameRendering.enabled);
+    const nextProbabilitySelection = summarizeSelectedProbabilityPieces(elements, appState.selectedElementIds);
+    setProbabilitySelection((current) => {
+      if (!current && !nextProbabilitySelection) return current;
+      if (current?.coins === nextProbabilitySelection?.coins && current?.dice === nextProbabilitySelection?.dice && current?.spinners === nextProbabilitySelection?.spinners) return current;
+      return nextProbabilitySelection;
+    });
     if (switchingSceneRef.current) return;
     const activeToolType = appState.activeTool.type;
     const previousToolType = activeToolTypeRef.current;
@@ -464,6 +501,7 @@ export default function App() {
     pendingSlideFrameActionRef.current = null;
     setEquationEditor(null);
     setMermaidEditor(null);
+    setMathToolEdit(null);
     setIsMathToolsOpen(false);
   }, [project]);
 
@@ -568,31 +606,131 @@ export default function App() {
   }, [api]);
 
   const openMathTools = useCallback(() => {
+    const selectedIds = api?.getAppState().selectedElementIds || {};
+    const selectedFunctionPlot = api?.getSceneElements().find((element) => {
+      if (!selectedIds[element.id]) return false;
+      const metadata = sanitizeClassroomMathToolMetadata(
+        (element.customData as { classroomMathTool?: unknown } | undefined)?.classroomMathTool,
+      );
+      return metadata?.kind === "function-plot";
+    });
+    const metadata = selectedFunctionPlot
+      ? sanitizeClassroomMathToolMetadata(
+        (selectedFunctionPlot.customData as { classroomMathTool?: unknown } | undefined)?.classroomMathTool,
+      )
+      : null;
+    setMathToolEdit(selectedFunctionPlot && metadata?.kind === "function-plot" ? {
+      targetId: selectedFunctionPlot.id,
+      initialConfiguration: {
+        kind: "function-plot",
+        expression: metadata.expression,
+        xMin: metadata.xMin,
+        xMax: metadata.xMax,
+        yMin: metadata.yMin,
+        yMax: metadata.yMax,
+        showGrid: metadata.showGrid,
+        showAxes: metadata.showAxes,
+      },
+    } : null);
     setExportOpen(false);
     setEquationEditor(null);
     setMermaidEditor(null);
+    setMathInteraction(null);
     setIsMathToolsOpen(true);
-  }, []);
+  }, [api]);
 
   const closeMathTools = useCallback(() => {
     focusAfterMathToolsRef.current = "trigger";
     setIsMathToolsOpen(false);
+    setMathToolEdit(null);
   }, []);
 
-  const insertMathTool = useCallback((
-    asset: MathToolAsset,
-    metadata: MathToolMetadata,
-    toastMessage: string,
-  ) => {
+  const startMathInteraction = useCallback((kind: MathInteractionKind) => {
+    const sourceElementIds = kind === "transformation" && api
+      ? api.getSceneElements().filter((element) => api.getAppState().selectedElementIds[element.id] && ["diamond", "ellipse", "image", "rectangle"].includes(element.type)).map((element) => element.id)
+      : [];
+    focusAfterMathToolsRef.current = null;
+    setIsMathToolsOpen(false);
+    if (kind === "transformation" && !sourceElementIds.length) {
+      setErrorMessage("Select at least one rectangle, diamond, ellipse, or image before opening the transformation tool.");
+      return;
+    }
+    setMathInteraction({
+      kind,
+      points: [],
+      sourceElementIds,
+      compassOptions: { fullCircle: true, arcExtentDegrees: 180, direction: "clockwise", centerMark: true },
+      angleOptions: { reflex: false, precision: 1 },
+      transformationOptions: { transformationType: "translate", translateX: 100, translateY: 0, angleDegrees: 90, scaleFactor: 2, mirrorLineAngleDegrees: 45 },
+    });
+    api?.setActiveTool({ type: "selection" });
+  }, [api]);
+
+  const captureMathInteractionPoint = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!mathInteraction || !api || event.button !== 0) return;
+    if (event.target instanceof Element && event.target.closest(".math-interaction-panel")) return;
+    if (mathInteraction.kind === "transformation") return;
+    const requiredPoints = mathInteraction.kind === "compass" ? 2 : 3;
+    if (mathInteraction.points.length >= requiredPoints) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const bounds = editorHostRef.current?.getBoundingClientRect();
+    if (!bounds) return;
+    const scene = viewportCoordsToSceneCoords({ clientX: event.clientX, clientY: event.clientY }, api.getAppState());
+    const point: CapturedMathPoint = {
+      scene,
+      viewport: { x: event.clientX - bounds.left, y: event.clientY - bounds.top },
+    };
+    setMathInteraction((current) => current ? { ...current, points: [...current.points, point] } : current);
+  }, [api, mathInteraction]);
+
+  const insertMathTool = useCallback(async (requestedTool: GeneratedMathToolInsertion) => {
     if (!api) return;
+    let generatedTool = requestedTool;
+    let renderingUnitCircle = false;
     try {
-      const fileId = createLocalId() as FileId;
-      const file: BinaryFileData = {
-        id: fileId,
-        mimeType: "image/svg+xml",
-        dataURL: asset.dataUrl as DataURL,
-        created: Date.now(),
-      };
+      if (!("pieces" in generatedTool) && generatedTool.metadata.kind === "unit-circle") {
+        renderingUnitCircle = true;
+        setBusyMessage("Rendering unit-circle notation…");
+        const rendered = await createUnitCircleMathJaxAsset(
+          generatedTool.metadata.labelMode,
+          generatedTool.metadata.showCoordinates,
+        );
+        generatedTool = { ...generatedTool, asset: rendered.asset };
+      }
+      if (mathToolEdit && !("pieces" in generatedTool) && generatedTool.metadata.kind === "function-plot") {
+        const target = api.getSceneElements().find((element) => element.id === mathToolEdit.targetId);
+        if (!target || target.type !== "image") throw new Error("The selected function plot is no longer available.");
+        const fileId = createLocalId() as FileId;
+        api.addFiles([{
+          id: fileId,
+          mimeType: "image/svg+xml",
+          dataURL: generatedTool.asset.dataUrl as DataURL,
+          created: Date.now(),
+        }]);
+        const updated = newElementWith(target, {
+          fileId,
+          status: "saved",
+          customData: {
+            ...(target.customData || {}),
+            classroomMathTool: generatedTool.metadata,
+          },
+        });
+        api.updateScene({
+          elements: api.getSceneElements().map((element) => element.id === target.id ? updated : element),
+          appState: { selectedElementIds: { [target.id]: true } },
+          captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+        });
+        focusAfterMathToolsRef.current = "editor";
+        setMathToolEdit(null);
+        setIsMathToolsOpen(false);
+        api.setToast({ message: "Function plot updated." });
+        return;
+      }
+      const pieces = "pieces" in generatedTool
+        ? generatedTool.pieces
+        : [{ asset: generatedTool.asset, metadata: generatedTool.metadata, offsetX: 0, offsetY: 0 }];
+      if (!pieces.length || pieces.length > 100) throw new Error("Math tool insertion has an invalid piece count.");
       const appState = api.getAppState();
       const center = viewportCoordsToSceneCoords(
         {
@@ -601,72 +739,266 @@ export default function App() {
         },
         appState,
       );
-      const toolId = createLocalId();
-      const [tool] = convertToExcalidrawElements(
-        [{
-          id: toolId,
-          type: "image",
-          x: center.x - asset.width / 2,
-          y: center.y - asset.height / 2,
-          width: asset.width,
-          height: asset.height,
-          fileId,
-          status: "saved",
-          strokeColor: "transparent",
-          backgroundColor: "transparent",
-          customData: {
-            classroomMathTool: {
-              schemaVersion: 1,
-              calibration: "pdf-points",
-              naturalWidth: asset.width,
-              naturalHeight: asset.height,
-              sceneUnitsPerInch: PDF_POINTS_PER_INCH,
-              ...metadata,
+      const minX = Math.min(...pieces.map((piece) => piece.offsetX));
+      const minY = Math.min(...pieces.map((piece) => piece.offsetY));
+      const maxX = Math.max(...pieces.map((piece) => piece.offsetX + piece.asset.width));
+      const maxY = Math.max(...pieces.map((piece) => piece.offsetY + piece.asset.height));
+      const scenePosition = "pieces" in generatedTool ? undefined : generatedTool.scenePosition;
+      const originX = scenePosition ? scenePosition.x : center.x - (minX + maxX) / 2;
+      const originY = scenePosition ? scenePosition.y : center.y - (minY + maxY) / 2;
+      const fileIdByDataUrl = new Map<string, FileId>();
+      const files: BinaryFileData[] = [];
+      const insertedElements = pieces.map((piece) => {
+        let fileId = fileIdByDataUrl.get(piece.asset.dataUrl);
+        if (!fileId) {
+          fileId = createLocalId() as FileId;
+          fileIdByDataUrl.set(piece.asset.dataUrl, fileId);
+          files.push({
+            id: fileId,
+            mimeType: "image/svg+xml",
+            dataURL: piece.asset.dataUrl as DataURL,
+            created: Date.now(),
+          });
+        }
+        const [element] = convertToExcalidrawElements(
+          [{
+            id: createLocalId(),
+            type: "image",
+            x: originX + piece.offsetX,
+            y: originY + piece.offsetY,
+            width: piece.asset.width,
+            height: piece.asset.height,
+            fileId,
+            status: "saved",
+            strokeColor: "transparent",
+            backgroundColor: "transparent",
+            customData: {
+              classroomMathTool: {
+                ...piece.metadata,
+              },
             },
-          },
-        }],
-        { regenerateIds: false },
-      );
-      api.addFiles([file]);
+          }],
+          { regenerateIds: false },
+        );
+        return element;
+      });
+      api.addFiles(files);
       api.setActiveTool({ type: "selection" });
       api.updateScene({
-        elements: [...api.getSceneElements(), tool],
-        appState: { selectedElementIds: { [tool.id]: true } },
+        elements: [...api.getSceneElements(), ...insertedElements],
+        appState: { selectedElementIds: Object.fromEntries(insertedElements.map((element) => [element.id, true])) },
         captureUpdate: CaptureUpdateAction.IMMEDIATELY,
       });
       focusAfterMathToolsRef.current = "editor";
+      setMathToolEdit(null);
       setIsMathToolsOpen(false);
-      api.setToast({ message: toastMessage });
+      api.setToast({ message: generatedTool.toastMessage });
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (renderingUnitCircle) setBusyMessage(null);
+    }
+  }, [api, mathToolEdit]);
+
+  const randomizeSelectedProbabilityPieces = useCallback(async () => {
+    if (!api || probabilityRandomizingRef.current) return;
+    probabilityRandomizingRef.current = true;
+    try {
+      const appState = api.getAppState();
+      const selectedElementIds = appState.selectedElementIds;
+      const selectedPieces = api.getSceneElements().flatMap((element) => {
+        if (element.type !== "image" || element.isDeleted || !selectedElementIds[element.id]) return [];
+        const metadata = sanitizeClassroomMathToolMetadata(
+          (element.customData as { classroomMathTool?: unknown } | undefined)?.classroomMathTool,
+        );
+        if (metadata?.kind !== "probability-piece" || (metadata.componentType !== "die" && metadata.componentType !== "coin" && metadata.componentType !== "spinner")) return [];
+        const randomized = randomizeProbabilityPiece(metadata);
+        const fileId = createLocalId() as FileId;
+        return [{
+          angle: element.angle,
+          componentType: metadata.componentType,
+          currentValue: metadata.faceOrValue,
+          dataURL: randomized.asset.dataUrl as DataURL,
+          fileId,
+          height: element.height,
+          id: element.id,
+          metadata: randomized.metadata,
+          originalAngle: element.angle,
+          scaleX: element.scale[0],
+          scaleY: element.scale[1],
+          value: randomized.metadata.faceOrValue,
+          width: element.width,
+          x: element.x,
+          y: element.y,
+        }];
+      });
+      if (!selectedPieces.length) throw new Error("Select at least one die, coin, or spinner to randomize.");
+
+      const spinners = selectedPieces.filter((piece) => piece.componentType === "spinner");
+      const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (spinners.length && !prefersReducedMotion) {
+        const hostBounds = editorHostRef.current?.getBoundingClientRect();
+        if (!hostBounds) throw new Error("The spinner animation surface is unavailable.");
+        const sceneState = api.getAppState();
+        const sceneZoom = sceneState.zoom.value;
+        setSpinnerPointerAnimations(spinners.map((spinner) => {
+          const startPointerAngle = spinnerPointerAngle(spinner.currentValue);
+          const targetPointerAngle = spinnerPointerAngle(spinner.value);
+          return {
+            angle: spinner.angle,
+            endPointerAngle: spinnerPointerAnimationEndAngle(startPointerAngle, targetPointerAngle),
+            height: spinner.height * sceneZoom,
+            id: spinner.id,
+            left: (spinner.x + sceneState.scrollX) * sceneZoom + sceneState.offsetLeft - hostBounds.left,
+            scaleX: spinner.scaleX,
+            scaleY: spinner.scaleY,
+            startPointerAngle,
+            top: (spinner.y + sceneState.scrollY) * sceneZoom + sceneState.offsetTop - hostBounds.top,
+            width: spinner.width * sceneZoom,
+          };
+        }));
+        setIsProbabilitySpinning(true);
+        await new Promise<void>((resolve) => window.setTimeout(resolve, SPINNER_ANIMATION_DURATION_MS));
+      }
+
+      const files: BinaryFileData[] = selectedPieces.map((piece) => ({
+        id: piece.fileId,
+        mimeType: "image/svg+xml",
+        dataURL: piece.dataURL,
+        created: Date.now(),
+      }));
+      const pieceById = new Map(selectedPieces.map((piece) => [piece.id, piece]));
+      api.addFiles(files);
+      api.updateScene({
+        elements: api.getSceneElements().map((element) => {
+          const piece = pieceById.get(element.id);
+          if (!piece || element.type !== "image") return element;
+          return newElementWith(element, {
+            angle: piece.originalAngle,
+            fileId: piece.fileId,
+            status: "saved",
+            customData: {
+              ...(element.customData || {}),
+              classroomMathTool: piece.metadata,
+            },
+          });
+        }),
+        appState: { selectedElementIds: api.getAppState().selectedElementIds },
+        captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+      });
+      const dice = selectedPieces.filter((piece) => piece.componentType === "die");
+      const coins = selectedPieces.filter((piece) => piece.componentType === "coin");
+      const spinnerResults = selectedPieces.filter((piece) => piece.componentType === "spinner");
+      const resultText = selectedPieces.map((piece) => piece.componentType === "coin" ? piece.value[0] : piece.value).join(", ");
+      const countParts = [
+        dice.length ? `${dice.length} ${dice.length === 1 ? "die" : "dice"}` : "",
+        coins.length ? `${coins.length} ${coins.length === 1 ? "coin" : "coins"}` : "",
+        spinnerResults.length ? `${spinnerResults.length} ${spinnerResults.length === 1 ? "spinner" : "spinners"}` : "",
+      ].filter(Boolean);
+      const actionText = countParts.length > 1
+        ? `Randomized ${countParts.join(" and ")}`
+        : dice.length
+          ? `Rolled ${countParts[0]}`
+          : coins.length
+            ? `Flipped ${countParts[0]}`
+            : `Spun ${countParts[0]}`;
+      api.setToast({ message: `${actionText}: ${resultText}.` });
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      probabilityRandomizingRef.current = false;
+      setIsProbabilitySpinning(false);
+      setSpinnerPointerAnimations([]);
     }
   }, [api]);
 
-  const insertRuler = useCallback(() => {
-    insertMathTool(
-      createDualScaleRulerAsset(),
-      {
-        kind: "ruler",
-        imperialLengthInches: RULER_LENGTH_INCHES,
-        metricLengthCentimetres: RULER_LENGTH_CENTIMETRES,
-      },
-      "Calibrated ruler added.",
-    );
-  }, [insertMathTool]);
-
-  const insertProtractor = useCallback(() => {
-    insertMathTool(
-      createProtractorAsset(),
-      {
-        kind: "protractor",
-        diameterInches: PROTRACTOR_DIAMETER_INCHES,
-        angleRangeDegrees: PROTRACTOR_MAX_ANGLE_DEGREES,
-        smallestDivisionDegrees: PROTRACTOR_SMALLEST_DIVISION_DEGREES,
-        dualScale: true,
-      },
-      "Calibrated protractor added.",
-    );
-  }, [insertMathTool]);
+  const commitMathInteraction = useCallback(() => {
+    if (!mathInteraction || !api) return;
+    try {
+      if (mathInteraction.kind === "transformation") {
+        const sourceElements = api.getSceneElements().filter((element) => mathInteraction.sourceElementIds.includes(element.id));
+        if (!sourceElements.length) throw new Error("The selected source objects are no longer available.");
+        const [minX, minY, maxX, maxY] = getCommonBounds(sourceElements);
+        const centre = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+        const transformed = sourceElements.map((element, index) => {
+          const geometry = transformElementGeometry(element, centre, mathInteraction.transformationOptions);
+          const updated = newElementWith(element, {
+            x: geometry.x,
+            y: geometry.y,
+            width: geometry.width,
+            height: geometry.height,
+            angle: geometry.angle,
+            customData: {
+              ...(element.customData || {}),
+              classroomMathTool: transformationMetadata(element.id, geometry.width, geometry.height, centre, mathInteraction.transformationOptions),
+            },
+          });
+          return {
+            ...updated,
+            id: createLocalId(),
+            groupIds: [],
+            boundElements: null,
+            version: 1,
+            versionNonce: Date.now() + index,
+            updated: Date.now(),
+          } as ExcalidrawElement;
+        });
+        api.updateScene({
+          elements: [...api.getSceneElements(), ...transformed],
+          appState: { selectedElementIds: Object.fromEntries(transformed.map((element) => [element.id, true])) },
+          captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+        });
+        api.setToast({ message: `${transformed.length} transformed cop${transformed.length === 1 ? "y" : "ies"} added.` });
+        setMathInteraction(null);
+        return;
+      }
+      const scenePoints = mathInteraction.points.map((point) => point.scene);
+      if (mathInteraction.kind === "compass" && mathInteraction.compassOptions.fullCircle) {
+        const generated = createCompassConstruction(scenePoints[0], scenePoints[1], mathInteraction.compassOptions);
+        if (generated.metadata.kind !== "compass") throw new Error("Compass construction metadata is invalid.");
+        const radius = generated.metadata.radiusSceneUnits;
+        const groupId = createLocalId();
+        const metadata = { ...generated.metadata, naturalWidth: radius * 2, naturalHeight: radius * 2 };
+        const nativeShapes = [
+          {
+            id: createLocalId(), type: "ellipse" as const,
+            x: generated.metadata.centerX - radius, y: generated.metadata.centerY - radius,
+            width: radius * 2, height: radius * 2,
+            strokeColor: generated.metadata.strokeColor, backgroundColor: "transparent",
+            strokeWidth: 2 as const, roughness: 0 as const,
+            groupIds: generated.metadata.centerMark ? [groupId] : [],
+            customData: { classroomMathTool: metadata, classroomMathToolPart: "construction" },
+          },
+          ...(generated.metadata.centerMark ? [{
+            id: createLocalId(), type: "ellipse" as const,
+            x: generated.metadata.centerX - 4, y: generated.metadata.centerY - 4,
+            width: 8, height: 8,
+            strokeColor: generated.metadata.strokeColor, backgroundColor: generated.metadata.strokeColor,
+            strokeWidth: 1 as const, roughness: 0 as const,
+            groupIds: [groupId],
+            customData: { classroomMathTool: metadata, classroomMathToolPart: "center-mark" },
+          }] : []),
+        ];
+        const elements = convertToExcalidrawElements(nativeShapes, { regenerateIds: false });
+        api.setActiveTool({ type: "selection" });
+        api.updateScene({
+          elements: [...api.getSceneElements(), ...elements],
+          appState: { selectedElementIds: Object.fromEntries(elements.map((element) => [element.id, true])) },
+          captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+        });
+        api.setToast({ message: "Editable compass circle added." });
+        setMathInteraction(null);
+        return;
+      }
+      const generated = mathInteraction.kind === "compass"
+        ? createCompassConstruction(scenePoints[0], scenePoints[1], mathInteraction.compassOptions)
+        : createAngleMeasurement(scenePoints[0], scenePoints[1], scenePoints[2], mathInteraction.angleOptions);
+      insertMathTool(generated);
+      setMathInteraction(null);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, [api, insertMathTool, mathInteraction]);
 
   const insertEquation = useCallback((rendered: RenderedLatex) => {
     if (!api) return;
@@ -1405,7 +1737,7 @@ export default function App() {
             <ShowBottomBarIcon />
           </button>
         )}
-        <div ref={editorHostRef} className="editor-host">
+        <div ref={editorHostRef} className="editor-host" onPointerDownCapture={captureMathInteractionPoint}>
           <Excalidraw
             excalidrawAPI={setApi}
             onChange={handleChange}
@@ -1418,6 +1750,9 @@ export default function App() {
             theme="light"
             UIOptions={CLASSROOM_UI_OPTIONS}
           />
+          {spinnerPointerAnimations.length > 0 && (
+            <SpinnerPointerOverlay durationMs={SPINNER_ANIMATION_DURATION_MS} spinners={spinnerPointerAnimations} />
+          )}
           {api && (
             <>
               <StrokeWidthExtensions
@@ -1429,7 +1764,30 @@ export default function App() {
                 editorHost={editorHostRef.current}
                 onOpen={openMathTools}
               />
+              {!presentation && !mathInteraction && probabilitySelection && (
+                <ProbabilityRandomizer
+                  isSpinning={isProbabilitySpinning}
+                  summary={probabilitySelection}
+                  onRandomize={randomizeSelectedProbabilityPieces}
+                />
+              )}
             </>
+          )}
+          {mathInteraction && (
+            <MathInteractionOverlay
+              kind={mathInteraction.kind}
+              points={mathInteraction.points}
+              compassOptions={mathInteraction.compassOptions}
+              angleOptions={mathInteraction.angleOptions}
+              transformationOptions={mathInteraction.transformationOptions}
+              sourceElementCount={mathInteraction.sourceElementIds.length}
+              onCancel={() => setMathInteraction(null)}
+              onReset={() => setMathInteraction((current) => current ? { ...current, points: [] } : current)}
+              onCommit={commitMathInteraction}
+              onCompassOptionsChange={(options) => setMathInteraction((current) => current ? { ...current, compassOptions: options } : current)}
+              onAngleOptionsChange={(options) => setMathInteraction((current) => current ? { ...current, angleOptions: options } : current)}
+              onTransformationOptionsChange={(options) => setMathInteraction((current) => current ? { ...current, transformationOptions: options } : current)}
+            />
           )}
         </div>
         {!presentation && isFooterVisible && (
@@ -1579,9 +1937,10 @@ export default function App() {
       )}
       {isMathToolsOpen && (
         <MathToolsDialog
+          initialConfiguration={mathToolEdit?.initialConfiguration}
           onCancel={closeMathTools}
-          onInsertProtractor={insertProtractor}
-          onInsertRuler={insertRuler}
+          onInsert={insertMathTool}
+          onStartInteraction={startMathInteraction}
         />
       )}
       {busyMessage && <div className="busy-overlay" role="status"><span className="spinner" />{busyMessage}</div>}

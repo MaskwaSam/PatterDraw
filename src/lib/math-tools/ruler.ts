@@ -78,16 +78,6 @@ function labels(
   return output.join("");
 }
 
-function svgToDataUrl(svg: string): string {
-  const bytes = new TextEncoder().encode(svg);
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
-  }
-  return `data:image/svg+xml;base64,${btoa(binary)}`;
-}
-
 export function createDualScaleRulerAsset(): DualScaleRulerAsset {
   const svg = [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${RULER_WIDTH_POINTS}" height="${RULER_HEIGHT_POINTS}" viewBox="0 0 ${RULER_WIDTH_POINTS} ${RULER_HEIGHT_POINTS}" role="img" aria-label="Twelve inch and thirty centimetre ruler">`,
@@ -104,9 +94,10 @@ export function createDualScaleRulerAsset(): DualScaleRulerAsset {
     `</svg>`,
   ].join("");
   return {
-    dataUrl: svgToDataUrl(svg),
+    dataUrl: mathSvgToDataUrl(svg),
     height: RULER_HEIGHT_POINTS,
     svg,
     width: RULER_WIDTH_POINTS,
   };
 }
+import { mathSvgToDataUrl } from "./svg";

@@ -1,4 +1,5 @@
 import { PDF_POINTS_PER_INCH } from "./ruler";
+import { mathSvgToDataUrl } from "./svg";
 
 export const PROTRACTOR_DIAMETER_INCHES = 6;
 export const PROTRACTOR_MAX_ANGLE_DEGREES = 180;
@@ -61,16 +62,6 @@ function degreeLabels(): string {
   return output.join("");
 }
 
-function svgToDataUrl(svg: string): string {
-  const bytes = new TextEncoder().encode(svg);
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
-  }
-  return `data:image/svg+xml;base64,${btoa(binary)}`;
-}
-
 export function createProtractorAsset(): ProtractorAsset {
   const bodyPath = `M 0 ${PROTRACTOR_RADIUS_POINTS} A ${PROTRACTOR_RADIUS_POINTS} ${PROTRACTOR_RADIUS_POINTS} 0 0 1 ${PROTRACTOR_WIDTH_POINTS} ${PROTRACTOR_RADIUS_POINTS} L 0 ${PROTRACTOR_RADIUS_POINTS} Z`;
   const svg = [
@@ -92,7 +83,7 @@ export function createProtractorAsset(): ProtractorAsset {
     `</svg>`,
   ].join("");
   return {
-    dataUrl: svgToDataUrl(svg),
+    dataUrl: mathSvgToDataUrl(svg),
     height: PROTRACTOR_HEIGHT_POINTS,
     svg,
     width: PROTRACTOR_WIDTH_POINTS,
