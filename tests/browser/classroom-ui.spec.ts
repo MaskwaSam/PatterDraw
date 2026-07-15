@@ -426,6 +426,34 @@ async function autosavedFrameVisibility(page: import("@playwright/test").Page): 
   });
 }
 
+async function autosavedMorphSettings(page: import("@playwright/test").Page): Promise<{
+  durationMs: number | null;
+  enabled: boolean | null;
+} | null> {
+  return page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const project = await new Promise<{
+      slideMorphDurationMs?: number;
+      slideMorphEnabled?: boolean;
+    } | undefined>((resolve, reject) => {
+      const transaction = database.transaction("keyval", "readonly");
+      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    if (!project) return null;
+    return {
+      durationMs: project.slideMorphDurationMs ?? null,
+      enabled: project.slideMorphEnabled ?? null,
+    };
+  });
+}
+
 async function autosavedMathToolSetSnapshot(
   page: import("@playwright/test").Page,
   kind: "algebra-tile" | "fraction-piece" | "integer-chip" | "probability-piece",
@@ -987,6 +1015,28 @@ test("keeps the Slides Present control contained at desktop and phone widths", a
   expect(phoneBox?.width || 0).toBeCloseTo(34, 0);
 });
 
+test("toggles and persists the Morph slide transition", async ({ page }) => {
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  const morph = page.getByRole("button", { name: "Morph", exact: true });
+  await expect(morph).toBeVisible();
+  await expect(morph).toHaveAttribute("aria-pressed", "false");
+
+  await morph.click();
+  await expect(morph).toHaveAttribute("aria-pressed", "true");
+  const duration = page.getByRole("slider", { name: "Morph duration", exact: true });
+  await expect(duration).toHaveValue("650");
+  await duration.fill("1200");
+  await expect(page.locator(".morph-duration-control output")).toHaveText("1.2 s");
+  await expect.poll(() => autosavedMorphSettings(page)).toEqual({ durationMs: 1_200, enabled: true });
+
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Morph", exact: true }))
+    .toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("slider", { name: "Morph duration", exact: true })).toHaveValue("1200");
+});
+
 test("toggles slide frames for a cleaner board without removing slides", async ({ page }) => {
   const editor = page.locator(".editor-host .excalidraw");
   await editor.evaluate((element) => element.setAttribute("data-frame-toggle-instance", "original"));
@@ -1219,14 +1269,14 @@ test("fits the first slide after presentation layout opens", async ({ page }) =>
     link: null,
     locked: false,
   };
-  const frame = (id: string, name: string, x: number, index: string) => ({
+  const frame = (id: string, name: string, x: number, index: string, width = 960, height = 540) => ({
     ...common,
     id,
     type: "frame",
     x,
     y: 100,
-    width: 960,
-    height: 540,
+    width,
+    height,
     name,
     index,
   });
@@ -1239,7 +1289,7 @@ test("fits the first slide after presentation layout opens", async ({ page }) =>
       source: "local",
       elements: [
         frame("first-frame", "Slide 1", 0, "a0"),
-        frame("second-frame", "Slide 2", 1200, "a1"),
+        frame("second-frame", "Slide 2", 1200, "a1", 480, 270),
       ],
       appState: {},
       files: {},
@@ -1247,8 +1297,12 @@ test("fits the first slide after presentation layout opens", async ({ page }) =>
   });
 
   await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.getByRole("button", { name: "Morph", exact: true }).click();
+  await page.getByRole("slider", { name: "Morph duration", exact: true }).fill("1200");
   await page.getByRole("button", { name: "Present", exact: true }).click();
   await expect(page.locator(".presentation-count")).toHaveText("1 / 2");
+  await expect(page.locator(".editor-region")).toHaveAttribute("data-slide-transition", "morph");
+  await expect(page.locator(".editor-region")).toHaveAttribute("data-morph-duration-ms", "1200");
   await expect.poll(() => page.locator(".editor-region").getAttribute("data-presentation-zoom"))
     .not.toBeNull();
   await page.waitForTimeout(450);
@@ -1256,10 +1310,16 @@ test("fits the first slide after presentation layout opens", async ({ page }) =>
 
   await page.getByRole("button", { name: "Next slide", exact: true }).click();
   await expect(page.locator(".presentation-count")).toHaveText("2 / 2");
-  await page.waitForTimeout(450);
+  await page.waitForTimeout(600);
+  const midMorphZoom = Number(await page.locator(".editor-region").getAttribute("data-presentation-zoom"));
+  await page.waitForTimeout(800);
+  const secondEntryZoom = Number(await page.locator(".editor-region").getAttribute("data-presentation-zoom"));
+  expect(secondEntryZoom).toBeGreaterThan(firstEntryZoom + 20);
+  expect(midMorphZoom).toBeGreaterThan(firstEntryZoom);
+  expect(midMorphZoom).toBeLessThan(secondEntryZoom);
   await page.getByRole("button", { name: "Previous slide", exact: true }).click();
   await expect(page.locator(".presentation-count")).toHaveText("1 / 2");
-  await page.waitForTimeout(450);
+  await page.waitForTimeout(1_300);
   const returnZoom = Number(await page.locator(".editor-region").getAttribute("data-presentation-zoom"));
 
   expect(firstEntryZoom).toBeCloseTo(returnZoom, 0);

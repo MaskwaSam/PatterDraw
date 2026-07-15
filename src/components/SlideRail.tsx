@@ -1,5 +1,10 @@
 import type { ClassroomProject, ClassroomSlide } from "../types";
-import { DragIcon, EyeIcon, EyeOffIcon, FrameIcon, PlusIcon, TrashIcon } from "./Icons";
+import {
+  MAX_SLIDE_MORPH_DURATION_MS,
+  MIN_SLIDE_MORPH_DURATION_MS,
+  SLIDE_MORPH_DURATION_STEP_MS,
+} from "../lib/slide-transition";
+import { DragIcon, EyeIcon, EyeOffIcon, FrameIcon, MorphIcon, PlusIcon, TrashIcon } from "./Icons";
 import { SlidePreview } from "./SlidePreview";
 
 interface SlideRailProps {
@@ -12,6 +17,10 @@ interface SlideRailProps {
   onDeleteSlide: (slide: ClassroomSlide) => void;
   framesVisible: boolean;
   onToggleFrames: () => void;
+  morphEnabled: boolean;
+  morphDurationMs: number;
+  onToggleMorph: () => void;
+  onMorphDurationChange: (durationMs: number) => void;
 }
 
 export function SlideRail({
@@ -24,7 +33,12 @@ export function SlideRail({
   onDeleteSlide,
   framesVisible,
   onToggleFrames,
+  morphEnabled,
+  morphDurationMs,
+  onToggleMorph,
+  onMorphDurationChange,
 }: SlideRailProps) {
+  const morphDurationSeconds = `${Number((morphDurationMs / 1_000).toFixed(2))} s`;
   return (
     <aside id="slide-rail" className="slide-rail" aria-label="Slides">
       <div className="rail-heading">
@@ -39,23 +53,51 @@ export function SlideRail({
           {project.slideOrder.length}
         </span>
       </div>
-      <div className="slide-rail-actions" role="group" aria-label="Add slides">
+      <div className="slide-rail-actions" role="group" aria-label="Slide controls">
         <button className="new-slide-button" type="button" onClick={onAddSlide}>
           <PlusIcon /> Add slide
         </button>
         <button className="draw-frame-button" type="button" onClick={onDrawFrame}>
           <FrameIcon /> Draw around content
         </button>
-        <button
-          className="toggle-frames-button"
-          type="button"
-          onClick={onToggleFrames}
-          aria-label={framesVisible ? "Hide slide frames" : "Show slide frames"}
-          aria-pressed={framesVisible}
-        >
-          {framesVisible ? <EyeOffIcon /> : <EyeIcon />}
-          {framesVisible ? "Hide frames" : "Show frames"}
-        </button>
+        <div className="slide-display-actions">
+          <button
+            className="toggle-frames-button"
+            type="button"
+            onClick={onToggleFrames}
+            aria-label={framesVisible ? "Hide slide frames" : "Show slide frames"}
+            aria-pressed={framesVisible}
+          >
+            {framesVisible ? <EyeOffIcon /> : <EyeIcon />}
+            {framesVisible ? "Hide frames" : "Show frames"}
+          </button>
+          <button
+            className={`toggle-morph-button ${morphEnabled ? "is-active" : ""}`}
+            type="button"
+            onClick={onToggleMorph}
+            aria-label="Morph"
+            aria-pressed={morphEnabled}
+            title={morphEnabled ? "Disable Morph slide transition" : "Enable Morph slide transition"}
+          >
+            <MorphIcon /> Morph
+          </button>
+        </div>
+        {morphEnabled ? (
+          <label className="morph-duration-control">
+            <span>Duration</span>
+            <input
+              type="range"
+              aria-label="Morph duration"
+              aria-valuetext={morphDurationSeconds}
+              min={MIN_SLIDE_MORPH_DURATION_MS}
+              max={MAX_SLIDE_MORPH_DURATION_MS}
+              step={SLIDE_MORPH_DURATION_STEP_MS}
+              value={morphDurationMs}
+              onChange={(event) => onMorphDurationChange(Number(event.currentTarget.value))}
+            />
+            <output>{morphDurationSeconds}</output>
+          </label>
+        ) : null}
       </div>
       <div className="rail-scroll">
         {project.slideOrder.length ? project.slideOrder.map((slide, index) => {

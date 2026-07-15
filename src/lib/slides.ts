@@ -51,6 +51,7 @@ export function focusSlide(
   api: ExcalidrawImperativeAPI,
   frameId: string,
   animate = true,
+  duration = animate ? 300 : 0,
 ): boolean {
   const frame = api.getSceneElements().find((element) => element.id === frameId && isFrame(element));
   if (!frame) return false;
@@ -58,7 +59,7 @@ export function focusSlide(
     fitToViewport: true,
     viewportZoomFactor: 0.92,
     animate,
-    duration: animate ? 300 : 0,
+    duration,
   });
   return true;
 }

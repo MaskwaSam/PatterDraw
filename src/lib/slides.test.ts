@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import { moveSlide, reconcileSlides } from "./slides";
+import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
+import { focusSlide, moveSlide, reconcileSlides } from "./slides";
 
 const frame = (id: string, x: number, y: number, name: string | null = null) => ({
   id, type: "frame", x, y, name, isDeleted: false,
@@ -19,5 +20,21 @@ describe("slides", () => {
     const initial = reconcileSlides("scene", [frame("a", 0, 0)], []);
     expect(reconcileSlides("scene", [], initial)).toEqual([]);
   });
-});
 
+  it("uses the requested Morph duration when focusing a slide", () => {
+    const slideFrame = frame("a", 0, 0);
+    const scrollToContent = vi.fn();
+    const api = {
+      getSceneElements: () => [slideFrame],
+      scrollToContent,
+    } as unknown as ExcalidrawImperativeAPI;
+
+    expect(focusSlide(api, "a", true, 650)).toBe(true);
+    expect(scrollToContent).toHaveBeenCalledWith(slideFrame, {
+      fitToViewport: true,
+      viewportZoomFactor: 0.92,
+      animate: true,
+      duration: 650,
+    });
+  });
+});

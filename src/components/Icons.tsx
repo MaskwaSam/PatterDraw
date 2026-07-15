@@ -82,6 +82,9 @@ export const RedoIcon = (props: IconProps) => (
 export const PresentIcon = (props: IconProps) => (
   <IconBase {...props}><path d="M3 4h18v12H3zM8 21l4-5 4 5"/></IconBase>
 );
+export const MorphIcon = (props: IconProps) => (
+  <IconBase {...props}><rect x="3.5" y="5" width="8" height="8" rx="1.5"/><rect x="12.5" y="11" width="8" height="8" rx="1.5"/><path d="m10 16 2 2 2-2M14 8l-2-2-2 2"/></IconBase>
+);
 export const EnterFullscreenIcon = (props: IconProps) => (
   <IconBase {...props}><path d="M9 4H4v5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></IconBase>
 );

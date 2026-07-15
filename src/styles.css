@@ -204,7 +204,8 @@ button { color: inherit; }
 }
 .new-slide-button,
 .draw-frame-button,
-.toggle-frames-button {
+.toggle-frames-button,
+.toggle-morph-button {
   min-height: 37px;
   display: flex;
   align-items: center;
@@ -223,12 +224,31 @@ button { color: inherit; }
 }
 .new-slide-button:hover { background: #204aa5; }
 .draw-frame-button,
-.toggle-frames-button { border: 1px solid #c8d0dc; background: #fff; color: #34405a; }
+.toggle-frames-button,
+.toggle-morph-button { border: 1px solid #c8d0dc; background: #fff; color: #34405a; }
 .draw-frame-button:hover,
-.toggle-frames-button:hover { border-color: #9eabc0; background: #f5f7fa; }
+.toggle-frames-button:hover,
+.toggle-morph-button:hover { border-color: #9eabc0; background: #f5f7fa; }
 .new-slide-button svg,
 .draw-frame-button svg,
-.toggle-frames-button svg { width: 16px; height: 16px; }
+.toggle-frames-button svg,
+.toggle-morph-button svg { width: 16px; height: 16px; flex: 0 0 auto; }
+.slide-display-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.slide-display-actions button { min-width: 0; gap: 5px; padding-inline: 5px; font-size: 11px; white-space: nowrap; }
+.toggle-morph-button.is-active { border-color: #91aff3; color: #204aa5; background: var(--accent-soft); }
+.morph-duration-control {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 35px;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 3px 0;
+  color: #657087;
+  font-size: 10px;
+  font-weight: 650;
+}
+.morph-duration-control input { min-width: 0; width: 100%; accent-color: var(--accent); cursor: pointer; }
+.morph-duration-control output { color: #465066; font-variant-numeric: tabular-nums; text-align: right; }
 .rail-scroll { min-height: 0; overflow: auto; padding: 4px 12px 18px; }
 .slide-thumbnail-wrap { position: relative; }
 .slide-thumbnail {

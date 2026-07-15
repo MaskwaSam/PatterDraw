@@ -1,4 +1,5 @@
 import { createLocalId } from "./lib/id";
+import { DEFAULT_SLIDE_MORPH_DURATION_MS } from "./lib/slide-transition";
 
 export const CLASSROOM_PROJECT_VERSION = 1 as const;
 
@@ -51,6 +52,10 @@ export interface ClassroomProject {
   slideOrder: ClassroomSlide[];
   /** Wrapper-owned frame visibility preference. Optional only for legacy v1 project files. */
   slideFramesVisible?: boolean;
+  /** Smooth presentation navigation preference. Optional only for legacy v1 project files. */
+  slideMorphEnabled?: boolean;
+  /** Morph duration in milliseconds. Optional only for legacy v1 project files. */
+  slideMorphDurationMs?: number;
   /** Ordered PDF page scene IDs. Optional only for legacy v1 project files. */
   pdfPageOrder?: SceneId[];
   pdfDocuments: Record<PdfDocumentId, PdfDocumentSource>;
@@ -91,6 +96,8 @@ export function createBlankProject(now = new Date()): ClassroomProject {
     },
     slideOrder: [],
     slideFramesVisible: true,
+    slideMorphEnabled: false,
+    slideMorphDurationMs: DEFAULT_SLIDE_MORPH_DURATION_MS,
     pdfPageOrder: [],
     pdfDocuments: {},
   };

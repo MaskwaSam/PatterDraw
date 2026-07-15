@@ -30,6 +30,15 @@ describe("classroom project files", () => {
     expect(decoded.project.slideFramesVisible).toBe(false);
   });
 
+  it("round-trips the Morph slide-transition preference", () => {
+    const project = createBlankProject();
+    project.slideMorphEnabled = true;
+    project.slideMorphDurationMs = 1_250;
+    const decoded = decodeProjectFile(encodeProjectFile(project, {}));
+    expect(decoded.project.slideMorphEnabled).toBe(true);
+    expect(decoded.project.slideMorphDurationMs).toBe(1_250);
+  });
+
   it("rejects a project whose PDF bytes do not match its manifest", () => {
     const project = createBlankProject();
     project.pdfDocuments.bad = {

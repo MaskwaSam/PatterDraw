@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ClassroomProject, SerializedScene } from "../types";
+import { createBlankProject, type ClassroomProject, type SerializedScene } from "../types";
 import { assertSafeProject, sanitizeProject, sanitizeScene, sanitizeWebLink } from "./safety";
 import { MATH_TOOL_CATALOGUE } from "./math-tools/catalogue";
 
@@ -47,6 +47,19 @@ describe("student safety", () => {
       pdfDocuments: {},
     } satisfies ClassroomProject;
     expect(sanitizeProject(project).scenes["scene-1"].elements[0].link).toBeNull();
+  });
+
+  it("normalizes and validates the Morph slide-transition preference", () => {
+    const project = createBlankProject();
+    delete project.slideMorphEnabled;
+    delete project.slideMorphDurationMs;
+    expect(sanitizeProject(project).slideMorphEnabled).toBe(false);
+    expect(sanitizeProject(project).slideMorphDurationMs).toBe(650);
+    expect(sanitizeProject({ ...project, slideMorphDurationMs: 673 }).slideMorphDurationMs).toBe(650);
+    expect(() => assertSafeProject({ ...project, slideMorphEnabled: "yes" } as unknown as ClassroomProject))
+      .toThrow(/Morph preference must be a boolean/);
+    expect(() => assertSafeProject({ ...project, slideMorphDurationMs: 5_000 }))
+      .toThrow(/Morph duration must be between/);
   });
 
   it("rejects duplicate or dangling PDF page-order entries", () => {

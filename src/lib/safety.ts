@@ -1,6 +1,11 @@
 import type { ClassroomProject, SerializedScene } from "../types";
 import { sanitizeClassroomMathToolMetadata } from "./math-tools/types";
 import { reconcilePdfPageOrder } from "./pdf/page-order";
+import {
+  MAX_SLIDE_MORPH_DURATION_MS,
+  MIN_SLIDE_MORPH_DURATION_MS,
+  normalizeSlideMorphDurationMs,
+} from "./slide-transition";
 
 export const MAX_PROJECT_BYTES = 150 * 1024 * 1024;
 export const MAX_PDF_BYTES = 75 * 1024 * 1024;
@@ -97,6 +102,8 @@ export function sanitizeProject(project: ClassroomProject): ClassroomProject {
   );
   safe.pdfPageOrder = reconcilePdfPageOrder(safe);
   safe.slideFramesVisible = safe.slideFramesVisible !== false;
+  safe.slideMorphEnabled = safe.slideMorphEnabled === true;
+  safe.slideMorphDurationMs = normalizeSlideMorphDurationMs(safe.slideMorphDurationMs);
   return safe;
 }
 
@@ -108,6 +115,20 @@ export function assertSafeProject(project: ClassroomProject): void {
   if (!Array.isArray(project.slideOrder)) throw new Error("Slide order must be a list.");
   if (project.slideFramesVisible !== undefined && typeof project.slideFramesVisible !== "boolean") {
     throw new Error("Slide frame visibility must be a boolean.");
+  }
+  if (project.slideMorphEnabled !== undefined && typeof project.slideMorphEnabled !== "boolean") {
+    throw new Error("Slide Morph preference must be a boolean.");
+  }
+  if (
+    project.slideMorphDurationMs !== undefined
+    && (
+      typeof project.slideMorphDurationMs !== "number"
+      || !Number.isFinite(project.slideMorphDurationMs)
+      || project.slideMorphDurationMs < MIN_SLIDE_MORPH_DURATION_MS
+      || project.slideMorphDurationMs > MAX_SLIDE_MORPH_DURATION_MS
+    )
+  ) {
+    throw new Error("Slide Morph duration must be between 250 and 2000 milliseconds.");
   }
   if (project.pdfPageOrder !== undefined && !Array.isArray(project.pdfPageOrder)) {
     throw new Error("PDF page order must be a list.");

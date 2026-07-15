@@ -80,6 +80,10 @@ import {
   moveSlide,
   reconcileSlides,
 } from "./lib/slides";
+import {
+  DEFAULT_SLIDE_MORPH_DURATION_MS,
+  normalizeSlideMorphDurationMs,
+} from "./lib/slide-transition";
 import { sanitizeProject, sanitizeScene, sanitizeWebLink } from "./lib/safety";
 import { openExternalWebLink } from "./lib/offline-network";
 import { activateSlideFrameTool, addBlankSlideFrame } from "./lib/slide-frame-tool";
@@ -143,6 +147,7 @@ type MathInteractionState = {
 type SlideFrameAction =
   | { kind: "add"; frameId: string; title: string }
   | { kind: "draw" };
+type PendingPresentationTransition = { frameId: string; animate: boolean; durationMs: number };
 const CLASSROOM_UI_OPTIONS: ExcalidrawProps["UIOptions"] = {
   canvasActions: {
     changeViewBackgroundColor: false,
@@ -267,6 +272,7 @@ export default function App() {
   const activeSceneIdRef = useRef<string | null>(null);
   const switchingSceneRef = useRef(false);
   const pendingFrameIdRef = useRef<string | null>(null);
+  const pendingPresentationTransitionRef = useRef<PendingPresentationTransition | null>(null);
   const pendingCreatedFrameIdRef = useRef<string | null>(null);
   const pendingSlideFrameActionRef = useRef<SlideFrameAction | null>(null);
   const slideFramesVisibleRef = useRef(true);
@@ -1179,17 +1185,27 @@ export default function App() {
     openScene(slide.sceneId, slide.frameId);
   }, [openScene]);
 
-  const setPresentationIndex = useCallback((index: number) => {
+  const setPresentationIndex = useCallback((index: number, allowMorph = true) => {
     if (!project?.slideOrder[index]) return;
     const slide = project.slideOrder[index];
+    const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    pendingPresentationTransitionRef.current = {
+      frameId: slide.frameId,
+      animate: allowMorph && project.slideMorphEnabled === true && !prefersReducedMotion,
+      durationMs: normalizeSlideMorphDurationMs(project.slideMorphDurationMs),
+    };
     setPresentation((current) => ({
       index,
       tool: current?.tool || "laser",
       inkColour: current?.inkColour || DEFAULT_PRESENTATION_INK_COLOUR,
       inkWidth: current?.inkWidth || DEFAULT_PRESENTATION_INK_WIDTH,
     }));
-    openSlide(slide);
-  }, [openSlide, project]);
+    setActiveSlideId(slide.id);
+    if (slide.sceneId !== activeSceneIdRef.current) switchingSceneRef.current = true;
+    setProject((current) => current && current.activeSceneId !== slide.sceneId
+      ? { ...current, activeSceneId: slide.sceneId }
+      : current);
+  }, [project]);
 
   const startPresentation = useCallback(async () => {
     if (!project || !api || workspaceMode !== "slides") return;
@@ -1198,16 +1214,10 @@ export default function App() {
       return;
     }
     const index = Math.max(0, project.slideOrder.findIndex((slide) => slide.id === activeSlideId));
-    setPresentation({
-      index,
-      tool: "laser",
-      inkColour: DEFAULT_PRESENTATION_INK_COLOUR,
-      inkWidth: DEFAULT_PRESENTATION_INK_WIDTH,
-    });
     api.setToast(null);
     api.updateFrameRendering({ enabled: true, outline: false, name: false, clip: true });
     api.setActiveTool({ type: "laser" });
-    setPresentationIndex(index);
+    setPresentationIndex(index, false);
     try { await shellRef.current?.requestFullscreen(); } catch { /* Fullscreen can be browser-blocked. */ }
   }, [activeSlideId, api, project, setPresentationIndex, workspaceMode]);
 
@@ -1224,27 +1234,35 @@ export default function App() {
 
     let refreshFrame = 0;
     let focusFrame = 0;
-    const fitSlide = () => {
+    const transition = pendingPresentationTransitionRef.current?.frameId === presentationSlide.frameId
+      ? pendingPresentationTransitionRef.current
+      : null;
+    const fitSlide = (animate = false) => {
       window.cancelAnimationFrame(refreshFrame);
       window.cancelAnimationFrame(focusFrame);
       refreshFrame = window.requestAnimationFrame(() => {
         api.updateFrameRendering({ enabled: true, outline: false, name: false, clip: true });
         api.refresh();
         focusFrame = window.requestAnimationFrame(() => {
-          focusSlide(api, presentationSlide.frameId, false);
+          focusSlide(api, presentationSlide.frameId, animate, animate ? (transition?.durationMs || DEFAULT_SLIDE_MORPH_DURATION_MS) : 0);
+          if (pendingPresentationTransitionRef.current?.frameId === presentationSlide.frameId) {
+            pendingPresentationTransitionRef.current = null;
+          }
         });
       });
     };
-    fitSlide();
-    window.addEventListener("resize", fitSlide);
+    const handleResize = () => fitSlide(false);
+    fitSlide(transition?.animate === true);
+    window.addEventListener("resize", handleResize);
     return () => {
-      window.removeEventListener("resize", fitSlide);
+      window.removeEventListener("resize", handleResize);
       window.cancelAnimationFrame(refreshFrame);
       window.cancelAnimationFrame(focusFrame);
     };
   }, [api, isFullscreen, presentationSlide?.frameId, presentationSlide?.sceneId, project?.activeSceneId]);
 
   const stopPresentation = useCallback(() => {
+    pendingPresentationTransitionRef.current = null;
     setPresentation(null);
     api?.updateFrameRendering({
       enabled: slideFramesVisibleRef.current,
@@ -1487,6 +1505,22 @@ export default function App() {
     } : current);
   }, [api]);
 
+  const toggleSlideMorph = useCallback(() => {
+    setProject((current) => current ? {
+      ...current,
+      updatedAt: nowIso(),
+      slideMorphEnabled: current.slideMorphEnabled !== true,
+    } : current);
+  }, []);
+
+  const setSlideMorphDuration = useCallback((durationMs: number) => {
+    setProject((current) => current ? {
+      ...current,
+      updatedAt: nowIso(),
+      slideMorphDurationMs: normalizeSlideMorphDurationMs(durationMs),
+    } : current);
+  }, []);
+
   const deleteSlide = useCallback((slide: ClassroomSlide) => {
     if (!api || !project) return;
     if (!window.confirm(`Delete ${slide.title}? The frame will be removed, but its board content will stay.`)) return;
@@ -1691,6 +1725,10 @@ export default function App() {
           onDeleteSlide={deleteSlide}
           framesVisible={areSlideFramesVisible}
           onToggleFrames={toggleSlideFrames}
+          morphEnabled={project.slideMorphEnabled === true}
+          morphDurationMs={normalizeSlideMorphDurationMs(project.slideMorphDurationMs)}
+          onToggleMorph={toggleSlideMorph}
+          onMorphDurationChange={setSlideMorphDuration}
         />
       )}
       {!presentation && workspaceMode === "pdf" && isPdfRailVisible && (
@@ -1711,6 +1749,8 @@ export default function App() {
       <main
         className="editor-region"
         data-presentation-zoom={presentation ? zoom : undefined}
+        data-slide-transition={presentation ? (project.slideMorphEnabled === true ? "morph" : "none") : undefined}
+        data-morph-duration-ms={presentation ? normalizeSlideMorphDurationMs(project.slideMorphDurationMs) : undefined}
         onPointerDownCapture={syncPresentationInkOnPointerDown}
         onPointerUp={finishPresentationInkStroke}
         onPointerCancel={finishPresentationInkStroke}
