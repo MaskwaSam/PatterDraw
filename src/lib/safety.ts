@@ -128,7 +128,7 @@ export function assertSafeProject(project: ClassroomProject): void {
       || project.slideMorphDurationMs > MAX_SLIDE_MORPH_DURATION_MS
     )
   ) {
-    throw new Error("Slide Morph duration must be between 250 and 2000 milliseconds.");
+    throw new Error("Slide Morph duration must be between 250 and 5000 milliseconds.");
   }
   if (project.pdfPageOrder !== undefined && !Array.isArray(project.pdfPageOrder)) {
     throw new Error("PDF page order must be a list.");

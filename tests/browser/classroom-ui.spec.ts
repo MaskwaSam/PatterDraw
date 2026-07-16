@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Download } from "@playwright/test";
 import { PDFDocument } from "pdf-lib";
 
 async function enableExperimentalMathTools(page: import("@playwright/test").Page) {
@@ -153,6 +153,68 @@ async function openTestPdf(page: import("@playwright/test").Page, pageCount = 1)
   });
   await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, { timeout: 15_000 });
   await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(pageCount, { timeout: 15_000 });
+}
+
+async function downloadBytes(download: Download): Promise<Buffer> {
+  const stream = await download.createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks);
+}
+
+async function useDownloadBasedImageExport(page: import("@playwright/test").Page) {
+  await page.addInitScript(() => {
+    delete (window as Window & { showOpenFilePicker?: unknown }).showOpenFilePicker;
+  });
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+}
+
+function pngDimensions(bytes: Buffer): { width: number; height: number } {
+  expect(bytes.subarray(1, 4).toString("ascii")).toBe("PNG");
+  return {
+    width: bytes.readUInt32BE(16),
+    height: bytes.readUInt32BE(20),
+  };
+}
+
+function exportTestRectangle(
+  id: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  index: string,
+  frameId: string | null = null,
+) {
+  return {
+    id,
+    type: "rectangle",
+    x,
+    y,
+    width,
+    height,
+    angle: 0,
+    strokeColor: "#1e1e1e",
+    backgroundColor: "#a5d8ff",
+    fillStyle: "solid",
+    strokeWidth: 2,
+    strokeStyle: "solid",
+    roughness: 0,
+    opacity: 100,
+    groupIds: [],
+    frameId,
+    roundness: { type: 3 },
+    seed: 1,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    boundElements: null,
+    updated: 1,
+    link: null,
+    locked: false,
+    index,
+  };
 }
 
 async function autosavedFreedrawStroke(page: import("@playwright/test").Page): Promise<{
@@ -732,6 +794,64 @@ async function autosavedSlideDeletion(page: import("@playwright/test").Page): Pr
   });
 }
 
+async function autosavedRectanglePositions(page: import("@playwright/test").Page): Promise<Array<{
+  id: string;
+  x: number;
+  y: number;
+}>> {
+  return page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const project = await new Promise<{
+      activeSceneId: string;
+      scenes: Record<string, { elements: Array<{ id: string; isDeleted?: boolean; type?: string; x?: number; y?: number }> }>;
+    } | undefined>((resolve, reject) => {
+      const transaction = database.transaction("keyval", "readonly");
+      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    return (project?.scenes[project.activeSceneId]?.elements || [])
+      .filter((element) => element.type === "rectangle" && !element.isDeleted)
+      .map((element) => ({ id: element.id, x: element.x || 0, y: element.y || 0 }))
+      .sort((left, right) => left.x - right.x);
+  });
+}
+
+async function autosavedPdfBackgroundPosition(page: import("@playwright/test").Page): Promise<{
+  locked: boolean;
+  x: number;
+  y: number;
+} | null> {
+  return page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const project = await new Promise<{
+      activeSceneId: string;
+      scenes: Record<string, {
+        elements: Array<{ id: string; locked?: boolean; x?: number; y?: number }>;
+        pdfPage?: { backgroundElementId: string };
+      }>;
+    } | undefined>((resolve, reject) => {
+      const transaction = database.transaction("keyval", "readonly");
+      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    const scene = project?.scenes[project.activeSceneId];
+    const background = scene?.elements.find((element) => element.id === scene.pdfPage?.backgroundElementId);
+    return background ? { locked: Boolean(background.locked), x: background.x || 0, y: background.y || 0 } : null;
+  });
+}
+
 test.beforeEach(async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
@@ -1025,16 +1145,17 @@ test("toggles and persists the Morph slide transition", async ({ page }) => {
   await expect(morph).toHaveAttribute("aria-pressed", "true");
   const duration = page.getByRole("slider", { name: "Morph duration", exact: true });
   await expect(duration).toHaveValue("650");
-  await duration.fill("1200");
-  await expect(page.locator(".morph-duration-control output")).toHaveText("1.2 s");
-  await expect.poll(() => autosavedMorphSettings(page)).toEqual({ durationMs: 1_200, enabled: true });
+  await expect(duration).toHaveAttribute("max", "5000");
+  await duration.fill("5000");
+  await expect(page.locator(".morph-duration-control output")).toHaveText("5 s");
+  await expect.poll(() => autosavedMorphSettings(page)).toEqual({ durationMs: 5_000, enabled: true });
 
   await page.reload();
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
   await page.getByRole("button", { name: "Slides", exact: true }).click();
   await expect(page.getByRole("button", { name: "Morph", exact: true }))
     .toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByRole("slider", { name: "Morph duration", exact: true })).toHaveValue("1200");
+  await expect(page.getByRole("slider", { name: "Morph duration", exact: true })).toHaveValue("5000");
 });
 
 test("toggles slide frames for a cleaner board without removing slides", async ({ page }) => {
@@ -1475,6 +1596,7 @@ test("inserts and persists a Letter-calibrated ruler from Math tools", async ({ 
   const mathTools = page.getByTestId("toolbar-math-tools");
   await expect(extraToolsMenu).toBeVisible();
   await expect(mathTools).toBeVisible();
+  await expect(page.getByTestId("toolbar-lasso")).toHaveCount(0);
   await expect(mathTools).not.toHaveAttribute("role", "menuitem");
   await expect(mathTools.locator("xpath=ancestor::*[contains(@class, 'dropdown-menu-container')]")).toHaveCount(1);
 
@@ -1592,6 +1714,187 @@ test("inserts and persists a Letter-calibrated ruler from Math tools", async ({ 
     measurementLabelFontSize: "12",
     scaleCaptionFontSize: "12",
   });
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(externalRequests).toEqual([]);
+  expect(consoleErrors).toEqual([]);
+});
+
+test("uses the experimental one-shot lasso for live, additive, and cancellable selection", async ({ page }) => {
+  test.setTimeout(90_000);
+  const consoleErrors: string[] = [];
+  const externalRequests: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== "http://127.0.0.1:5173") {
+      externalRequests.push(request.url());
+    }
+  });
+
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  await dragOnBoard(page, { x: 300, y: 220 }, { x: 420, y: 320 });
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  await dragOnBoard(page, { x: 650, y: 220 }, { x: 770, y: 320 });
+  await expect.poll(() => autosavedRectanglePositions(page)).toHaveLength(2);
+  const initial = await autosavedRectanglePositions(page);
+
+  const openExtraTools = async () => {
+    await page.locator(".App-toolbar__extra-tools-trigger").click();
+    await expect(page.locator(".App-toolbar__extra-tools-dropdown")).toBeVisible();
+  };
+  await openExtraTools();
+  await expect(page.getByTestId("toolbar-lasso")).toHaveCount(0);
+  await page.getByTestId("toolbar-math-tools").click();
+  const experimentalToggle = page.getByRole("switch", { name: "Experimental features" });
+  await experimentalToggle.check();
+  await page.getByRole("button", { name: "Close math tools" }).click();
+
+  await openExtraTools();
+  const lasso = page.getByTestId("toolbar-lasso");
+  await expect(lasso).toBeVisible();
+  await lasso.click();
+  const overlay = page.getByTestId("lasso-overlay");
+  await expect(overlay).toBeVisible();
+  const host = await page.locator(".editor-host").boundingBox();
+  if (!host) throw new Error("Editor host has no visible bounds.");
+  await page.mouse.move(host.x + 270, host.y + 190);
+  await page.mouse.down();
+  await page.mouse.move(host.x + 450, host.y + 190, { steps: 4 });
+  await expect(overlay.locator("path")).not.toHaveAttribute("d", "");
+  await page.mouse.move(host.x + 450, host.y + 350, { steps: 4 });
+  await page.mouse.move(host.x + 270, host.y + 350, { steps: 4 });
+  await page.mouse.up();
+  await expect(overlay).toHaveCount(0);
+  await expect(page.getByTestId("toolbar-selection")).toBeChecked();
+
+  await page.keyboard.press("Shift+ArrowRight");
+  await expect.poll(async () => {
+    const positions = await autosavedRectanglePositions(page);
+    return positions[0].x - initial[0].x;
+  }).toBe(5);
+  let moved = await autosavedRectanglePositions(page);
+  expect(moved[1]).toMatchObject(initial[1]);
+
+  await openExtraTools();
+  await page.getByTestId("toolbar-lasso").click();
+  await expect(page.getByTestId("lasso-overlay")).toHaveAttribute("data-initial-selection-count", "1");
+  await page.mouse.click(host.x + 520, host.y + 500);
+  await expect(page.getByTestId("lasso-overlay")).toHaveCount(0);
+  await page.keyboard.press("Shift+ArrowDown");
+  await expect.poll(async () => {
+    const positions = await autosavedRectanglePositions(page);
+    return positions[0].y - initial[0].y;
+  }).toBe(5);
+
+  moved = await autosavedRectanglePositions(page);
+  await openExtraTools();
+  await page.getByTestId("toolbar-lasso").click();
+  await page.keyboard.down("Shift");
+  await page.mouse.move(host.x + 620, host.y + 190);
+  await page.mouse.down();
+  await page.mouse.move(host.x + 800, host.y + 190, { steps: 4 });
+  await page.mouse.move(host.x + 800, host.y + 350, { steps: 4 });
+  await page.mouse.move(host.x + 620, host.y + 350, { steps: 4 });
+  await page.mouse.up();
+  await page.keyboard.up("Shift");
+  await page.keyboard.press("Shift+ArrowDown");
+  await expect.poll(async () => {
+    const positions = await autosavedRectanglePositions(page);
+    return positions.map((position, index) => position.y - moved[index].y);
+  }).toEqual([5, 5]);
+
+  await page.reload();
+  await openExtraTools();
+  await expect(page.getByTestId("toolbar-lasso")).toBeVisible();
+  const beforeTouch = await autosavedRectanglePositions(page);
+  await page.getByTestId("toolbar-lasso").click();
+  await expect(page.getByTestId("lasso-overlay")).toBeVisible();
+  const touchHost = await page.locator(".editor-host").boundingBox();
+  if (!touchHost) throw new Error("Editor host has no visible bounds after reload.");
+  await page.evaluate(({ left, top }) => {
+    const canvas = document.querySelector<HTMLCanvasElement>(".editor-host canvas.interactive");
+    if (!canvas) throw new Error("Interactive drawing canvas is unavailable.");
+    const dispatch = (type: string, x: number, y: number, buttons: number) => canvas.dispatchEvent(new PointerEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      clientX: left + x,
+      clientY: top + y,
+      pointerId: 73,
+      pointerType: "touch",
+      isPrimary: true,
+      button: 0,
+      buttons,
+    }));
+    dispatch("pointerdown", 270, 190, 1);
+    dispatch("pointermove", 450, 190, 1);
+    dispatch("pointermove", 450, 360, 1);
+    dispatch("pointermove", 270, 360, 1);
+    dispatch("pointerup", 270, 190, 0);
+  }, { left: touchHost.x, top: touchHost.y });
+  await expect(page.getByTestId("lasso-overlay")).toHaveCount(0);
+  await page.keyboard.press("Shift+ArrowRight");
+  await expect.poll(async () => {
+    const positions = await autosavedRectanglePositions(page);
+    return positions.map((position, index) => position.x - beforeTouch[index].x);
+  }).toEqual([5, 0]);
+
+  const beforeEscape = await autosavedRectanglePositions(page);
+  await openExtraTools();
+  await page.getByTestId("toolbar-lasso").click();
+  const escapeOverlay = page.getByTestId("lasso-overlay");
+  await expect(escapeOverlay).toHaveAttribute("data-initial-selection-count", "1");
+  await page.evaluate(({ left, top }) => {
+    const canvas = document.querySelector<HTMLCanvasElement>(".editor-host canvas.interactive");
+    if (!canvas) throw new Error("Interactive drawing canvas is unavailable.");
+    for (const [type, x, y] of [["pointerdown", 600, 180], ["pointermove", 810, 180], ["pointermove", 810, 370]] as const) {
+      canvas.dispatchEvent(new PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX: left + x,
+        clientY: top + y,
+        pointerId: 81,
+        pointerType: "mouse",
+        isPrimary: true,
+        button: 0,
+        buttons: 1,
+      }));
+    }
+  }, { left: touchHost.x, top: touchHost.y });
+  await expect(escapeOverlay.locator("path")).not.toHaveAttribute("d", "");
+  await page.keyboard.press("Escape");
+  await expect(escapeOverlay).toHaveCount(0);
+  await page.keyboard.press("Shift+ArrowDown");
+  await expect.poll(async () => {
+    const positions = await autosavedRectanglePositions(page);
+    return positions.map((position, index) => position.y - beforeEscape[index].y);
+  }).toEqual([5, 0]);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openExtraTools();
+  const mobileLassoBox = await page.getByTestId("toolbar-lasso").boundingBox();
+  expect(mobileLassoBox).not.toBeNull();
+  expect((mobileLassoBox?.x || 0) + (mobileLassoBox?.width || 0)).toBeLessThanOrEqual(390);
+  await page.locator(".App-toolbar__extra-tools-trigger").click();
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  await openTestPdf(page);
+  await expect.poll(() => autosavedPdfBackgroundPosition(page)).toMatchObject({ locked: true });
+  const pdfBackground = await autosavedPdfBackgroundPosition(page);
+  if (!pdfBackground) throw new Error("The imported PDF background was not autosaved.");
+  await openExtraTools();
+  await page.getByTestId("toolbar-lasso").click();
+  const pdfHost = await page.locator(".editor-host").boundingBox();
+  if (!pdfHost) throw new Error("PDF editor host has no visible bounds.");
+  await page.mouse.move(pdfHost.x + 40, pdfHost.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(pdfHost.x + pdfHost.width - 40, pdfHost.y + 100, { steps: 4 });
+  await page.mouse.move(pdfHost.x + pdfHost.width - 40, pdfHost.y + pdfHost.height - 100, { steps: 4 });
+  await page.mouse.move(pdfHost.x + 40, pdfHost.y + pdfHost.height - 100, { steps: 4 });
+  await page.mouse.up();
+  await page.keyboard.press("Shift+ArrowRight");
+  await expect.poll(() => autosavedPdfBackgroundPosition(page)).toEqual(pdfBackground);
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   expect(externalRequests).toEqual([]);
   expect(consoleErrors).toEqual([]);
@@ -2413,6 +2716,190 @@ test("navigates PDF pages with the left and right arrow keys", async ({ page }) 
   await expect(resizeHandle).toHaveAttribute("aria-valuenow", "240");
   await expect(pages.nth(1)).toHaveClass(/is-selected/);
   expect(consoleErrors).toEqual([]);
+});
+
+test("opens the official image export dialog with native controls and export semantics", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  const externalRequests: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== "http://127.0.0.1:5173") {
+      externalRequests.push(request.url());
+    }
+  });
+  await useDownloadBasedImageExport(page);
+
+  const moreExports = page.getByRole("button", { name: "More export options", exact: true });
+  await moreExports.click();
+  const wrapperDialog = page.getByRole("dialog", { name: "More exports", exact: true });
+  const imageExportEntry = wrapperDialog.getByRole("button", { name: /Export image…/ });
+  await expect(imageExportEntry).toBeDisabled();
+
+  const left = exportTestRectangle("left-object", 100, 120, 100, 80, "a0");
+  const right = exportTestRectangle("right-object", 600, 120, 150, 100, "a1");
+  await wrapperDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "native-image-export.excalidraw",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({
+      type: "excalidraw",
+      version: 2,
+      source: "local",
+      name: "Native Image Export",
+      elements: [left, right],
+      appState: { selectedElementIds: { "left-object": true } },
+      files: {},
+    })),
+  });
+
+  await moreExports.click();
+  await expect(wrapperDialog.getByRole("button").first()).toContainText("Export image…");
+  await wrapperDialog.getByRole("button", { name: /Export image…/ }).click();
+  await expect(wrapperDialog).toHaveCount(0);
+
+  const nativeDialog = page.locator(".Modal").filter({ has: page.locator(".ImageExportModal") });
+  await expect(nativeDialog).toBeVisible();
+  await expect(nativeDialog.getByRole("heading", { name: "Export image", exact: true }).last()).toBeVisible();
+  const selectedOnly = nativeDialog.getByLabel("Only selected", { exact: true });
+  const background = nativeDialog.getByLabel("Background", { exact: true });
+  const darkMode = nativeDialog.getByLabel("Dark mode", { exact: true });
+  const embedScene = nativeDialog.getByLabel("Embed scene", { exact: true });
+  await expect(selectedOnly).toBeChecked();
+  await expect(background).toBeVisible();
+  await expect(darkMode).toBeVisible();
+  await expect(embedScene).toBeVisible();
+  const exportScales = nativeDialog.locator('input[name="exportScale"]');
+  await expect(exportScales).toHaveCount(3);
+  await expect(exportScales.first()).toBeChecked();
+  await expect(nativeDialog.locator(".ImageExportModal__preview__filename input")).toHaveValue("Native Image Export");
+  await expect(nativeDialog.getByRole("button", { name: "Export to PNG", exact: true })).toBeVisible();
+  await expect(nativeDialog.getByRole("button", { name: "Export to SVG", exact: true })).toBeVisible();
+
+  const selectedPngDownload = page.waitForEvent("download");
+  await nativeDialog.getByRole("button", { name: "Export to PNG", exact: true }).click();
+  const selectedPng = await selectedPngDownload;
+  expect(selectedPng.suggestedFilename()).toBe("Native Image Export.png");
+  expect(pngDimensions(await downloadBytes(selectedPng))).toEqual({ width: 120, height: 100 });
+
+  const preview = nativeDialog.locator(".ImageExportModal__preview__canvas");
+  await expect(preview.locator("canvas")).toBeVisible();
+  await preview.evaluate((node) => {
+    const target = node as HTMLElement;
+    target.dataset.renderCount = "0";
+    new MutationObserver(() => {
+      target.dataset.renderCount = String(Number(target.dataset.renderCount || 0) + 1);
+    }).observe(target, { childList: true });
+  });
+  const expectPreviewRefresh = async (control: import("@playwright/test").Locator) => {
+    const before = Number(await preview.getAttribute("data-render-count") || 0);
+    await control.click();
+    await expect.poll(async () => Number(await preview.getAttribute("data-render-count") || 0)).toBeGreaterThan(before);
+  };
+  await expectPreviewRefresh(selectedOnly);
+  await expect(selectedOnly).not.toBeChecked();
+  await expectPreviewRefresh(background);
+  await expectPreviewRefresh(darkMode);
+  await expectPreviewRefresh(embedScene);
+  await expect(embedScene).toBeChecked();
+  await expectPreviewRefresh(exportScales.nth(1));
+
+  const wholePngDownload = page.waitForEvent("download");
+  await nativeDialog.getByRole("button", { name: "Export to PNG", exact: true }).click();
+  const wholePng = await wholePngDownload;
+  expect(wholePng.suggestedFilename()).toBe("Native Image Export.excalidraw.png");
+  expect(pngDimensions(await downloadBytes(wholePng))).toEqual({ width: 1_340, height: 240 });
+
+  const svgDownloadEvent = page.waitForEvent("download");
+  await nativeDialog.getByRole("button", { name: "Export to SVG", exact: true }).click();
+  const svgDownload = await svgDownloadEvent;
+  expect(svgDownload.suggestedFilename()).toBe("Native Image Export.excalidraw.svg");
+  const svg = (await downloadBytes(svgDownload)).toString("utf8");
+  expect(svg).toContain('width="1340"');
+  expect(svg).toContain('height="240"');
+  expect(svg).toContain("payload-type:application/vnd.excalidraw+json");
+
+  const clipboard = nativeDialog.getByRole("button", { name: "Copy PNG to clipboard", exact: true });
+  if (await clipboard.isVisible()) {
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://127.0.0.1:5173" });
+    await clipboard.click();
+    await expect(clipboard).toHaveClass(/ExcButton--status-success/);
+  }
+
+  await nativeDialog.locator(".Modal__content").focus();
+  await page.keyboard.press("Escape");
+  await expect(nativeDialog).toHaveCount(0);
+  await expect(moreExports).toBeFocused();
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
+  expect(externalRequests).toEqual([]);
+});
+
+test("uses native frame export behavior for a selected slide frame", async ({ page }) => {
+  await useDownloadBasedImageExport(page);
+  const frame = {
+    ...exportTestRectangle("export-frame", 100, 100, 300, 200, "a1"),
+    type: "frame",
+    backgroundColor: "transparent",
+    frameId: null,
+    name: "Export frame",
+  };
+  const inside = exportTestRectangle("inside-frame", 150, 140, 100, 80, "a0", "export-frame");
+  const outside = exportTestRectangle("outside-frame", 700, 100, 200, 150, "a2");
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "selected-frame-export.excalidraw",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({
+      type: "excalidraw",
+      version: 2,
+      source: "local",
+      name: "Selected Frame Export",
+      elements: [inside, frame, outside],
+      appState: { selectedElementIds: { "export-frame": true } },
+      files: {},
+    })),
+  });
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  await page.getByRole("button", { name: /Export image…/ }).click();
+  const nativeDialog = page.locator(".ImageExportModal");
+  await expect(nativeDialog.getByLabel("Only selected", { exact: true })).toBeChecked();
+  const pngDownloadEvent = page.waitForEvent("download");
+  await nativeDialog.getByRole("button", { name: "Export to PNG", exact: true }).click();
+  expect(pngDimensions(await downloadBytes(await pngDownloadEvent))).toEqual({ width: 300, height: 200 });
+});
+
+test("exports a locked PDF background with annotations and fits the native dialog on mobile", async ({ page }) => {
+  test.setTimeout(60_000);
+  await useDownloadBasedImageExport(page);
+  await openTestPdf(page);
+  await expect.poll(() => autosavedPdfBackgroundPosition(page)).toMatchObject({ locked: true });
+  await page.getByTestId("toolbar-freedraw").check({ force: true });
+  await dragOnBoard(page, { x: 470, y: 260 }, { x: 610, y: 350 });
+  await page.getByTestId("toolbar-selection").check({ force: true });
+  await page.keyboard.press("Escape");
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  await page.getByRole("button", { name: /Export image…/ }).click();
+  const nativeDialog = page.locator(".Modal").filter({ has: page.locator(".ImageExportModal") });
+  await expect(nativeDialog).toBeVisible();
+  const bounds = await nativeDialog.locator(".Modal__content").boundingBox();
+  expect(bounds).not.toBeNull();
+  expect((bounds?.x || 0) + (bounds?.width || 0)).toBeLessThanOrEqual(390);
+  expect((bounds?.y || 0) + (bounds?.height || 0)).toBeLessThanOrEqual(844);
+  expect(await nativeDialog.locator(".Modal__content").evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  await expect(nativeDialog.locator(".ImageExportModal__preview__canvas canvas")).toBeVisible();
+
+  const pngDownloadEvent = page.waitForEvent("download");
+  await nativeDialog.getByRole("button", { name: "Export to PNG", exact: true }).click();
+  const png = await pngDownloadEvent;
+  expect(png.suggestedFilename()).toBe("Untitled classroom canvas.png");
+  const bytes = await downloadBytes(png);
+  expect(pngDimensions(bytes)).toEqual({ width: 632, height: 812 });
+  expect(bytes.byteLength).toBeGreaterThan(2_000);
 });
 
 test("adds a blank PDF page, preserves it in the project, and exports it", async ({ page }) => {

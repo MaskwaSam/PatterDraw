@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import {
   BoardIcon,
   ChevronDownIcon,
@@ -23,6 +23,7 @@ interface TopBarProps {
   onMermaid: () => void;
   onExportAll: () => void;
   onExportOptions: () => void;
+  exportOptionsButtonRef: RefObject<HTMLButtonElement>;
   mode: WorkspaceMode;
   onModeChange: (mode: WorkspaceMode) => void;
   pdfAvailable: boolean;
@@ -86,6 +87,7 @@ export function TopBar({
   onMermaid,
   onExportAll,
   onExportOptions,
+  exportOptionsButtonRef,
   mode,
   onModeChange,
   pdfAvailable,
@@ -145,6 +147,7 @@ export function TopBar({
         <div className="export-split">
           <button type="button" onClick={onExportAll}><ExportIcon /><span>Export all</span></button>
           <button
+            ref={exportOptionsButtonRef}
             className="export-options-button"
             type="button"
             aria-label="More export options"

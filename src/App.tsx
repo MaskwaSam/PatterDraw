@@ -18,6 +18,7 @@ import type {
   ExcalidrawProps,
 } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, FileId } from "@excalidraw/excalidraw/element/types";
+import type { LassoGeometrySnapshot } from "./lib/lasso/stable-element-adapter";
 import { TopBar } from "./components/TopBar";
 import { SlideRail } from "./components/SlideRail";
 import { PDF_RAIL_DEFAULT_WIDTH, PdfPageRail } from "./components/PdfPageRail";
@@ -28,6 +29,12 @@ import { MathToolsDialog } from "./components/MathToolsDialog";
 import { MathInteractionOverlay, type CapturedMathPoint } from "./components/MathInteractionOverlay";
 import { ProbabilityRandomizer } from "./components/ProbabilityRandomizer";
 import { SpinnerPointerOverlay, type SpinnerPointerAnimation } from "./components/SpinnerPointerOverlay";
+import {
+  CLASSROOM_LASSO_TOOL,
+  LassoOverlay,
+  lassoSelectionSnapshot,
+  type LassoInitialSelection,
+} from "./components/LassoOverlay";
 import { EquationDialog } from "./components/EquationDialog";
 import { MermaidDialog } from "./components/MermaidDialog";
 import {
@@ -155,7 +162,7 @@ const CLASSROOM_UI_OPTIONS: ExcalidrawProps["UIOptions"] = {
     export: false,
     loadScene: false,
     saveToActiveFile: false,
-    saveAsImage: false,
+    saveAsImage: true,
     toggleTheme: false,
   },
   tools: { image: true },
@@ -263,10 +270,16 @@ export default function App() {
   const [isMathToolsOpen, setIsMathToolsOpen] = useState(false);
   const [mathToolEdit, setMathToolEdit] = useState<MathToolEditState | null>(null);
   const [mathInteraction, setMathInteraction] = useState<MathInteractionState | null>(null);
+  const [isLassoActive, setIsLassoActive] = useState(false);
+  const [lassoGeometryFactory, setLassoGeometryFactory] = useState<
+    ((elements: readonly ExcalidrawElement[]) => LassoGeometrySnapshot) | null
+  >(null);
+  const [lassoInitialSelection, setLassoInitialSelection] = useState<LassoInitialSelection | null>(null);
   const [probabilitySelection, setProbabilitySelection] = useState<ProbabilitySelectionSummary | null>(null);
   const [isProbabilitySpinning, setIsProbabilitySpinning] = useState(false);
   const [spinnerPointerAnimations, setSpinnerPointerAnimations] = useState<SpinnerPointerAnimation[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+  const exportOptionsTriggerRef = useRef<HTMLButtonElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
   const editorHostRef = useRef<HTMLDivElement>(null);
   const activeSceneIdRef = useRef<string | null>(null);
@@ -280,7 +293,11 @@ export default function App() {
   const activeToolTypeRef = useRef<string | null>(null);
   const roughnessBeforeLineRef = useRef<number | null>(null);
   const focusAfterMathToolsRef = useRef<"editor" | "trigger" | null>(null);
+  const nativeImageExportOpenRef = useRef(false);
+  const restoreExportOptionsFocusRef = useRef(false);
   const probabilityRandomizingRef = useRef(false);
+  const lassoActiveRef = useRef(false);
+  const preparedLassoSelectionRef = useRef<LassoInitialSelection | null>(null);
 
   useEffect(() => {
     if (isMathToolsOpen || !focusAfterMathToolsRef.current) return;
@@ -419,6 +436,12 @@ export default function App() {
   }, [project?.slideOrder]);
 
   const handleChange = useCallback<NonNullable<ExcalidrawProps["onChange"]>>((elements, appState, files) => {
+    const isNativeImageExportOpen = appState.openDialog?.name === "imageExport";
+    if (nativeImageExportOpenRef.current && !isNativeImageExportOpen && restoreExportOptionsFocusRef.current) {
+      restoreExportOptionsFocusRef.current = false;
+      window.requestAnimationFrame(() => exportOptionsTriggerRef.current?.focus());
+    }
+    nativeImageExportOpenRef.current = isNativeImageExportOpen;
     setZoom(Math.round(appState.zoom.value * 100));
     setStrokeWidth(appState.currentItemStrokeWidth);
     setAreSlideFramesVisible(appState.frameRendering.enabled);
@@ -430,6 +453,13 @@ export default function App() {
     });
     if (switchingSceneRef.current) return;
     const activeToolType = appState.activeTool.type;
+    if (
+      lassoActiveRef.current
+      && !(activeToolType === "custom" && appState.activeTool.customType === CLASSROOM_LASSO_TOOL)
+    ) {
+      lassoActiveRef.current = false;
+      setIsLassoActive(false);
+    }
     const previousToolType = activeToolTypeRef.current;
     if (activeToolType === "line" && previousToolType !== "line") {
       activeToolTypeRef.current = activeToolType;
@@ -598,6 +628,20 @@ export default function App() {
     }
   }, [api, project]);
 
+  const openNativeImageExport = useCallback(() => {
+    if (!api || !project || api.getSceneElements().length === 0) return;
+    setExportOpen(false);
+    nativeImageExportOpenRef.current = true;
+    restoreExportOptionsFocusRef.current = true;
+    api.updateScene({
+      appState: {
+        name: project.title,
+        openDialog: { name: "imageExport" },
+      },
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
+  }, [api, project]);
+
   const openEquationEditor = useCallback(() => {
     if (!api) return;
     const selectedIds = api.getAppState().selectedElementIds;
@@ -649,6 +693,36 @@ export default function App() {
     focusAfterMathToolsRef.current = "trigger";
     setIsMathToolsOpen(false);
     setMathToolEdit(null);
+  }, []);
+
+  const prepareLasso = useCallback(() => {
+    if (api) preparedLassoSelectionRef.current = lassoSelectionSnapshot(api.getAppState());
+  }, [api]);
+
+  const startLasso = useCallback(async () => {
+    if (!api) return;
+    const initialSelection = preparedLassoSelectionRef.current || lassoSelectionSnapshot(api.getAppState());
+    preparedLassoSelectionRef.current = null;
+    try {
+      const { createLassoGeometrySnapshot } = await import("./lib/lasso/stable-element-adapter");
+      setLassoGeometryFactory(() => createLassoGeometrySnapshot);
+      setLassoInitialSelection(initialSelection);
+      setMathInteraction(null);
+      setIsMathToolsOpen(false);
+      setMathToolEdit(null);
+      focusAfterMathToolsRef.current = null;
+      lassoActiveRef.current = true;
+      setIsLassoActive(true);
+      api.setActiveTool({ type: "custom", customType: CLASSROOM_LASSO_TOOL });
+    } catch (error) {
+      console.error("Lasso selection could not be started.", error);
+      api.setToast({ message: "Lasso selection could not be started." });
+    }
+  }, [api]);
+
+  const finishLasso = useCallback(() => {
+    lassoActiveRef.current = false;
+    setIsLassoActive(false);
   }, []);
 
   const startMathInteraction = useCallback((kind: MathInteractionKind) => {
@@ -933,7 +1007,7 @@ export default function App() {
             y: geometry.y,
             width: geometry.width,
             height: geometry.height,
-            angle: geometry.angle,
+            angle: geometry.angle as ExcalidrawElement["angle"],
             customData: {
               ...(element.customData || {}),
               classroomMathTool: transformationMetadata(element.id, geometry.width, geometry.height, centre, mathInteraction.transformationOptions),
@@ -1708,6 +1782,7 @@ export default function App() {
           onMermaid={openMermaidEditor}
           onExportAll={() => void runFullBoardExport()}
           onExportOptions={() => setExportOpen(true)}
+          exportOptionsButtonRef={exportOptionsTriggerRef}
           mode={workspaceMode}
           onModeChange={changeWorkspaceMode}
           pdfAvailable={pdfScenes.length > 0}
@@ -1803,6 +1878,8 @@ export default function App() {
               <MathToolsMenuExtension
                 editorHost={editorHostRef.current}
                 onOpen={openMathTools}
+                onPrepareLasso={prepareLasso}
+                onStartLasso={startLasso}
               />
               {!presentation && !mathInteraction && probabilitySelection && (
                 <ProbabilityRandomizer
@@ -1813,6 +1890,15 @@ export default function App() {
               )}
             </>
           )}
+          {api && isLassoActive && lassoGeometryFactory && lassoInitialSelection && editorHostRef.current ? (
+            <LassoOverlay
+              api={api}
+              createGeometrySnapshot={lassoGeometryFactory}
+              editorHost={editorHostRef.current}
+              initialSelection={lassoInitialSelection}
+              onExit={finishLasso}
+            />
+          ) : null}
           {mathInteraction && (
             <MathInteractionOverlay
               kind={mathInteraction.kind}
@@ -1941,6 +2027,9 @@ export default function App() {
           <section className="export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title" onMouseDown={(event) => event.stopPropagation()}>
             <h2 id="export-title">More exports</h2>
             <p>Export the current board, presentation frames, or imported PDF pages.</p>
+            <button type="button" onClick={openNativeImageExport} disabled={!api?.getSceneElements().length}>
+              <strong>Export image…</strong><span>Use Excalidraw’s image options for a selection or the complete active scene.</span>
+            </button>
             <button type="button" onClick={() => void runFullBoardExport()} disabled={!api?.getSceneElements().length}>
               <strong>Full board PNG</strong><span>Everything on this board, including content outside the window. Editable scene data is embedded when supported.</span>
             </button>

@@ -1,6 +1,6 @@
 export const DEFAULT_SLIDE_MORPH_DURATION_MS = 650;
 export const MIN_SLIDE_MORPH_DURATION_MS = 250;
-export const MAX_SLIDE_MORPH_DURATION_MS = 2_000;
+export const MAX_SLIDE_MORPH_DURATION_MS = 5_000;
 export const SLIDE_MORPH_DURATION_STEP_MS = 50;
 
 export function normalizeSlideMorphDurationMs(value: unknown): number {

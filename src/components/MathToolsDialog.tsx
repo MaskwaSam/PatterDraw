@@ -12,6 +12,11 @@ import type {
   MathToolCategory,
   MathToolConfiguration,
 } from "../lib/math-tools/types";
+import {
+  persistExperimentalFeaturesPreference,
+  readExperimentalFeaturesPreference,
+  subscribeToExperimentalFeaturesPreference,
+} from "../lib/experimental-features";
 
 interface MathToolsDialogProps {
   initialConfiguration?: MathToolConfiguration | null;
@@ -31,25 +36,7 @@ interface MathToolConfigurationFormProps {
   onInsert: () => void;
 }
 
-const EXPERIMENTAL_MATH_TOOLS_KEY = "excalidraw-classroom:experimental-math-tools:v1";
 const BASELINE_MATH_TOOL_IDS = new Set(["ruler", "protractor"]);
-
-function readExperimentalMathToolsPreference(): boolean {
-  try {
-    return window.localStorage.getItem(EXPERIMENTAL_MATH_TOOLS_KEY) === "enabled";
-  } catch {
-    return false;
-  }
-}
-
-function persistExperimentalMathToolsPreference(enabled: boolean): void {
-  try {
-    if (enabled) window.localStorage.setItem(EXPERIMENTAL_MATH_TOOLS_KEY, "enabled");
-    else window.localStorage.removeItem(EXPERIMENTAL_MATH_TOOLS_KEY);
-  } catch {
-    // The feature gate still works for this dialog if browser storage is unavailable.
-  }
-}
 
 function numericValue(value: number): number | "" {
   return Number.isFinite(value) ? value : "";
@@ -224,7 +211,7 @@ function initialConfigurations(initialConfiguration?: MathToolConfiguration | nu
 
 export function MathToolsDialog({ initialConfiguration, onCancel, onInsert, onStartInteraction }: MathToolsDialogProps) {
   const dialogRef = useRef<HTMLElement>(null);
-  const [experimentalFeaturesEnabled, setExperimentalFeaturesEnabled] = useState(readExperimentalMathToolsPreference);
+  const [experimentalFeaturesEnabled, setExperimentalFeaturesEnabled] = useState(readExperimentalFeaturesPreference);
   const initialDefinition = initialConfiguration
     ? MATH_TOOL_CATALOGUE.find((candidate) => candidate.kind === initialConfiguration.kind) || null
     : null;
@@ -243,6 +230,10 @@ export function MathToolsDialog({ initialConfiguration, onCancel, onInsert, onSt
       return { tool: null, error: error instanceof Error ? error.message : String(error) };
     }
   }, [configuration, editingDefinition]);
+
+  useEffect(() => {
+    return subscribeToExperimentalFeaturesPreference(setExperimentalFeaturesEnabled);
+  }, []);
 
   useEffect(() => {
     const handleDialogKeyDown = (event: KeyboardEvent) => {
@@ -319,7 +310,7 @@ export function MathToolsDialog({ initialConfiguration, onCancel, onInsert, onSt
 
   const toggleExperimentalFeatures = (enabled: boolean) => {
     setExperimentalFeaturesEnabled(enabled);
-    persistExperimentalMathToolsPreference(enabled);
+    persistExperimentalFeaturesPreference(enabled);
     if (!enabled) {
       setCategory("instruments");
       setEditingId(null);

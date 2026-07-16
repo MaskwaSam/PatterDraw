@@ -25,6 +25,9 @@ export const EquationIcon = (props: IconProps) => (
 export const MathToolsIcon = (props: IconProps) => (
   <IconBase {...props}><path d="M4 18 18 4l2 2L6 20z"/><path d="m8 16-2-2m5-1-2-2m5-1-2-2"/><circle cx="6" cy="6" r="2.5"/></IconBase>
 );
+export const LassoIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M19.5 10.5c0 3.6-3.5 6.5-8 6.5S4 14.8 4 11.5 7.1 6 11.5 6s8 1.9 8 4.5Z"/><path d="M11.5 17c0 2.1-1.2 3.5-3 3.5-1.4 0-2.5-.8-2.5-2 0-1 .8-1.7 1.8-1.7"/></IconBase>
+);
 export const RulerIcon = (props: IconProps) => (
   <IconBase {...props}><path d="M3.5 14.5 14.5 3.5l6 6-11 11z"/><path d="m8 13-2-2m5-1-2-2m5-1-2-2m3 5-2-2"/></IconBase>
 );

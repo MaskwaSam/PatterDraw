@@ -56,9 +56,11 @@ describe("student safety", () => {
     expect(sanitizeProject(project).slideMorphEnabled).toBe(false);
     expect(sanitizeProject(project).slideMorphDurationMs).toBe(650);
     expect(sanitizeProject({ ...project, slideMorphDurationMs: 673 }).slideMorphDurationMs).toBe(650);
+    expect(sanitizeProject({ ...project, slideMorphDurationMs: 6_000 }).slideMorphDurationMs).toBe(5_000);
     expect(() => assertSafeProject({ ...project, slideMorphEnabled: "yes" } as unknown as ClassroomProject))
       .toThrow(/Morph preference must be a boolean/);
-    expect(() => assertSafeProject({ ...project, slideMorphDurationMs: 5_000 }))
+    expect(() => assertSafeProject({ ...project, slideMorphDurationMs: 5_000 })).not.toThrow();
+    expect(() => assertSafeProject({ ...project, slideMorphDurationMs: 5_001 }))
       .toThrow(/Morph duration must be between/);
   });
 
