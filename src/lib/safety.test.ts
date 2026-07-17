@@ -64,6 +64,19 @@ describe("student safety", () => {
       .toThrow(/Morph duration must be between/);
   });
 
+  it("normalizes and validates the slide-frame aspect-ratio preference", () => {
+    const project = createBlankProject();
+    delete project.slideFrameAspectRatio;
+    delete project.slideWidescreenFrames;
+    expect(sanitizeProject(project).slideFrameAspectRatio).toBe("freeform");
+    expect(sanitizeProject({ ...project, slideWidescreenFrames: true }).slideFrameAspectRatio).toBe("16:9");
+    expect(sanitizeProject({ ...project, slideFrameAspectRatio: "4:3" }).slideFrameAspectRatio).toBe("4:3");
+    expect(() => assertSafeProject({ ...project, slideFrameAspectRatio: "3:2" } as unknown as ClassroomProject))
+      .toThrow(/aspect ratio must be freeform, 16:9, or 4:3/);
+    expect(() => assertSafeProject({ ...project, slideWidescreenFrames: "yes" } as unknown as ClassroomProject))
+      .toThrow(/widescreen frame preference must be a boolean/);
+  });
+
   it("rejects duplicate or dangling PDF page-order entries", () => {
     const project = {
       schemaVersion: 1,

@@ -18,6 +18,7 @@ const rules = [
   [/<iframe\b/gi, "iframe markup"],
   [/LiveCollaborationTrigger/g, "collaboration UI"],
   [/onCollabButtonClick/g, "collaboration callback"],
+  [/useHandleLibrary/g, "URL-driven public library installation"],
   [/libraryReturnUrl\s*=/g, "remote library return URL"],
 ];
 
@@ -82,6 +83,16 @@ if (!latexSource.includes('"[-]": ["autoload", "require"]') || !latexSource.incl
 const appSource = await readFile(path.join(root, "src/App.tsx"), "utf8");
 if (!appSource.includes("aiEnabled={false}") || !appSource.includes("MermaidDialog")) {
   findings.push("src/App.tsx:1 AI must stay disabled and the safe Mermaid dialog must stay installed");
+}
+const stylesSource = await readFile(path.join(root, "src/styles.css"), "utf8");
+for (const selector of [
+  "library-menu-browse-button",
+  'data-testid="lib-dropdown--remove"',
+  "library-menu-items__no-items::after",
+]) {
+  if (!stylesSource.includes(selector)) {
+    findings.push(`src/styles.css:1 native library offline safeguard must remain installed: ${selector}`);
+  }
 }
 const mermaidSource = await readFile(path.join(root, "src/lib/mermaid/safe-mermaid.ts"), "utf8");
 for (const safeguard of ["MAX_SOURCE_LENGTH", "SUPPORTED_DIAGRAM", "securityLevel: \"strict\"", "raw.files", "ALLOWED_ELEMENT_TYPES"]) {

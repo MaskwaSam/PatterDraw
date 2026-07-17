@@ -14,7 +14,9 @@ This repository is intentionally independent from PolyPad. Nothing here patches 
 - Offline, no-AI Mermaid diagrams with explicit **Preview** and **Insert** actions. Flowchart, sequence, class, ER, and state diagrams become editable Excalidraw objects and can be reopened from a selected diagram.
 - Browser autosave plus portable `.canvasclassroom` project files containing scene data and original PDF bytes.
 - One-click **Export all** downloads every object on the current board as a shareable PNG, including off-screen and off-page content. Editable Excalidraw scene data is embedded when the receiving image workflow preserves PNG metadata.
-- Frame discovery, explicit slide ordering, fullscreen presentation, keyboard navigation, transient laser, and persistent live ink.
+- A device-wide, locally persisted Excalidraw library supports adding and reusing canvas objects plus importing and exporting standard `.excalidrawlib` files without enabling public-library browsing or publishing.
+- A separate device-wide **Screenshot Library** captures exact canvas regions, copies PNGs when browser clipboard access permits, and keeps the newest 50 captures available for click or drag insertion without adding them to project files.
+- Frame discovery, explicit slide ordering, optional 16:9 or 4:3 frame drawing for modern screens and older smartboards, fullscreen presentation, keyboard navigation, transient laser, and persistent live ink.
 - One-workspace-per-page PDF import using a bundled PDF.js worker.
 - Toggleable **PDF** mode with real local page thumbnails, drag reordering, accessible move-up/down controls, mixed-document ordering, and Previous/Next navigation that follows the chosen output order.
 - Two annotated-PDF exports:

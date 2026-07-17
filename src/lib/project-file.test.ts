@@ -30,6 +30,22 @@ describe("classroom project files", () => {
     expect(decoded.project.slideFramesVisible).toBe(false);
   });
 
+  it("round-trips the slide-frame aspect-ratio preference", () => {
+    const project = createBlankProject();
+    project.slideFrameAspectRatio = "4:3";
+    const decoded = decodeProjectFile(encodeProjectFile(project, {}));
+    expect(decoded.project.slideFrameAspectRatio).toBe("4:3");
+  });
+
+  it("migrates the legacy widescreen slide-frame preference", () => {
+    const project = createBlankProject();
+    delete project.slideFrameAspectRatio;
+    project.slideWidescreenFrames = true;
+    const decoded = decodeProjectFile(encodeProjectFile(project, {}));
+    expect(decoded.project.slideFrameAspectRatio).toBe("16:9");
+    expect(decoded.project.slideWidescreenFrames).toBeUndefined();
+  });
+
   it("round-trips the Morph slide-transition preference", () => {
     const project = createBlankProject();
     project.slideMorphEnabled = true;

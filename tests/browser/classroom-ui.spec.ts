@@ -1,4 +1,5 @@
 import { expect, test, type Download } from "@playwright/test";
+import { strFromU8, unzipSync } from "fflate";
 import { PDFDocument } from "pdf-lib";
 
 async function enableExperimentalMathTools(page: import("@playwright/test").Page) {
@@ -165,6 +166,7 @@ async function downloadBytes(download: Download): Promise<Buffer> {
 async function useDownloadBasedImageExport(page: import("@playwright/test").Page) {
   await page.addInitScript(() => {
     delete (window as Window & { showOpenFilePicker?: unknown }).showOpenFilePicker;
+    delete (window as Window & { showSaveFilePicker?: unknown }).showSaveFilePicker;
   });
   await page.reload();
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
@@ -215,6 +217,265 @@ function exportTestRectangle(
     locked: false,
     index,
   };
+}
+
+type StoredLibraryItem = {
+  id: string;
+  status: "published" | "unpublished";
+  created: number;
+  name?: string;
+  elements: Array<{ id: string; type: string }>;
+};
+
+async function keyvalValue<T>(page: import("@playwright/test").Page, key: string): Promise<T | undefined> {
+  return page.evaluate(async (storedKey) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const value = await new Promise<unknown>((resolve, reject) => {
+      const transaction = database.transaction("keyval", "readonly");
+      const request = transaction.objectStore("keyval").get(storedKey);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    return value;
+  }, key) as Promise<T | undefined>;
+}
+
+async function deleteKeyvalValues(page: import("@playwright/test").Page, keys: string[]): Promise<void> {
+  await page.evaluate(async (storedKeys) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("keyval", "readwrite");
+      const store = transaction.objectStore("keyval");
+      for (const storedKey of storedKeys) store.delete(storedKey);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+  }, keys);
+}
+
+async function openLibraryPanel(page: import("@playwright/test").Page) {
+  const trigger = page.getByRole("button", { name: "Library", exact: true });
+  await expect(trigger).toBeEnabled();
+  if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click();
+  const panel = page.locator(".layer-ui__library");
+  await expect(panel).toBeVisible();
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
+  return { panel, trigger };
+}
+
+async function openScreenshotLibrary(page: import("@playwright/test").Page) {
+  const trigger = page.getByRole("button", { name: "Library", exact: true });
+  await expect(trigger).toBeEnabled();
+  if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click();
+  const tab = page.locator('.default-sidebar .sidebar-tab-trigger[aria-label="Screenshot Library"]');
+  await expect(tab).toBeVisible();
+  const panel = page.getByRole("region", { name: "Screenshot Library", exact: true });
+  if (!await panel.isVisible()) await tab.click();
+  await expect(panel).toBeVisible();
+  await expect(tab).toHaveAttribute("aria-selected", "true");
+  return { panel, tab, trigger };
+}
+
+async function captureScreenshotArea(
+  page: import("@playwright/test").Page,
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+) {
+  const { panel, trigger } = await openScreenshotLibrary(page);
+  await panel.getByRole("button", { name: "Capture area", exact: true }).click();
+  const overlay = page.getByTestId("screenshot-capture-overlay");
+  await expect(overlay).toBeVisible();
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  await expect(panel).toBeHidden();
+  const bounds = await overlay.boundingBox();
+  if (!bounds) throw new Error("Screenshot capture overlay has no bounds.");
+  await page.mouse.move(bounds.x + start.x, bounds.y + start.y);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + end.x, bounds.y + end.y, { steps: 8 });
+  await page.mouse.up();
+  await expect(overlay).toBeHidden();
+}
+
+interface StoredScreenshotSummary {
+  count: number;
+  ids: string[];
+  newest?: {
+    blobSize: number;
+    blobType: string;
+    createdAt: number;
+    height: number;
+    sceneHeight: number;
+    sceneWidth: number;
+    width: number;
+  };
+}
+
+async function storedScreenshotSummary(page: import("@playwright/test").Page): Promise<StoredScreenshotSummary> {
+  return page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const record = await new Promise<{
+      version: number;
+      items: Array<{
+        id: string;
+        createdAt: number;
+        blob: Blob;
+        width: number;
+        height: number;
+        sceneWidth: number;
+        sceneHeight: number;
+      }>;
+    } | undefined>((resolve, reject) => {
+      const request = database.transaction("keyval", "readonly").objectStore("keyval")
+        .get("excalidraw-classroom:screenshot-library:v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    const items = record?.items || [];
+    const newest = items[0];
+    return {
+      count: items.length,
+      ids: items.map((item) => item.id),
+      newest: newest ? {
+        blobSize: newest.blob.size,
+        blobType: newest.blob.type,
+        createdAt: newest.createdAt,
+        height: newest.height,
+        sceneHeight: newest.sceneHeight,
+        sceneWidth: newest.sceneWidth,
+        width: newest.width,
+      } : undefined,
+    };
+  });
+}
+
+async function storedScreenshotPixelSummary(page: import("@playwright/test").Page): Promise<{
+  bluePixels: number;
+  darkPixels: number;
+  redPixels: number;
+  whitePixels: number;
+}> {
+  return page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const record = await new Promise<{ items: Array<{ blob: Blob }> } | undefined>((resolve, reject) => {
+      const request = database.transaction("keyval", "readonly").objectStore("keyval")
+        .get("excalidraw-classroom:screenshot-library:v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    const blob = record?.items[0]?.blob;
+    if (!blob) return { bluePixels: 0, darkPixels: 0, redPixels: 0, whitePixels: 0 };
+    const image = await createImageBitmap(blob);
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Screenshot pixels could not be inspected.");
+    context.drawImage(image, 0, 0);
+    image.close();
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let bluePixels = 0;
+    let darkPixels = 0;
+    let redPixels = 0;
+    let whitePixels = 0;
+    for (let offset = 0; offset < pixels.length; offset += 4) {
+      const red = pixels[offset];
+      const green = pixels[offset + 1];
+      const blue = pixels[offset + 2];
+      const alpha = pixels[offset + 3];
+      if (alpha < 100) continue;
+      if (blue > 180 && blue > red + 25 && blue > green) bluePixels += 1;
+      if (red > 180 && red > green + 35 && red > blue + 35) redPixels += 1;
+      if (red < 90 && green < 90 && blue < 90) darkPixels += 1;
+      if (red > 248 && green > 248 && blue > 248) whitePixels += 1;
+    }
+    return { bluePixels, darkPixels, redPixels, whitePixels };
+  });
+}
+
+async function autosavedScreenshotImageSummary(page: import("@playwright/test").Page): Promise<{
+  centerError: number | null;
+  imageCount: number;
+  insertedImageCount: number;
+  latestCenter: { x: number; y: number } | null;
+  pngFileCount: number;
+}> {
+  return page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const project = await new Promise<{
+      activeSceneId: string;
+      scenes: Record<string, {
+        elements: Array<{ id: string; type?: string; fileId?: string | null; height?: number; isDeleted?: boolean; width?: number; x?: number; y?: number }>;
+        appState: { selectedElementIds?: Record<string, boolean> };
+        files: Record<string, { mimeType?: string }>;
+        pdfPage?: { backgroundElementId: string; height: number; width: number };
+      }>;
+    } | undefined>((resolve, reject) => {
+      const request = database.transaction("keyval", "readonly").objectStore("keyval")
+        .get("excalidraw-classroom:autosave:project:v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    const scene = project?.scenes[project.activeSceneId];
+    const images = (scene?.elements || []).filter((element) => element.type === "image" && !element.isDeleted);
+    const inserted = images.filter((image) => image.id !== scene?.pdfPage?.backgroundElementId);
+    const centered = inserted.at(-1);
+    return {
+      centerError: centered && scene?.pdfPage
+        ? Math.max(
+          Math.abs((centered.x || 0) + (centered.width || 0) / 2 - scene.pdfPage.width / 2),
+          Math.abs((centered.y || 0) + (centered.height || 0) / 2 - scene.pdfPage.height / 2),
+        )
+        : null,
+      imageCount: images.length,
+      insertedImageCount: inserted.length,
+      latestCenter: centered ? {
+        x: (centered.x || 0) + (centered.width || 0) / 2,
+        y: (centered.y || 0) + (centered.height || 0) / 2,
+      } : null,
+      pngFileCount: images.filter((image) => image.fileId && scene?.files[image.fileId]?.mimeType === "image/png").length,
+    };
+  });
+}
+
+function standardLibraryBytes(): Buffer {
+  return Buffer.from(JSON.stringify({
+    type: "excalidrawlib",
+    version: 2,
+    source: "https://libraries.excalidraw.com",
+    libraryItems: [{
+      id: "downloaded-library-item",
+      status: "published",
+      created: 1,
+      name: "Downloaded classroom shape",
+      elements: [exportTestRectangle("downloaded-library-rectangle", 0, 0, 180, 120, "a0")],
+    }],
+  }));
 }
 
 async function autosavedFreedrawStroke(page: import("@playwright/test").Page): Promise<{
@@ -486,6 +747,26 @@ async function autosavedFrameVisibility(page: import("@playwright/test").Page): 
     if (!project) return null;
     return project.slideFramesVisible ?? null;
   });
+}
+
+async function autosavedFrameAspectSummary(page: import("@playwright/test").Page): Promise<{
+  mode: "freeform" | "16:9" | "4:3" | null;
+  frames: Array<{ height: number; ratio: number; width: number }>;
+} | null> {
+  const project = await keyvalValue<{
+    activeSceneId: string;
+    slideFrameAspectRatio?: "freeform" | "16:9" | "4:3";
+    scenes: Record<string, { elements: Array<{ height?: number; isDeleted?: boolean; type?: string; width?: number }> }>;
+  }>(page, "excalidraw-classroom:autosave:project:v1");
+  if (!project) return null;
+  const frames = project.scenes[project.activeSceneId]?.elements
+    .filter((element) => element.type === "frame" && !element.isDeleted)
+    .map((element) => ({
+      height: element.height || 0,
+      ratio: (element.width || 0) / (element.height || 1),
+      width: element.width || 0,
+    })) || [];
+  return { mode: project.slideFrameAspectRatio ?? null, frames };
 }
 
 async function autosavedMorphSettings(page: import("@playwright/test").Page): Promise<{
@@ -857,6 +1138,532 @@ test.beforeEach(async ({ page }) => {
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
 });
 
+test("imports and exports standard Excalidraw libraries without online controls", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  const externalRequests: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== "http://127.0.0.1:5173") {
+      externalRequests.push(request.url());
+    }
+  });
+  await useDownloadBasedImageExport(page);
+
+  const fileActions = page.getByRole("navigation", { name: "File actions" });
+  const libraryButton = fileActions.getByRole("button", { name: "Library", exact: true });
+  await expect(libraryButton).toBeVisible();
+  await expect(page.locator(".editor-host .default-sidebar-trigger")).toBeHidden();
+  await expect(page.getByRole("checkbox", { name: "Library", exact: true })).toBeHidden();
+
+  let { panel, trigger } = await openLibraryPanel(page);
+  await expect(page.locator(".default-sidebar .sidebar-triggers")).toBeVisible();
+  await expect(page.locator('.default-sidebar .sidebar-tab-trigger[aria-label="Screenshot Library"]')).toBeVisible();
+  await page.locator(".default-sidebar").getByTestId("sidebar-close").click();
+  await expect(panel).toBeHidden();
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  ({ panel, trigger } = await openLibraryPanel(page));
+  await trigger.click();
+  await expect(panel).toBeHidden();
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  await expect(trigger).toBeFocused();
+  ({ panel, trigger } = await openLibraryPanel(page));
+  const emptyLibrary = panel.locator(".library-menu-items__no-items");
+  await expect(emptyLibrary.locator(".library-menu-items__no-items__hint")).toBeHidden();
+  expect(await emptyLibrary.evaluate((node) => getComputedStyle(node, "::after").content)).toContain(".excalidrawlib");
+  expect(await panel.innerText()).not.toContain("public repository");
+  await expect(panel.locator(".library-menu-browse-button")).toBeHidden();
+
+  await panel.getByTestId("dropdown-menu-button").click();
+  const chooserEvent = page.waitForEvent("filechooser");
+  await panel.getByTestId("lib-dropdown--load").click();
+  await (await chooserEvent).setFiles({
+    name: "downloaded-classroom-shapes.excalidrawlib",
+    mimeType: "application/vnd.excalidrawlib+json",
+    buffer: standardLibraryBytes(),
+  });
+
+  const item = panel.locator(".library-unit__active").first();
+  await expect(item.locator(".library-unit__dragger svg")).toBeVisible();
+  await expect.poll(async () => (
+    await keyvalValue<StoredLibraryItem[]>(page, "excalidraw-classroom:library:v1")
+  )?.length).toBe(1);
+
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  ({ panel } = await openLibraryPanel(page));
+  const restoredItem = panel.locator(".library-unit__active").first();
+  await expect(restoredItem.locator(".library-unit__dragger svg")).toBeVisible();
+
+  await panel.getByTestId("dropdown-menu-button").click();
+  const downloadEvent = page.waitForEvent("download");
+  await panel.getByTestId("lib-dropdown--export").click();
+  const download = await downloadEvent;
+  expect(download.suggestedFilename()).toBe("library.excalidrawlib");
+  const exported = JSON.parse((await downloadBytes(download)).toString("utf8")) as {
+    type: string;
+    version: number;
+    source: string;
+    libraryItems: StoredLibraryItem[];
+  };
+  expect(exported.type).toBe("excalidrawlib");
+  expect(exported.version).toBe(2);
+  expect(new URL(exported.source).origin).toBe(new URL(page.url()).origin);
+  expect(exported.libraryItems).toHaveLength(1);
+  expect(exported.libraryItems[0]).toMatchObject({
+    id: "downloaded-library-item",
+    status: "published",
+    name: "Downloaded classroom shape",
+  });
+  expect(exported.libraryItems[0].elements[0]).toMatchObject({
+    id: "downloaded-library-rectangle",
+    type: "rectangle",
+  });
+
+  await restoredItem.hover();
+  await restoredItem.getByRole("checkbox").click();
+  await panel.getByTestId("dropdown-menu-button").click();
+  await expect(panel.getByTestId("lib-dropdown--remove")).toBeHidden();
+  await page.keyboard.press("Escape");
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const libraryBounds = await libraryButton.boundingBox();
+  const hideBounds = await page.getByRole("button", { name: "Hide navigation" }).boundingBox();
+  expect(libraryBounds).not.toBeNull();
+  expect(hideBounds).not.toBeNull();
+  expect(libraryBounds?.x || 0).toBeLessThan(hideBounds?.x || 0);
+  expect((libraryBounds?.x || 0) + (libraryBounds?.width || 0)).toBeLessThanOrEqual(390);
+  const sidebar = page.locator(".default-sidebar");
+  const bounds = await sidebar.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds?.x || 0).toBeGreaterThanOrEqual(0);
+  expect(bounds?.y || 0).toBeGreaterThanOrEqual(0);
+  expect((bounds?.x || 0) + (bounds?.width || 0)).toBeLessThanOrEqual(390);
+  expect((bounds?.y || 0) + (bounds?.height || 0)).toBeLessThanOrEqual(844);
+  expect(await sidebar.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  await expect(panel.locator(".library-menu-browse-button")).toBeHidden();
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
+  expect(externalRequests).toEqual([]);
+});
+
+test("persists reusable items separately from canvas classroom projects", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  const externalRequests: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== "http://127.0.0.1:5173") {
+      externalRequests.push(request.url());
+    }
+  });
+  const source = exportTestRectangle("library-source-rectangle", 260, 180, 180, 120, "a0");
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "library-source.excalidraw",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({
+      type: "excalidraw",
+      version: 2,
+      source: "local",
+      name: "Library project round trip",
+      elements: [source],
+      appState: { selectedElementIds: { "library-source-rectangle": true } },
+      files: {},
+    })),
+  });
+
+  let { panel, trigger } = await openLibraryPanel(page);
+  const pendingItem = panel.locator(".library-unit__active:has(.library-unit__adder)");
+  await expect(pendingItem).toHaveCount(1);
+  await pendingItem.locator(".library-unit__dragger").click({ force: true });
+  await expect.poll(async () => (
+    await keyvalValue<StoredLibraryItem[]>(page, "excalidraw-classroom:library:v1")
+  )?.length).toBe(1);
+  await expect.poll(async () => {
+    const autosave = await keyvalValue<{
+      title: string;
+      activeSceneId: string;
+      scenes: Record<string, { elements: Array<{ type: string }> }>;
+    }>(page, "excalidraw-classroom:autosave:project:v1");
+    return {
+      title: autosave?.title,
+      rectangles: autosave?.scenes[autosave.activeSceneId]?.elements.filter((element) => element.type === "rectangle").length,
+    };
+  }).toEqual({ title: "Library project round trip", rectangles: 1 });
+
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("textbox", { name: "Project title" })).toHaveValue("Library project round trip");
+  ({ panel, trigger } = await openLibraryPanel(page));
+  const storedItem = panel.locator(".library-unit__active:not(:has(.library-unit__adder))").first();
+  await expect(storedItem.locator(".library-unit__dragger svg")).toBeVisible();
+  await storedItem.locator(".library-unit__dragger").click({ force: true });
+
+  await expect.poll(async () => {
+    const autosave = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, { elements: Array<{ type: string }> }>;
+    }>(page, "excalidraw-classroom:autosave:project:v1");
+    return autosave?.scenes[autosave.activeSceneId]?.elements.filter((element) => element.type === "rectangle").length;
+  }).toBe(2);
+
+  if (await trigger.getAttribute("aria-expanded") === "true") await trigger.click();
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  await expect(panel).toBeHidden();
+  const projectDownloadEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  const projectDownload = await projectDownloadEvent;
+  expect(projectDownload.suggestedFilename()).toBe("Library-project-round-trip.canvasclassroom");
+  const projectBytes = await downloadBytes(projectDownload);
+
+  await deleteKeyvalValues(page, [
+    "excalidraw-classroom:library:v1",
+    "excalidraw-classroom:autosave:project:v1",
+  ]);
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await page.locator('input[type="file"]').setInputFiles({
+    name: projectDownload.suggestedFilename(),
+    mimeType: "application/octet-stream",
+    buffer: projectBytes,
+  });
+  await expect.poll(async () => {
+    const autosave = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, { elements: Array<{ type: string }> }>;
+    }>(page, "excalidraw-classroom:autosave:project:v1");
+    return autosave?.scenes[autosave.activeSceneId]?.elements.filter((element) => element.type === "rectangle").length;
+  }).toBe(2);
+
+  ({ panel } = await openLibraryPanel(page));
+  await expect(panel.locator(".library-unit__active")).toHaveCount(0);
+  expect(await panel.locator(".library-menu-items__no-items").evaluate(
+    (node) => getComputedStyle(node, "::after").content,
+  )).toContain(".excalidrawlib");
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
+  expect(externalRequests).toEqual([]);
+});
+
+test("captures areas to the clipboard and persists Screenshot Library actions", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  const externalRequests: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== "http://127.0.0.1:5173") {
+      externalRequests.push(request.url());
+    }
+  });
+  await page.addInitScript(() => {
+    const state = window as Window & { __screenshotClipboardWrites?: number; __screenshotClipboardBytes?: number };
+    state.__screenshotClipboardWrites = 0;
+    class ClipboardItemStub {
+      readonly types: string[];
+      constructor(readonly data: Record<string, Blob | Promise<Blob>>) {
+        this.types = Object.keys(data);
+      }
+      async getType(type: string) { return await this.data[type]; }
+    }
+    Object.defineProperty(window, "ClipboardItem", { configurable: true, value: ClipboardItemStub });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        async write(items: ClipboardItemStub[]) {
+          state.__screenshotClipboardWrites = (state.__screenshotClipboardWrites || 0) + 1;
+          const blobs = await Promise.all(Object.values(items[0].data));
+          state.__screenshotClipboardBytes = blobs.reduce((sum, blob) => sum + blob.size, 0);
+        },
+      },
+    });
+  });
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+
+  let { panel, trigger } = await openScreenshotLibrary(page);
+  await panel.getByRole("button", { name: "Capture area", exact: true }).click();
+  await expect(page.getByTestId("screenshot-capture-overlay")).toBeVisible();
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("screenshot-capture-overlay")).toBeHidden();
+  await trigger.click();
+  await expect(panel).toBeVisible();
+
+  await captureScreenshotArea(page, { x: 260, y: 190 }, { x: 500, y: 350 });
+  await expect.poll(() => storedScreenshotSummary(page)).toMatchObject({
+    count: 1,
+    newest: {
+      blobType: "image/png",
+      sceneWidth: 240,
+      sceneHeight: 160,
+      width: 480,
+      height: 320,
+    },
+  });
+  await expect.poll(() => page.evaluate(() => (
+    window as Window & { __screenshotClipboardWrites?: number }
+  ).__screenshotClipboardWrites)).toBe(1);
+  await expect.poll(() => page.evaluate(() => (
+    window as Window & { __screenshotClipboardBytes?: number }
+  ).__screenshotClipboardBytes || 0)).toBeGreaterThan(0);
+  await expect(page.getByText(/copied to the clipboard and saved to the Screenshot Library/i)).toBeVisible();
+
+  ({ panel, trigger } = await openScreenshotLibrary(page));
+  const card = panel.locator(".screenshot-card").first();
+  await expect(card.locator("img")).toBeVisible();
+  await card.getByRole("button", { name: /^Copy screenshot captured/ }).click();
+  await expect.poll(() => page.evaluate(() => (
+    window as Window & { __screenshotClipboardWrites?: number }
+  ).__screenshotClipboardWrites)).toBe(2);
+
+  const downloadEvent = page.waitForEvent("download");
+  await card.getByRole("button", { name: /^Download screenshot captured/ }).click();
+  const download = await downloadEvent;
+  expect(download.suggestedFilename()).toMatch(/^classroom-screenshot-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}Z\.png$/);
+  expect(pngDimensions(await downloadBytes(download))).toEqual({ width: 480, height: 320 });
+
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  ({ panel } = await openScreenshotLibrary(page));
+  await expect(panel.locator(".screenshot-card")).toHaveCount(1);
+  await panel.getByRole("button", { name: /^Delete screenshot captured/ }).click();
+  await expect.poll(() => storedScreenshotSummary(page)).toMatchObject({ count: 0 });
+  await expect(panel.locator(".screenshot-card")).toHaveCount(0);
+
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
+  expect(externalRequests).toEqual([]);
+});
+
+test("keeps denied clipboard captures and inserts them as one undoable project image", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  await page.addInitScript(() => {
+    const state = window as Window & { __screenshotClipboardWrites?: number };
+    state.__screenshotClipboardWrites = 0;
+    class ClipboardItemStub {
+      constructor(readonly data: Record<string, Blob | Promise<Blob>>) {}
+    }
+    Object.defineProperty(window, "ClipboardItem", { configurable: true, value: ClipboardItemStub });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        write() {
+          state.__screenshotClipboardWrites = (state.__screenshotClipboardWrites || 0) + 1;
+          return Promise.reject(new DOMException("Denied", "NotAllowedError"));
+        },
+      },
+    });
+  });
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+
+  await captureScreenshotArea(page, { x: 300, y: 220 }, { x: 520, y: 360 });
+  await expect.poll(() => storedScreenshotSummary(page)).toMatchObject({ count: 1 });
+  await expect(page.getByText(/Screenshot saved\. Clipboard permission was denied/i)).toBeVisible();
+  const stored = await storedScreenshotSummary(page);
+  expect(stored.newest?.blobSize || 0).toBeGreaterThan(0);
+
+  const { panel } = await openScreenshotLibrary(page);
+  await panel.locator(".screenshot-card-thumbnail").click();
+  await expect.poll(() => autosavedScreenshotImageSummary(page)).toEqual({
+    centerError: null,
+    imageCount: 1,
+    insertedImageCount: 1,
+    latestCenter: { x: 720, y: 398.5 },
+    pngFileCount: 1,
+  });
+  await expect(page.locator(".editor-host .App-menu__left")).toBeVisible();
+  await expect(page.getByText(/Double click the image or press Enter to crop the image/)).toBeVisible();
+  await page.locator('.statusbar .footer-history-button[aria-label="Undo"]').click();
+  await expect.poll(() => autosavedScreenshotImageSummary(page)).toMatchObject({ imageCount: 0 });
+  await page.locator('.statusbar .footer-history-button[aria-label="Redo"]').click();
+  await expect.poll(() => autosavedScreenshotImageSummary(page)).toMatchObject({ imageCount: 1 });
+
+  const projectDownloadEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  const projectDownload = await projectDownloadEvent;
+  const projectBytes = await downloadBytes(projectDownload);
+  const manifest = JSON.parse(strFromU8(unzipSync(projectBytes)["project.json"])) as Record<string, unknown>;
+  expect(manifest).not.toHaveProperty("screenshotLibrary");
+  expect(JSON.stringify(manifest)).not.toContain(stored.ids[0]);
+
+  await deleteKeyvalValues(page, [
+    "excalidraw-classroom:screenshot-library:v1",
+    "excalidraw-classroom:autosave:project:v1",
+  ]);
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await page.locator('input[type="file"]').setInputFiles({
+    name: projectDownload.suggestedFilename(),
+    mimeType: "application/octet-stream",
+    buffer: projectBytes,
+  });
+  await expect.poll(() => autosavedScreenshotImageSummary(page)).toMatchObject({ imageCount: 1, pngFileCount: 1 });
+  await expect.poll(() => storedScreenshotSummary(page)).toMatchObject({ count: 0 });
+
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
+});
+
+test("exports the exact board rectangle without separated off-selection objects and supports desktop drag placement", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  const blue = exportTestRectangle("selected-blue", 300, 200, 120, 80, "a0");
+  const red = {
+    ...exportTestRectangle("excluded-red", 800, 200, 120, 80, "a1"),
+    backgroundColor: "#ff8787",
+  };
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "separated-screenshot-objects.excalidraw",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({
+      type: "excalidraw",
+      version: 2,
+      source: "local",
+      elements: [blue, red],
+      appState: { scrollX: 0, scrollY: 0, zoom: { value: 1 }, viewBackgroundColor: "#ffffff" },
+      files: {},
+    })),
+  });
+  await expect.poll(async () => {
+    const autosave = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, { elements: Array<{ type?: string }> }>;
+    }>(page, "excalidraw-classroom:autosave:project:v1");
+    return autosave?.scenes[autosave.activeSceneId]?.elements.filter((element) => element.type === "rectangle").length;
+  }).toBe(2);
+
+  await captureScreenshotArea(page, { x: 280, y: 180 }, { x: 460, y: 320 });
+  await expect.poll(() => storedScreenshotSummary(page)).toMatchObject({
+    count: 1,
+    newest: { width: 360, height: 280, sceneWidth: 180, sceneHeight: 140 },
+  });
+  const pixels = await storedScreenshotPixelSummary(page);
+  expect(pixels.bluePixels).toBeGreaterThan(20_000);
+  expect(pixels.redPixels).toBe(0);
+
+  const { panel } = await openScreenshotLibrary(page);
+  const thumbnail = panel.locator(".screenshot-card-thumbnail");
+  const canvas = page.locator(".editor-host .excalidraw__canvas.interactive");
+  await thumbnail.dragTo(canvas, { targetPosition: { x: 170, y: 410 } });
+  await expect.poll(() => autosavedScreenshotImageSummary(page)).toMatchObject({
+    imageCount: 1,
+    insertedImageCount: 1,
+    pngFileCount: 1,
+  });
+  const placed = await autosavedScreenshotImageSummary(page);
+  expect(placed.latestCenter?.x).toBeCloseTo(170, 0);
+  expect(placed.latestCenter?.y).toBeCloseTo(410, 0);
+  await expect(page.locator(".editor-host .App-menu__left")).toBeVisible();
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
+});
+
+test("captures a locked PDF background with annotations and inserts on another page center", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  await openTestPdf(page, 2);
+  await expect.poll(() => autosavedPdfBackgroundPosition(page)).toEqual({ locked: true, x: 0, y: 0 });
+  const editor = await page.locator(".editor-host").boundingBox();
+  if (!editor) throw new Error("PDF editor has no bounds.");
+  const center = { x: editor.width / 2, y: editor.height / 2 };
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  await dragOnBoard(
+    page,
+    { x: center.x - 55, y: center.y - 35 },
+    { x: center.x + 55, y: center.y + 35 },
+  );
+  await captureScreenshotArea(
+    page,
+    { x: center.x - 80, y: center.y - 60 },
+    { x: center.x + 80, y: center.y + 60 },
+  );
+  await expect.poll(() => storedScreenshotSummary(page)).toMatchObject({ count: 1 });
+  const pixels = await storedScreenshotPixelSummary(page);
+  expect(pixels.whitePixels).toBeGreaterThan(1_000);
+  expect(pixels.darkPixels).toBeGreaterThan(20);
+
+  await page.getByRole("button", { name: "Next PDF page", exact: true }).click();
+  await expect(page.locator(".page-status")).toContainText("Page 2 of 2");
+  const { panel } = await openScreenshotLibrary(page);
+  await panel.locator(".screenshot-card-thumbnail").click();
+  await expect.poll(() => autosavedScreenshotImageSummary(page)).toMatchObject({
+    centerError: 0,
+    imageCount: 2,
+    insertedImageCount: 1,
+    pngFileCount: 2,
+  });
+  await expect(page.locator(".editor-host .App-menu__left")).toBeVisible();
+  await page.locator('.statusbar .footer-history-button[aria-label="Undo"]').click();
+  await expect.poll(() => autosavedScreenshotImageSummary(page)).toMatchObject({
+    imageCount: 1,
+    insertedImageCount: 0,
+  });
+  await expect.poll(() => storedScreenshotSummary(page)).toMatchObject({ count: 1 });
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
+});
+
+test("captures with touch pointer events and click-inserts at 390 by 844", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  const { panel } = await openScreenshotLibrary(page);
+  await panel.getByRole("button", { name: "Capture area", exact: true }).click();
+  const overlay = page.getByTestId("screenshot-capture-overlay");
+  await expect(overlay).toBeVisible();
+  await overlay.evaluate((node) => {
+    const bounds = node.getBoundingClientRect();
+    const pointer = (type: string, x: number, y: number, buttons: number) => node.dispatchEvent(new PointerEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      pointerId: 17,
+      pointerType: "touch",
+      isPrimary: true,
+      button: 0,
+      buttons,
+      clientX: bounds.left + x,
+      clientY: bounds.top + y,
+    }));
+    pointer("pointerdown", 55, 160, 1);
+    pointer("pointermove", 260, 330, 1);
+    pointer("pointerup", 260, 330, 0);
+  });
+  await expect(overlay).toBeHidden();
+  await expect.poll(() => storedScreenshotSummary(page)).toMatchObject({ count: 1 });
+  const reopened = await openScreenshotLibrary(page);
+  await reopened.panel.locator(".screenshot-card-thumbnail").click();
+  await expect.poll(() => autosavedScreenshotImageSummary(page)).toMatchObject({
+    imageCount: 1,
+    insertedImageCount: 1,
+    pngFileCount: 1,
+  });
+  const sidebar = page.locator(".default-sidebar");
+  const bounds = await sidebar.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect((bounds?.x || 0) + (bounds?.width || 0)).toBeLessThanOrEqual(390);
+  expect(await sidebar.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
+});
+
 test("exposes native stroke colour and drawing weight controls", async ({ page }) => {
   await page.getByTestId("toolbar-rectangle").check({ force: true });
   await dragOnBoard(page, { x: 300, y: 190 }, { x: 560, y: 390 });
@@ -1156,6 +1963,90 @@ test("toggles and persists the Morph slide transition", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Morph", exact: true }))
     .toHaveAttribute("aria-pressed", "true");
   await expect(page.getByRole("slider", { name: "Morph duration", exact: true })).toHaveValue("5000");
+});
+
+test("reveals 16:9 and 4:3 choices when drawing frames and preserves freeform drawing", async ({ page }) => {
+  const editor = page.locator(".editor-host .excalidraw");
+  await editor.evaluate((node) => node.setAttribute("data-aspect-frame-instance", "original"));
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  const drawFrame = page.getByRole("button", { name: "Draw around content", exact: true });
+  const aspectOptions = page.locator("#slide-frame-aspect-options");
+  await expect(aspectOptions).toHaveCount(0);
+  await expect(drawFrame).toHaveAttribute("aria-expanded", "false");
+
+  await drawFrame.click();
+  await expect(drawFrame).toHaveAttribute("aria-expanded", "true");
+  await expect(aspectOptions).toBeVisible();
+  await expect(aspectOptions).toContainText("Frame shape");
+  await expect(aspectOptions).toContainText("Freeform");
+  const widescreen = page.getByRole("button", { name: /16:9.*1080p and 4K/ });
+  const standard = page.getByRole("button", { name: /4:3.*Old TVs and smartboards/ });
+  await expect(widescreen).toHaveAttribute("aria-pressed", "false");
+  await expect(standard).toHaveAttribute("aria-pressed", "false");
+
+  await widescreen.click();
+  await expect(widescreen).toHaveAttribute("aria-pressed", "true");
+  await expect(standard).toHaveAttribute("aria-pressed", "false");
+  await expect.poll(() => autosavedFrameAspectSummary(page)).toMatchObject({ mode: "16:9" });
+  await expect(page.getByText(/16:9 frame tool ready/i)).toBeVisible();
+  await dragOnBoard(page, { x: 500, y: 240 }, { x: 800, y: 440 });
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(1);
+  await expect.poll(async () => {
+    const summary = await autosavedFrameAspectSummary(page);
+    return summary?.frames[0]?.ratio || 0;
+  }).toBeCloseTo(16 / 9, 5);
+  const constrained = await autosavedFrameAspectSummary(page);
+  expect(constrained?.frames[0]?.width || 0).toBeGreaterThanOrEqual(300);
+  expect(constrained?.frames[0]?.height || 0).toBeGreaterThanOrEqual(200);
+  await expect(editor).toHaveAttribute("data-aspect-frame-instance", "original");
+  await page.locator('.statusbar .footer-history-button[aria-label="Undo"]').click();
+  await expect.poll(async () => (
+    (await autosavedFrameAspectSummary(page))?.frames.length || 0
+  )).toBe(0);
+  await page.locator('.statusbar .footer-history-button[aria-label="Redo"]').click();
+  await expect.poll(async () => (
+    (await autosavedFrameAspectSummary(page))?.frames[0]?.ratio || 0
+  )).toBeCloseTo(16 / 9, 5);
+
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect(page.locator("#slide-frame-aspect-options")).toHaveCount(0);
+  await page.getByRole("button", { name: "Draw around content", exact: true }).click();
+  const restoredWidescreen = page.getByRole("button", { name: /16:9.*1080p and 4K/ });
+  const restoredStandard = page.getByRole("button", { name: /4:3.*Old TVs and smartboards/ });
+  await expect(restoredWidescreen).toHaveAttribute("aria-pressed", "true");
+
+  await restoredStandard.click();
+  await expect(restoredWidescreen).toHaveAttribute("aria-pressed", "false");
+  await expect(restoredStandard).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(() => autosavedFrameAspectSummary(page)).toMatchObject({ mode: "4:3" });
+  await expect(page.getByText(/4:3 frame tool ready/i)).toBeVisible();
+  await dragOnBoard(page, { x: 510, y: 260 }, { x: 710, y: 460 });
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(2);
+  await expect.poll(async () => {
+    const summary = await autosavedFrameAspectSummary(page);
+    return summary?.frames.length || 0;
+  }).toBe(2);
+  const fourByThree = await autosavedFrameAspectSummary(page);
+  expect(fourByThree?.frames[1]?.ratio || 0).toBeCloseTo(4 / 3, 5);
+
+  await restoredStandard.click();
+  await expect(restoredStandard).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator(".slide-frame-aspect-heading")).toContainText("Freeform");
+  await expect.poll(() => autosavedFrameAspectSummary(page)).toMatchObject({ mode: "freeform" });
+  await dragOnBoard(page, { x: 520, y: 280 }, { x: 720, y: 580 });
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(3);
+  const freeform = await autosavedFrameAspectSummary(page);
+  expect(freeform?.frames[2]?.ratio || 0).not.toBeCloseTo(16 / 9, 2);
+  expect(freeform?.frames[2]?.ratio || 0).not.toBeCloseTo(4 / 3, 2);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator("#slide-frame-aspect-options")).toBeVisible();
+  const railBounds = await page.locator("#slide-rail").boundingBox();
+  expect(railBounds).not.toBeNull();
+  expect((railBounds?.x || 0) + (railBounds?.width || 0)).toBeLessThanOrEqual(390);
+  expect(await page.locator("#slide-frame-aspect-options").evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
 });
 
 test("toggles slide frames for a cleaner board without removing slides", async ({ page }) => {
@@ -2902,7 +3793,7 @@ test("exports a locked PDF background with annotations and fits the native dialo
   expect(bytes.byteLength).toBeGreaterThan(2_000);
 });
 
-test("adds a blank PDF page, preserves it in the project, and exports it", async ({ page }) => {
+test("adds a blank PDF page, reopens the project on Board, and exports it", async ({ page }) => {
   test.setTimeout(60_000);
   await openTestPdf(page);
 
@@ -2934,6 +3825,15 @@ test("adds a blank PDF page, preserves it in the project, and exports it", async
     mimeType: "application/vnd.canvas-classroom+zip",
     buffer: savedBytes,
   });
+  await expect(page.getByRole("button", { name: "Board", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await expect(page.locator(".page-status")).toContainText("Board");
+  await expect.poll(() => autosavedWorkspaceSummary(page)).toEqual({
+    activeIsPdf: false,
+    boardSceneCount: 1,
+    pdfPageCount: 2,
+  });
+
   await page.getByRole("button", { name: "PDF", exact: true }).click();
   await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(2, { timeout: 15_000 });
   await expect(page.locator("#pdf-page-rail .pdf-page-item").nth(1)).toContainText("Blank page");

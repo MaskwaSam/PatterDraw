@@ -1,0 +1,4 @@
+export const SCREENSHOT_PREFERRED_SCALE = 2;
+export const MAX_SCREENSHOT_EDGE = 2_048;
+export const MAX_SCREENSHOT_PIXELS = 4_000_000;
+export const MAX_SCREENSHOT_BYTES = 4_000_000;

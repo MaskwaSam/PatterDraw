@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import {
   CaptureUpdateAction,
   convertToExcalidrawElements,
+  DefaultSidebar,
   Excalidraw,
   getCommonBounds,
   newElementWith,
   serializeAsJSON,
+  Sidebar,
   viewportCoordsToSceneCoords,
 } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
@@ -16,6 +18,7 @@ import type {
   DataURL,
   ExcalidrawImperativeAPI,
   ExcalidrawProps,
+  LibraryItems,
 } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, FileId } from "@excalidraw/excalidraw/element/types";
 import type { LassoGeometrySnapshot } from "./lib/lasso/stable-element-adapter";
@@ -37,6 +40,12 @@ import {
 } from "./components/LassoOverlay";
 import { EquationDialog } from "./components/EquationDialog";
 import { MermaidDialog } from "./components/MermaidDialog";
+import { ScreenshotCaptureOverlay } from "./components/ScreenshotCaptureOverlay";
+import {
+  SCREENSHOT_DRAG_MIME,
+  SCREENSHOT_SIDEBAR_TAB,
+  ScreenshotLibrary,
+} from "./components/ScreenshotLibrary";
 import {
   EnterFullscreenIcon,
   ExitFullscreenIcon,
@@ -48,6 +57,7 @@ import {
   PresentIcon,
   PreviousIcon,
   RedoIcon,
+  ScreenshotIcon,
   ShowBottomBarIcon,
   ShowPanelIcon,
   ShowTopBarIcon,
@@ -59,13 +69,29 @@ import type {
   LoadedClassroomProject,
   PdfDocumentId,
   SerializedScene,
+  SlideFrameAspectRatio,
 } from "./types";
 import { createBlankProject } from "./types";
 import { clearAutosave, loadAutosave, saveAutosave } from "./lib/persistence";
+import { loadLibraryItems, saveLibraryItems } from "./lib/library-persistence";
 import { decodeProjectFile, encodeProjectFile } from "./lib/project-file";
 import { downloadBlob, safeFileStem } from "./lib/download";
 import { exportFullBoardPng } from "./lib/export-board";
 import { createLocalId } from "./lib/id";
+import {
+  beginPngClipboardWrite,
+  exportScreenshotArea,
+  pngBlobToDataUrl,
+  viewportCaptureRectToSceneBounds,
+  type ClipboardWriteResult,
+  type ViewportCaptureRect,
+} from "./lib/screenshots/capture";
+import {
+  addScreenshotToLibrary,
+  loadScreenshotLibrary,
+  saveScreenshotLibrary,
+  type StoredScreenshot,
+} from "./lib/screenshots/persistence";
 import type { RenderedLatex } from "./lib/latex/render-latex";
 import type { RenderedMermaid } from "./lib/mermaid/safe-mermaid";
 import { importPdf } from "./lib/pdf/import-pdf";
@@ -93,7 +119,12 @@ import {
 } from "./lib/slide-transition";
 import { sanitizeProject, sanitizeScene, sanitizeWebLink } from "./lib/safety";
 import { openExternalWebLink } from "./lib/offline-network";
-import { activateSlideFrameTool, addBlankSlideFrame } from "./lib/slide-frame-tool";
+import {
+  activateSlideFrameTool,
+  addBlankSlideFrame,
+  constrainNewSlideFramesToAspectRatio,
+  slideFrameAspectRatioValue,
+} from "./lib/slide-frame-tool";
 import {
   sanitizeClassroomMathToolMetadata,
   type GeneratedMathToolInsertion,
@@ -168,11 +199,25 @@ const CLASSROOM_UI_OPTIONS: ExcalidrawProps["UIOptions"] = {
   tools: { image: true },
 };
 const SPINNER_ANIMATION_DURATION_MS = 1_100;
+const PERSONAL_LIBRARY_SIDEBAR_TAB = "library";
+type LibrarySidebarTab = typeof PERSONAL_LIBRARY_SIDEBAR_TAB | typeof SCREENSHOT_SIDEBAR_TAB;
 
 const renderNoEmbeddable: NonNullable<ExcalidrawProps["renderEmbeddable"]> = () => null;
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function screenshotDownloadName(createdAt: number): string {
+  const timestamp = new Date(createdAt).toISOString().replace(/:\d{2}\.\d{3}Z$/, "Z").replaceAll(":", "-");
+  return `classroom-screenshot-${timestamp}.png`;
+}
+
+function clipboardCaptureToast(result: ClipboardWriteResult): string {
+  if (result === "success") return "Screenshot copied to the clipboard and saved to the Screenshot Library.";
+  if (result === "denied") return "Screenshot saved. Clipboard permission was denied; use Copy in the Screenshot Library to retry.";
+  if (result === "unsupported") return "Screenshot saved. Image clipboard access is unavailable in this browser.";
+  return "Screenshot saved, but it could not be copied. Use Copy in the Screenshot Library to retry.";
 }
 
 function latexSourceForElement(element: ExcalidrawElement | undefined): string | null {
@@ -255,7 +300,20 @@ export default function App() {
   const [zoom, setZoom] = useState(100);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [initialExcalidrawData] = useState<Promise<{ libraryItems: LibraryItems } | null>>(() => (
+    loadLibraryItems()
+      .then((libraryItems) => ({ libraryItems }))
+      .catch((error) => {
+        setErrorMessage(`Personal library could not be opened: ${error instanceof Error ? error.message : String(error)}`);
+        return null;
+      })
+  ));
   const [exportOpen, setExportOpen] = useState(false);
+  const [isLibraryOpen, setIsLibraryOpen] = useState(false);
+  const [screenshots, setScreenshots] = useState<StoredScreenshot[]>([]);
+  const [isScreenshotLibraryLoading, setIsScreenshotLibraryLoading] = useState(true);
+  const [isScreenshotCaptureActive, setIsScreenshotCaptureActive] = useState(false);
+  const [isScreenshotBusy, setIsScreenshotBusy] = useState(false);
   const [presentation, setPresentation] = useState<PresentationState | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("board");
@@ -282,6 +340,7 @@ export default function App() {
   const exportOptionsTriggerRef = useRef<HTMLButtonElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
   const editorHostRef = useRef<HTMLDivElement>(null);
+  const currentSceneRef = useRef<SerializedScene | null>(null);
   const activeSceneIdRef = useRef<string | null>(null);
   const switchingSceneRef = useRef(false);
   const pendingFrameIdRef = useRef<string | null>(null);
@@ -289,11 +348,20 @@ export default function App() {
   const pendingCreatedFrameIdRef = useRef<string | null>(null);
   const pendingSlideFrameActionRef = useRef<SlideFrameAction | null>(null);
   const slideFramesVisibleRef = useRef(true);
+  const slideFrameAspectRatioRef = useRef<SlideFrameAspectRatio>("freeform");
+  const frameConstraintBeforeDrawRef = useRef<{
+    aspectRatio: number;
+    existingFrameIds: ReadonlySet<string>;
+  } | null>(null);
+  const constrainedFrameUpdateRef = useRef(0);
   const presentationInkStartElementIdsRef = useRef<ReadonlySet<string> | null>(null);
   const activeToolTypeRef = useRef<string | null>(null);
   const roughnessBeforeLineRef = useRef<number | null>(null);
   const focusAfterMathToolsRef = useRef<"editor" | "trigger" | null>(null);
   const nativeImageExportOpenRef = useRef(false);
+  const libraryOpenRef = useRef(false);
+  const lastLibraryTabRef = useRef<LibrarySidebarTab>(PERSONAL_LIBRARY_SIDEBAR_TAB);
+  const screenshotsRef = useRef<StoredScreenshot[]>([]);
   const restoreExportOptionsFocusRef = useRef(false);
   const probabilityRandomizingRef = useRef(false);
   const lassoActiveRef = useRef(false);
@@ -334,12 +402,42 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    loadScreenshotLibrary()
+      .then((items) => {
+        if (cancelled) return;
+        screenshotsRef.current = items;
+        setScreenshots(items);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setErrorMessage(`Screenshot Library could not be opened: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsScreenshotLibraryLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
     if (!project) return;
     activeSceneIdRef.current = project.activeSceneId;
   }, [project?.activeSceneId]);
 
   useEffect(() => {
+    slideFrameAspectRatioRef.current = project?.slideFrameAspectRatio ?? "freeform";
+  }, [project?.slideFrameAspectRatio]);
+
+  useEffect(() => () => {
+    window.cancelAnimationFrame(constrainedFrameUpdateRef.current);
+  }, []);
+
+  useEffect(() => {
     setMathInteraction(null);
+    setIsScreenshotCaptureActive(false);
+    frameConstraintBeforeDrawRef.current = null;
+    window.cancelAnimationFrame(constrainedFrameUpdateRef.current);
   }, [project?.activeSceneId, workspaceMode]);
 
   useEffect(() => {
@@ -387,7 +485,19 @@ export default function App() {
       slideFramesVisible: true,
     } : current);
     if (action.kind === "draw") {
-      activateSlideFrameTool(api);
+      const aspectMode = slideFrameAspectRatioRef.current;
+      const aspectRatio = slideFrameAspectRatioValue(aspectMode);
+      frameConstraintBeforeDrawRef.current = aspectRatio
+        ? {
+          aspectRatio,
+          existingFrameIds: new Set(
+            api.getSceneElements()
+              .filter((element) => element.type === "frame" && !element.isDeleted)
+              .map((element) => element.id),
+          ),
+        }
+        : null;
+      activateSlideFrameTool(api, aspectMode);
       return;
     }
     pendingCreatedFrameIdRef.current = action.frameId;
@@ -442,6 +552,16 @@ export default function App() {
       window.requestAnimationFrame(() => exportOptionsTriggerRef.current?.focus());
     }
     nativeImageExportOpenRef.current = isNativeImageExportOpen;
+    const sidebarTab = appState.openSidebar?.name === "default" ? appState.openSidebar.tab : undefined;
+    if (sidebarTab === PERSONAL_LIBRARY_SIDEBAR_TAB || sidebarTab === SCREENSHOT_SIDEBAR_TAB) {
+      lastLibraryTabRef.current = sidebarTab;
+    }
+    const isNativeLibraryOpen = appState.openSidebar?.name === "default"
+      && (sidebarTab === PERSONAL_LIBRARY_SIDEBAR_TAB || sidebarTab === SCREENSHOT_SIDEBAR_TAB);
+    if (libraryOpenRef.current !== isNativeLibraryOpen) {
+      libraryOpenRef.current = isNativeLibraryOpen;
+      setIsLibraryOpen(isNativeLibraryOpen);
+    }
     setZoom(Math.round(appState.zoom.value * 100));
     setStrokeWidth(appState.currentItemStrokeWidth);
     setAreSlideFramesVisible(appState.frameRendering.enabled);
@@ -524,13 +644,26 @@ export default function App() {
     });
   }, [api]);
 
+  const toggleLibrary = useCallback(() => {
+    if (!api) return;
+    const nextOpen = api.toggleSidebar({ name: "default", tab: lastLibraryTabRef.current });
+    libraryOpenRef.current = nextOpen;
+    setIsLibraryOpen(nextOpen);
+  }, [api]);
+
+  const handleLibraryChange = useCallback((libraryItems: LibraryItems) => {
+    void saveLibraryItems(libraryItems).catch((error) => {
+      setErrorMessage(`Personal library could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }, []);
+
   const openLoadedProject = useCallback(async (loaded: LoadedClassroomProject) => {
     await clearAutosave(project || undefined);
     setPdfBytes(loaded.pdfBytes);
     const framesVisible = loaded.project.slideFramesVisible !== false;
     slideFramesVisibleRef.current = framesVisible;
     setAreSlideFramesVisible(framesVisible);
-    setProject(loaded.project);
+    setProject(projectForBoardStartup(loaded.project));
     setActiveSlideId(null);
     setWorkspaceMode("board");
     pendingCreatedFrameIdRef.current = null;
@@ -1421,12 +1554,184 @@ export default function App() {
   }, [api, presentation?.tool]);
 
   const currentScene = project ? project.scenes[project.activeSceneId] : null;
+  currentSceneRef.current = currentScene;
   const pdfScenes = useMemo(() => project
     ? orderedPdfScenes(project)
     : [], [project]);
   const pageIndex = currentScene?.pdfPage
     ? pdfScenes.findIndex((scene) => scene.id === currentScene.id)
     : -1;
+
+  const persistScreenshots = useCallback(async (items: StoredScreenshot[]) => {
+    await saveScreenshotLibrary(items);
+    screenshotsRef.current = items;
+    setScreenshots(items);
+  }, []);
+
+  const startScreenshotCapture = useCallback(() => {
+    if (!api || isScreenshotBusy) return;
+    lastLibraryTabRef.current = SCREENSHOT_SIDEBAR_TAB;
+    setMathInteraction(null);
+    lassoActiveRef.current = false;
+    setIsLassoActive(false);
+    api.toggleSidebar({ name: "default", force: false });
+    libraryOpenRef.current = false;
+    setIsLibraryOpen(false);
+    setExportOpen(false);
+    setIsScreenshotCaptureActive(true);
+  }, [api, isScreenshotBusy]);
+
+  const cancelScreenshotCapture = useCallback(() => {
+    setIsScreenshotCaptureActive(false);
+    api?.setToast({ message: "Area capture cancelled." });
+  }, [api]);
+
+  const finishScreenshotCapture = useCallback((rect: ViewportCaptureRect) => {
+    const editorBounds = editorHostRef.current?.getBoundingClientRect();
+    if (!api || !editorBounds) return cancelScreenshotCapture();
+    setIsScreenshotCaptureActive(false);
+    setIsScreenshotBusy(true);
+    setBusyMessage("Capturing area…");
+
+    const sceneBounds = viewportCaptureRectToSceneBounds(
+      rect,
+      { x: editorBounds.left, y: editorBounds.top },
+      api.getAppState(),
+    );
+    const rendered = exportScreenshotArea(api, sceneBounds);
+    // ClipboardItem accepts a promised Blob, so the privileged write begins
+    // synchronously inside the pointer-up gesture while rendering continues.
+    const clipboardWrite = beginPngClipboardWrite(rendered.then((capture) => capture.blob));
+
+    void (async () => {
+      try {
+        const capture = await rendered;
+        const item: StoredScreenshot = {
+          id: createLocalId(),
+          createdAt: Date.now(),
+          blob: capture.blob,
+          width: capture.width,
+          height: capture.height,
+          sceneWidth: capture.sceneWidth,
+          sceneHeight: capture.sceneHeight,
+        };
+        const nextItems = addScreenshotToLibrary(screenshotsRef.current, item);
+        await persistScreenshots(nextItems);
+        api.setToast({ message: clipboardCaptureToast(await clipboardWrite) });
+      } catch (error) {
+        setErrorMessage(`Area screenshot failed: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        setBusyMessage(null);
+        setIsScreenshotBusy(false);
+      }
+    })();
+  }, [api, cancelScreenshotCapture, persistScreenshots]);
+
+  const insertScreenshot = useCallback(async (
+    item: StoredScreenshot,
+    viewportPoint?: { clientX: number; clientY: number },
+  ) => {
+    if (!api) return;
+    try {
+      const dataURL = await pngBlobToDataUrl(item.blob);
+      const appState = api.getAppState();
+      const activeScene = currentSceneRef.current;
+      let center: { x: number; y: number };
+      if (viewportPoint) {
+        center = viewportCoordsToSceneCoords(viewportPoint, appState);
+      } else if (activeScene?.pdfPage) {
+        const background = api.getSceneElements().find(
+          (element) => element.id === activeScene.pdfPage?.backgroundElementId,
+        );
+        center = background
+          ? { x: background.x + background.width / 2, y: background.y + background.height / 2 }
+          : { x: activeScene.pdfPage.width / 2, y: activeScene.pdfPage.height / 2 };
+      } else {
+        center = viewportCoordsToSceneCoords({
+          clientX: appState.offsetLeft + appState.width / 2,
+          clientY: appState.offsetTop + appState.height / 2,
+        }, appState);
+      }
+
+      const fileId = createLocalId() as FileId;
+      const imageId = createLocalId();
+      const file: BinaryFileData = {
+        id: fileId,
+        mimeType: "image/png",
+        dataURL,
+        created: Date.now(),
+      };
+      const [image] = convertToExcalidrawElements([{
+        id: imageId,
+        type: "image",
+        x: center.x - item.sceneWidth / 2,
+        y: center.y - item.sceneHeight / 2,
+        width: item.sceneWidth,
+        height: item.sceneHeight,
+        fileId,
+        status: "saved",
+        strokeColor: "transparent",
+        backgroundColor: "transparent",
+      }], { regenerateIds: false });
+      api.addFiles([file]);
+      api.setActiveTool({ type: "selection" });
+      api.updateScene({
+        elements: [...api.getSceneElements(), image],
+        appState: { selectedElementIds: { [image.id]: true } },
+        captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+      });
+      api.setToast({ message: viewportPoint ? "Screenshot placed on the canvas." : "Screenshot inserted at the center." });
+    } catch (error) {
+      setErrorMessage(`Screenshot could not be inserted: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [api]);
+
+  const copyScreenshot = useCallback((item: StoredScreenshot) => {
+    const write = beginPngClipboardWrite(Promise.resolve(item.blob));
+    void write.then((result) => {
+      api?.setToast({
+        message: result === "success"
+          ? "Screenshot copied to the clipboard."
+          : result === "denied"
+            ? "Clipboard permission was denied."
+            : result === "unsupported"
+              ? "Image clipboard access is unavailable in this browser."
+              : "The screenshot could not be copied.",
+      });
+    });
+  }, [api]);
+
+  const downloadScreenshot = useCallback((item: StoredScreenshot) => {
+    downloadBlob(item.blob, screenshotDownloadName(item.createdAt));
+  }, []);
+
+  const deleteScreenshot = useCallback((item: StoredScreenshot) => {
+    const nextItems = screenshotsRef.current.filter((candidate) => candidate.id !== item.id);
+    setIsScreenshotBusy(true);
+    void persistScreenshots(nextItems)
+      .then(() => api?.setToast({ message: "Screenshot deleted." }))
+      .catch((error) => {
+        setErrorMessage(`Screenshot could not be deleted: ${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => setIsScreenshotBusy(false));
+  }, [api, persistScreenshots]);
+
+  const handleScreenshotDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes(SCREENSHOT_DRAG_MIME)) return;
+    if (event.target instanceof Element && event.target.closest(".default-sidebar")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }, []);
+
+  const handleScreenshotDrop = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes(SCREENSHOT_DRAG_MIME)) return;
+    if (event.target instanceof Element && event.target.closest(".default-sidebar")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const screenshotId = event.dataTransfer.getData(SCREENSHOT_DRAG_MIME);
+    const item = screenshotsRef.current.find((candidate) => candidate.id === screenshotId);
+    if (item) void insertScreenshot(item, { clientX: event.clientX, clientY: event.clientY });
+  }, [insertScreenshot]);
 
   useEffect(() => {
     if (workspaceMode !== "pdf" || presentation || pageIndex < 0) return;
@@ -1578,6 +1883,16 @@ export default function App() {
       slideFramesVisible: visible,
     } : current);
   }, [api]);
+
+  const setSlideFrameAspectRatio = useCallback((aspectRatio: SlideFrameAspectRatio) => {
+    slideFrameAspectRatioRef.current = aspectRatio;
+    setProject((current) => current ? {
+      ...current,
+      updatedAt: nowIso(),
+      slideFrameAspectRatio: aspectRatio,
+      slideWidescreenFrames: undefined,
+    } : current);
+  }, []);
 
   const toggleSlideMorph = useCallback(() => {
     setProject((current) => current ? {
@@ -1763,6 +2078,83 @@ export default function App() {
     }
   }, [api]);
 
+  const prepareConstrainedFrameDraw = useCallback<NonNullable<ExcalidrawProps["onPointerDown"]>>((activeTool) => {
+    const aspectRatio = slideFrameAspectRatioValue(slideFrameAspectRatioRef.current);
+    if (!api || activeTool.type !== "frame" || !aspectRatio) {
+      frameConstraintBeforeDrawRef.current = null;
+      return;
+    }
+    if (frameConstraintBeforeDrawRef.current) return;
+    frameConstraintBeforeDrawRef.current = {
+      aspectRatio,
+      existingFrameIds: new Set(
+        api.getSceneElements()
+          .filter((element) => (
+            element.type === "frame"
+            && !element.isDeleted
+            && Math.abs(element.width) > 0
+            && Math.abs(element.height) > 0
+          ))
+          .map((element) => element.id),
+      ),
+    };
+  }, [api]);
+
+  const finishConstrainedFrameDraw = useCallback<NonNullable<ExcalidrawProps["onPointerUp"]>>(() => {
+    const constraint = frameConstraintBeforeDrawRef.current;
+    frameConstraintBeforeDrawRef.current = null;
+    if (!api || !constraint) return;
+    window.cancelAnimationFrame(constrainedFrameUpdateRef.current);
+    constrainedFrameUpdateRef.current = window.requestAnimationFrame(() => {
+      const elements = api.getSceneElements();
+      const constrained = constrainNewSlideFramesToAspectRatio(
+        elements,
+        constraint.existingFrameIds,
+        constraint.aspectRatio,
+      );
+      if (constrained === elements) return;
+      api.updateScene({
+        elements: constrained,
+        captureUpdate: CaptureUpdateAction.NEVER,
+      });
+    });
+  }, [api]);
+
+  const screenshotSidebar = useMemo(() => (
+    <DefaultSidebar>
+      <DefaultSidebar.TabTriggers>
+        <Sidebar.TabTrigger
+          tab={SCREENSHOT_SIDEBAR_TAB}
+          aria-label="Screenshot Library"
+          title="Screenshot Library"
+        >
+          <ScreenshotIcon />
+        </Sidebar.TabTrigger>
+      </DefaultSidebar.TabTriggers>
+      <Sidebar.Tab tab={SCREENSHOT_SIDEBAR_TAB}>
+        <ScreenshotLibrary
+          busy={isScreenshotBusy}
+          loading={isScreenshotLibraryLoading}
+          items={screenshots}
+          onCaptureArea={startScreenshotCapture}
+          onCopy={copyScreenshot}
+          onDelete={deleteScreenshot}
+          onDownload={downloadScreenshot}
+          onInsert={(item) => void insertScreenshot(item)}
+        />
+      </Sidebar.Tab>
+    </DefaultSidebar>
+  ), [
+    copyScreenshot,
+    deleteScreenshot,
+    downloadScreenshot,
+    insertScreenshot,
+    isScreenshotBusy,
+    isScreenshotLibraryLoading,
+    screenshots,
+    startScreenshotCapture,
+  ]);
+
   if (!project || !currentScene) return <div className="loading-screen">Opening Canvas Classroom…</div>;
 
   return (
@@ -1786,6 +2178,9 @@ export default function App() {
           mode={workspaceMode}
           onModeChange={changeWorkspaceMode}
           pdfAvailable={pdfScenes.length > 0}
+          libraryAvailable={Boolean(api)}
+          libraryOpen={isLibraryOpen}
+          onLibraryToggle={toggleLibrary}
           onHide={() => setIsNavigationVisible(false)}
         />
       )}
@@ -1800,6 +2195,8 @@ export default function App() {
           onDeleteSlide={deleteSlide}
           framesVisible={areSlideFramesVisible}
           onToggleFrames={toggleSlideFrames}
+          frameAspectRatio={project.slideFrameAspectRatio ?? "freeform"}
+          onFrameAspectRatioChange={setSlideFrameAspectRatio}
           morphEnabled={project.slideMorphEnabled === true}
           morphDurationMs={normalizeSlideMorphDurationMs(project.slideMorphDurationMs)}
           onToggleMorph={toggleSlideMorph}
@@ -1852,10 +2249,20 @@ export default function App() {
             <ShowBottomBarIcon />
           </button>
         )}
-        <div ref={editorHostRef} className="editor-host" onPointerDownCapture={captureMathInteractionPoint}>
+        <div
+          ref={editorHostRef}
+          className={`editor-host ${isScreenshotCaptureActive ? "is-screenshot-capture-active" : ""}`}
+          onPointerDownCapture={captureMathInteractionPoint}
+          onDragOver={handleScreenshotDragOver}
+          onDrop={handleScreenshotDrop}
+        >
           <Excalidraw
             excalidrawAPI={setApi}
+            initialData={initialExcalidrawData}
             onChange={handleChange}
+            onPointerDown={prepareConstrainedFrameDraw}
+            onPointerUp={finishConstrainedFrameDraw}
+            onLibraryChange={handleLibraryChange}
             onPaste={handlePaste}
             onLinkOpen={handleLinkOpen}
             aiEnabled={false}
@@ -1864,7 +2271,15 @@ export default function App() {
             isCollaborating={false}
             theme="light"
             UIOptions={CLASSROOM_UI_OPTIONS}
-          />
+          >
+            {screenshotSidebar}
+          </Excalidraw>
+          {isScreenshotCaptureActive && (
+            <ScreenshotCaptureOverlay
+              onCancel={cancelScreenshotCapture}
+              onCapture={finishScreenshotCapture}
+            />
+          )}
           {spinnerPointerAnimations.length > 0 && (
             <SpinnerPointerOverlay durationMs={SPINNER_ANIMATION_DURATION_MS} spinners={spinnerPointerAnimations} />
           )}

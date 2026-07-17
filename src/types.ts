@@ -41,6 +41,8 @@ export interface ClassroomSlide {
   title: string;
 }
 
+export type SlideFrameAspectRatio = "freeform" | "16:9" | "4:3";
+
 export interface ClassroomProject {
   schemaVersion: typeof CLASSROOM_PROJECT_VERSION;
   id: string;
@@ -52,6 +54,10 @@ export interface ClassroomProject {
   slideOrder: ClassroomSlide[];
   /** Wrapper-owned frame visibility preference. Optional only for legacy v1 project files. */
   slideFramesVisible?: boolean;
+  /** Shape used for newly drawn slide frames. Optional only for legacy v1 project files. */
+  slideFrameAspectRatio?: SlideFrameAspectRatio;
+  /** @deprecated Legacy preference migrated to slideFrameAspectRatio when loading. */
+  slideWidescreenFrames?: boolean;
   /** Smooth presentation navigation preference. Optional only for legacy v1 project files. */
   slideMorphEnabled?: boolean;
   /** Morph duration in milliseconds. Optional only for legacy v1 project files. */
@@ -96,6 +102,7 @@ export function createBlankProject(now = new Date()): ClassroomProject {
     },
     slideOrder: [],
     slideFramesVisible: true,
+    slideFrameAspectRatio: "freeform",
     slideMorphEnabled: false,
     slideMorphDurationMs: DEFAULT_SLIDE_MORPH_DURATION_MS,
     pdfPageOrder: [],

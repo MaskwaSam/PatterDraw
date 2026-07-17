@@ -5,6 +5,7 @@ import {
   EquationIcon,
   ExportIcon,
   HideTopBarIcon,
+  LibraryIcon,
   MermaidIcon,
   OpenIcon,
   PdfIcon,
@@ -27,6 +28,9 @@ interface TopBarProps {
   mode: WorkspaceMode;
   onModeChange: (mode: WorkspaceMode) => void;
   pdfAvailable: boolean;
+  libraryAvailable: boolean;
+  libraryOpen: boolean;
+  onLibraryToggle: () => void;
   onHide: () => void;
 }
 
@@ -91,6 +95,9 @@ export function TopBar({
   mode,
   onModeChange,
   pdfAvailable,
+  libraryAvailable,
+  libraryOpen,
+  onLibraryToggle,
   onHide,
 }: TopBarProps) {
   return (
@@ -157,6 +164,17 @@ export function TopBar({
             <ChevronDownIcon />
           </button>
         </div>
+        <button
+          className={`sidebar-trigger topbar-library ${libraryOpen ? "is-active" : ""}`}
+          type="button"
+          aria-label="Library"
+          aria-expanded={libraryOpen}
+          title={libraryOpen ? "Close Library" : "Open Library"}
+          disabled={!libraryAvailable}
+          onClick={onLibraryToggle}
+        >
+          <LibraryIcon />
+        </button>
         <button
           className="topbar-hide"
           type="button"

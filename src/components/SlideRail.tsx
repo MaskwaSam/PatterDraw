@@ -1,4 +1,5 @@
-import type { ClassroomProject, ClassroomSlide } from "../types";
+import { useState } from "react";
+import type { ClassroomProject, ClassroomSlide, SlideFrameAspectRatio } from "../types";
 import {
   MAX_SLIDE_MORPH_DURATION_MS,
   MIN_SLIDE_MORPH_DURATION_MS,
@@ -17,6 +18,8 @@ interface SlideRailProps {
   onDeleteSlide: (slide: ClassroomSlide) => void;
   framesVisible: boolean;
   onToggleFrames: () => void;
+  frameAspectRatio: SlideFrameAspectRatio;
+  onFrameAspectRatioChange: (aspectRatio: SlideFrameAspectRatio) => void;
   morphEnabled: boolean;
   morphDurationMs: number;
   onToggleMorph: () => void;
@@ -33,12 +36,19 @@ export function SlideRail({
   onDeleteSlide,
   framesVisible,
   onToggleFrames,
+  frameAspectRatio,
+  onFrameAspectRatioChange,
   morphEnabled,
   morphDurationMs,
   onToggleMorph,
   onMorphDurationChange,
 }: SlideRailProps) {
+  const [frameAspectOptionsOpen, setFrameAspectOptionsOpen] = useState(false);
   const morphDurationSeconds = `${Number((morphDurationMs / 1_000).toFixed(2))} s`;
+  const chooseFrameAspectRatio = (aspectRatio: Exclude<SlideFrameAspectRatio, "freeform">) => {
+    onFrameAspectRatioChange(frameAspectRatio === aspectRatio ? "freeform" : aspectRatio);
+    onDrawFrame();
+  };
   return (
     <aside id="slide-rail" className="slide-rail" aria-label="Slides">
       <div className="rail-heading">
@@ -57,9 +67,47 @@ export function SlideRail({
         <button className="new-slide-button" type="button" onClick={onAddSlide}>
           <PlusIcon /> Add slide
         </button>
-        <button className="draw-frame-button" type="button" onClick={onDrawFrame}>
+        <button
+          className="draw-frame-button"
+          type="button"
+          aria-expanded={frameAspectOptionsOpen}
+          aria-controls="slide-frame-aspect-options"
+          onClick={() => {
+            setFrameAspectOptionsOpen((open) => !open);
+            onDrawFrame();
+          }}
+        >
           <FrameIcon /> Draw around content
         </button>
+        {frameAspectOptionsOpen ? (
+          <div id="slide-frame-aspect-options" className="slide-frame-aspect-options">
+            <div className="slide-frame-aspect-heading">
+              <strong>Frame shape</strong>
+              <span>{frameAspectRatio === "freeform" ? "Freeform" : frameAspectRatio}</span>
+            </div>
+            <div className="slide-frame-aspect-buttons" role="group" aria-label="Frame shape">
+              <button
+                className={frameAspectRatio === "16:9" ? "is-active" : ""}
+                type="button"
+                aria-pressed={frameAspectRatio === "16:9"}
+                onClick={() => chooseFrameAspectRatio("16:9")}
+              >
+                <span className="aspect-ratio-preview is-widescreen" aria-hidden="true" />
+                <span><strong>16:9</strong><small>1080p and 4K</small></span>
+              </button>
+              <button
+                className={frameAspectRatio === "4:3" ? "is-active" : ""}
+                type="button"
+                aria-pressed={frameAspectRatio === "4:3"}
+                onClick={() => chooseFrameAspectRatio("4:3")}
+              >
+                <span className="aspect-ratio-preview is-standard" aria-hidden="true" />
+                <span><strong>4:3</strong><small>Old TVs and smartboards</small></span>
+              </button>
+            </div>
+            <small className="slide-frame-aspect-help">Select the active shape again to return to freeform.</small>
+          </div>
+        ) : null}
         <div className="slide-display-actions">
           <button
             className="toggle-frames-button"

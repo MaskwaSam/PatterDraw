@@ -1,4 +1,4 @@
-import type { ClassroomProject, SerializedScene } from "../types";
+import type { ClassroomProject, SerializedScene, SlideFrameAspectRatio } from "../types";
 import { sanitizeClassroomMathToolMetadata } from "./math-tools/types";
 import { reconcilePdfPageOrder } from "./pdf/page-order";
 import {
@@ -12,6 +12,14 @@ export const MAX_PDF_BYTES = 75 * 1024 * 1024;
 export const MAX_PDF_PAGES = 250;
 
 const safeDataUrl = /^data:image\/(?:png|jpe?g|gif|webp|svg\+xml)(?:;[^,]*)?,/i;
+
+export function normalizeSlideFrameAspectRatio(
+  value: ClassroomProject["slideFrameAspectRatio"],
+  legacyWidescreen?: boolean,
+): SlideFrameAspectRatio {
+  if (value === "16:9" || value === "4:3" || value === "freeform") return value;
+  return legacyWidescreen === true ? "16:9" : "freeform";
+}
 
 export function isRemoteUrl(value: unknown): boolean {
   if (typeof value !== "string") return false;
@@ -102,6 +110,11 @@ export function sanitizeProject(project: ClassroomProject): ClassroomProject {
   );
   safe.pdfPageOrder = reconcilePdfPageOrder(safe);
   safe.slideFramesVisible = safe.slideFramesVisible !== false;
+  safe.slideFrameAspectRatio = normalizeSlideFrameAspectRatio(
+    safe.slideFrameAspectRatio,
+    safe.slideWidescreenFrames,
+  );
+  delete safe.slideWidescreenFrames;
   safe.slideMorphEnabled = safe.slideMorphEnabled === true;
   safe.slideMorphDurationMs = normalizeSlideMorphDurationMs(safe.slideMorphDurationMs);
   return safe;
@@ -115,6 +128,17 @@ export function assertSafeProject(project: ClassroomProject): void {
   if (!Array.isArray(project.slideOrder)) throw new Error("Slide order must be a list.");
   if (project.slideFramesVisible !== undefined && typeof project.slideFramesVisible !== "boolean") {
     throw new Error("Slide frame visibility must be a boolean.");
+  }
+  if (
+    project.slideFrameAspectRatio !== undefined
+    && project.slideFrameAspectRatio !== "freeform"
+    && project.slideFrameAspectRatio !== "16:9"
+    && project.slideFrameAspectRatio !== "4:3"
+  ) {
+    throw new Error("Slide frame aspect ratio must be freeform, 16:9, or 4:3.");
+  }
+  if (project.slideWidescreenFrames !== undefined && typeof project.slideWidescreenFrames !== "boolean") {
+    throw new Error("Slide widescreen frame preference must be a boolean.");
   }
   if (project.slideMorphEnabled !== undefined && typeof project.slideMorphEnabled !== "boolean") {
     throw new Error("Slide Morph preference must be a boolean.");

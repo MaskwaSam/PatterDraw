@@ -16,6 +16,22 @@ export const OpenIcon = (props: IconProps) => (
 export const SaveIcon = (props: IconProps) => (
   <IconBase {...props}><path d="M5 3.5h12l2 2V20H5z"/><path d="M8 3.5v6h8v-6M8 20v-7h8v7"/></IconBase>
 );
+export const LibraryIcon = (props: IconProps) => (
+  <IconBase {...props}>
+    <g strokeWidth="1.25">
+      <path d="M3 19a9 9 0 0 1 9 0 9 9 0 0 1 9 0" />
+      <path d="M3 6a9 9 0 0 1 9 0 9 9 0 0 1 9 0" />
+      <path d="M3 6v13M12 6v13M21 6v13" />
+    </g>
+  </IconBase>
+);
+export const ScreenshotIcon = (props: IconProps) => (
+  <IconBase {...props}>
+    <path d="M4 8.5h3l1.4-2h7.2l1.4 2h3v9H4z" />
+    <circle cx="12" cy="13" r="3" />
+    <path d="M4 5v2M4 5h2M20 5v2M20 5h-2M4 21v-2M4 21h2M20 21v-2M20 21h-2" />
+  </IconBase>
+);
 export const ExportIcon = (props: IconProps) => (
   <IconBase {...props}><path d="M12 15V3m0 0L8 7m4-4 4 4"/><path d="M5 11v9h14v-9"/></IconBase>
 );
