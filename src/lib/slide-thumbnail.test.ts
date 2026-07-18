@@ -37,11 +37,11 @@ function makeScene(overrides: Partial<SerializedScene> = {}): SerializedScene {
     id: "scene",
     name: "Board",
     elements: [
-      element("frame", "frame", { width: 1_280, height: 720 }),
-      element("shape", "rectangle", { frameId: "frame", version: 2 }),
-      element("image", "image", { frameId: "frame", fileId: "used-file" }),
+      element("frame", "frame", { x: 0, y: 0, width: 1_280, height: 720, customData: { classroomSlide: { kind: "slide", version: 1 } } }),
+      element("shape", "rectangle", { x: 20, y: 20, width: 100, height: 100, frameId: "frame", version: 2 }),
+      element("image", "image", { x: 140, y: 20, width: 100, height: 100, frameId: "frame", fileId: "used-file" }),
       element("blocked", "iframe", { frameId: "frame" }),
-      element("unrelated", "ellipse"),
+      element("unrelated", "ellipse", { x: 2_000, y: 2_000, width: 100, height: 100 }),
     ],
     appState: {},
     files: {

@@ -240,6 +240,8 @@ button { color: inherit; }
 .draw-frame-button:hover,
 .toggle-frames-button:hover,
 .toggle-morph-button:hover { border-color: #9eabc0; background: #f5f7fa; }
+.draw-frame-button.is-active,
+.draw-frame-button.is-active:hover { border-color: #204aa5; background: var(--accent); color: #fff; }
 .new-slide-button svg,
 .draw-frame-button svg,
 .toggle-frames-button svg,
@@ -257,25 +259,26 @@ button { color: inherit; }
 .slide-frame-aspect-buttons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
 .slide-frame-aspect-buttons button {
   min-width: 0;
-  min-height: 54px;
+  min-height: 72px;
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
-  align-items: center;
-  gap: 6px;
-  padding: 6px;
+  grid-template-rows: auto auto;
+  justify-items: center;
+  align-content: center;
+  gap: 5px;
+  padding: 7px 5px;
   border: 1px solid #c8d0dc;
   border-radius: 7px;
   background: #fff;
   color: #34405a;
   cursor: pointer;
-  text-align: left;
+  text-align: center;
 }
 .slide-frame-aspect-buttons button:hover { border-color: #9eabc0; background: #f5f7fa; }
 .slide-frame-aspect-buttons button.is-active { border-color: #7196eb; background: var(--accent-soft); color: #204aa5; }
 .slide-frame-aspect-buttons button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.slide-frame-aspect-buttons button > span:last-child { min-width: 0; display: grid; gap: 2px; }
+.slide-frame-aspect-buttons button > span:last-child { width: 100%; min-width: 0; display: grid; justify-items: center; gap: 2px; }
 .slide-frame-aspect-buttons strong { font-size: 11px; line-height: 1; }
-.slide-frame-aspect-buttons small { color: #6b7588; font-size: 8px; font-weight: 570; line-height: 1.15; }
+.slide-frame-aspect-buttons small { max-width: 100%; color: #6b7588; font-size: 8px; font-weight: 570; line-height: 1.15; overflow-wrap: anywhere; }
 .aspect-ratio-preview { justify-self: center; display: block; border: 2px solid currentColor; border-radius: 2px; }
 .aspect-ratio-preview.is-widescreen { width: 28px; height: 16px; }
 .aspect-ratio-preview.is-standard { width: 24px; height: 18px; }
@@ -549,6 +552,41 @@ button { color: inherit; }
 .editor-host { min-height: 0; position: relative; }
 .editor-host > .excalidraw { height: 100%; }
 .editor-host .excalidraw { --color-primary: #2859c5; --color-primary-darker: #204aa5; }
+.slide-frame-draw-overlay {
+  position: absolute;
+  z-index: 21;
+  inset: 0;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+.slide-frame-drag-preview {
+  position: absolute;
+  z-index: 22;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  border: 2px solid #2859c5;
+  border-radius: 3px;
+  background: rgb(40 89 197 / 7%);
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 92%), inset 0 0 0 1px rgb(40 89 197 / 14%);
+  pointer-events: none;
+  will-change: transform, width, height;
+}
+.slide-frame-drag-preview::after {
+  content: attr(data-aspect-ratio);
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: rgb(32 74 165 / 94%);
+  color: #fff;
+  box-shadow: 0 1px 4px rgb(15 23 42 / 20%);
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1;
+}
 .editor-host.is-lasso-active canvas { cursor: crosshair !important; touch-action: none; }
 .lasso-overlay {
   position: absolute;

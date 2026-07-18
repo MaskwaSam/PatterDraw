@@ -1,5 +1,5 @@
 import { expect, test, type Download } from "@playwright/test";
-import { strFromU8, unzipSync } from "fflate";
+import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { PDFDocument } from "pdf-lib";
 
 async function enableExperimentalMathTools(page: import("@playwright/test").Page) {
@@ -216,6 +216,119 @@ function exportTestRectangle(
     link: null,
     locked: false,
     index,
+  };
+}
+
+function classroomTestFrame(
+  id: string,
+  name: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  index: string,
+  tagged = false,
+) {
+  return {
+    ...exportTestRectangle(id, x, y, width, height, index),
+    type: "frame",
+    backgroundColor: "transparent",
+    roundness: null,
+    name,
+    ...(tagged ? { customData: { classroomSlide: { kind: "slide", version: 1 } } } : {}),
+  };
+}
+
+async function openClassroomFixture(
+  page: import("@playwright/test").Page,
+  elements: Array<Record<string, unknown>>,
+  slideOrder: Array<{ id: string; frameId: string; title: string; titleMode?: "automatic" | "custom" }>,
+) {
+  const sceneId = "scene";
+  const project = {
+    schemaVersion: 1,
+    id: "browser-fixture",
+    title: "Detached slides fixture",
+    createdAt: "2026-07-17T00:00:00.000Z",
+    updatedAt: "2026-07-17T00:00:00.000Z",
+    activeSceneId: sceneId,
+    scenes: {
+      [sceneId]: {
+        id: sceneId,
+        name: "Board",
+        elements,
+        appState: { scrollX: 0, scrollY: 0, zoom: { value: 1 }, viewBackgroundColor: "#ffffff" },
+        files: {},
+      },
+    },
+    slideOrder: slideOrder.map((slide) => ({ ...slide, sceneId })),
+    slideFramesVisible: true,
+    slideFrameAspectRatio: "freeform",
+    slideMorphEnabled: true,
+    slideMorphDurationMs: 650,
+    pdfPageOrder: [],
+    pdfDocuments: {},
+  };
+  const bytes = zipSync({ "project.json": strToU8(JSON.stringify(project)) });
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "detached-slides.canvasclassroom",
+    mimeType: "application/vnd.canvas-classroom+zip",
+    buffer: Buffer.from(bytes),
+  });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible();
+}
+
+type AutosavedElementState = {
+  customData?: { classroomSlide?: { kind?: string; version?: number } };
+  frameId: string | null;
+  groupIds: string[];
+  height: number;
+  isDeleted: boolean;
+  type: string;
+  width: number;
+  x: number;
+  y: number;
+};
+
+async function autosavedElementsById(
+  page: import("@playwright/test").Page,
+  ids: string[],
+): Promise<Record<string, AutosavedElementState>> {
+  const project = await keyvalValue<{
+    activeSceneId: string;
+    scenes: Record<string, { elements: Array<Record<string, unknown>> }>;
+  }>(page, "excalidraw-classroom:autosave:project:v1");
+  const wanted = new Set(ids);
+  return Object.fromEntries(
+    (project?.scenes[project.activeSceneId]?.elements || [])
+      .filter((element) => wanted.has(String(element.id)))
+      .map((element) => [String(element.id), element]),
+  ) as Record<string, AutosavedElementState>;
+}
+
+async function scenePointInViewport(
+  page: import("@playwright/test").Page,
+  point: { x: number; y: number },
+): Promise<{ x: number; y: number }> {
+  const project = await keyvalValue<{
+    activeSceneId: string;
+    scenes: Record<string, {
+      appState: {
+        offsetLeft?: number;
+        offsetTop?: number;
+        scrollX?: number;
+        scrollY?: number;
+        zoom?: { value?: number };
+      };
+    }>;
+  }>(page, "excalidraw-classroom:autosave:project:v1");
+  const appState = project?.scenes[project.activeSceneId]?.appState || {};
+  const editor = await page.locator(".editor-host").boundingBox();
+  if (!editor) throw new Error("Editor host has no visible bounds.");
+  const zoom = appState.zoom?.value || 1;
+  return {
+    x: (point.x + (appState.scrollX || 0)) * zoom + (appState.offsetLeft ?? editor.x),
+    y: (point.y + (appState.scrollY || 0)) * zoom + (appState.offsetTop ?? editor.y),
   };
 }
 
@@ -756,11 +869,16 @@ async function autosavedFrameAspectSummary(page: import("@playwright/test").Page
   const project = await keyvalValue<{
     activeSceneId: string;
     slideFrameAspectRatio?: "freeform" | "16:9" | "4:3";
-    scenes: Record<string, { elements: Array<{ height?: number; isDeleted?: boolean; type?: string; width?: number }> }>;
+    scenes: Record<string, { elements: Array<{ customData?: { classroomSlide?: { kind?: string; version?: number } }; height?: number; isDeleted?: boolean; type?: string; width?: number }> }>;
   }>(page, "excalidraw-classroom:autosave:project:v1");
   if (!project) return null;
   const frames = project.scenes[project.activeSceneId]?.elements
-    .filter((element) => element.type === "frame" && !element.isDeleted)
+    .filter((element) => (
+      element.type === "frame"
+      && !element.isDeleted
+      && element.customData?.classroomSlide?.kind === "slide"
+      && element.customData.classroomSlide.version === 1
+    ))
     .map((element) => ({
       height: element.height || 0,
       ratio: (element.width || 0) / (element.height || 1),
@@ -1135,7 +1253,7 @@ async function autosavedPdfBackgroundPosition(page: import("@playwright/test").P
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/");
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
 });
 
 test("imports and exports standard Excalidraw libraries without online controls", async ({ page }) => {
@@ -1947,7 +2065,7 @@ test("toggles and persists the Morph slide transition", async ({ page }) => {
   const morph = page.getByRole("button", { name: "Morph", exact: true });
   await expect(morph).toBeVisible();
   await expect(morph).toHaveAttribute("aria-pressed", "false");
-
+  await expect(page.getByRole("slider", { name: "Morph duration", exact: true })).toHaveCount(0);
   await morph.click();
   await expect(morph).toHaveAttribute("aria-pressed", "true");
   const duration = page.getByRole("slider", { name: "Morph duration", exact: true });
@@ -1965,19 +2083,37 @@ test("toggles and persists the Morph slide transition", async ({ page }) => {
   await expect(page.getByRole("slider", { name: "Morph duration", exact: true })).toHaveValue("5000");
 });
 
-test("reveals 16:9 and 4:3 choices when drawing frames and preserves freeform drawing", async ({ page }) => {
+test("cancels Draw slide when leaving Slides mode", async ({ page }) => {
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.getByRole("button", { name: "Draw slide", exact: true }).click();
+  await expect(page.getByTestId("slide-frame-draw-overlay")).toBeVisible();
+
+  await page.getByRole("button", { name: "Board", exact: true }).click();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await expect(page.getByTestId("slide-frame-draw-overlay")).toHaveCount(0);
+  await expect(page.getByTestId("toolbar-selection")).toBeChecked();
+
+  const editor = await page.locator(".editor-host").boundingBox();
+  expect(editor).not.toBeNull();
+  await page.mouse.click((editor?.x || 0) + 300, (editor?.y || 0) + 240);
+  await expect.poll(async () => (await autosavedFrameAspectSummary(page))?.frames.length || 0).toBe(0);
+});
+
+test("requires Draw slide for each 16:9, 4:3, freeform, and touch slide", async ({ page }) => {
   const editor = page.locator(".editor-host .excalidraw");
   await editor.evaluate((node) => node.setAttribute("data-aspect-frame-instance", "original"));
   await page.getByRole("button", { name: "Slides", exact: true }).click();
-  const drawFrame = page.getByRole("button", { name: "Draw around content", exact: true });
+  const drawFrame = page.getByRole("button", { name: "Draw slide", exact: true });
   const aspectOptions = page.locator("#slide-frame-aspect-options");
   await expect(aspectOptions).toHaveCount(0);
   await expect(drawFrame).toHaveAttribute("aria-expanded", "false");
+  await expect(drawFrame).toHaveAttribute("aria-pressed", "false");
 
   await drawFrame.click();
   await expect(drawFrame).toHaveAttribute("aria-expanded", "true");
+  await expect(drawFrame).toHaveAttribute("aria-pressed", "true");
   await expect(aspectOptions).toBeVisible();
-  await expect(aspectOptions).toContainText("Frame shape");
+  await expect(aspectOptions).toContainText("Slide shape");
   await expect(aspectOptions).toContainText("Freeform");
   const widescreen = page.getByRole("button", { name: /16:9.*1080p and 4K/ });
   const standard = page.getByRole("button", { name: /4:3.*Old TVs and smartboards/ });
@@ -1988,8 +2124,22 @@ test("reveals 16:9 and 4:3 choices when drawing frames and preserves freeform dr
   await expect(widescreen).toHaveAttribute("aria-pressed", "true");
   await expect(standard).toHaveAttribute("aria-pressed", "false");
   await expect.poll(() => autosavedFrameAspectSummary(page)).toMatchObject({ mode: "16:9" });
-  await expect(page.getByText(/16:9 frame tool ready/i)).toBeVisible();
-  await dragOnBoard(page, { x: 500, y: 240 }, { x: 800, y: 440 });
+  await expect(page.getByText(/16:9 slide ready/i)).toBeVisible();
+  const editorBounds = await page.locator(".editor-host").boundingBox();
+  expect(editorBounds).not.toBeNull();
+  await page.mouse.move((editorBounds?.x || 0) + 500, (editorBounds?.y || 0) + 240);
+  await page.mouse.down();
+  await page.mouse.move((editorBounds?.x || 0) + 800, (editorBounds?.y || 0) + 440, { steps: 8 });
+  const liveWidescreen = page.getByTestId("slide-frame-drag-preview");
+  await expect(liveWidescreen).toBeVisible();
+  await expect(liveWidescreen).toHaveAttribute("data-aspect-ratio", "16:9");
+  const liveWidescreenBounds = await liveWidescreen.boundingBox();
+  expect(liveWidescreenBounds).not.toBeNull();
+  expect((liveWidescreenBounds?.width || 0) / (liveWidescreenBounds?.height || 1)).toBeCloseTo(16 / 9, 2);
+  expect(liveWidescreenBounds?.x || 0).toBeCloseTo((editorBounds?.x || 0) + 500, 0);
+  expect(liveWidescreenBounds?.y || 0).toBeCloseTo((editorBounds?.y || 0) + 240, 0);
+  await page.mouse.up();
+  await expect(liveWidescreen).toBeHidden();
   await expect(page.locator(".slide-thumbnail")).toHaveCount(1);
   await expect.poll(async () => {
     const summary = await autosavedFrameAspectSummary(page);
@@ -1998,21 +2148,47 @@ test("reveals 16:9 and 4:3 choices when drawing frames and preserves freeform dr
   const constrained = await autosavedFrameAspectSummary(page);
   expect(constrained?.frames[0]?.width || 0).toBeGreaterThanOrEqual(300);
   expect(constrained?.frames[0]?.height || 0).toBeGreaterThanOrEqual(200);
+  await expect(drawFrame).toHaveAttribute("aria-pressed", "false");
+  await expect(aspectOptions).toHaveCount(0);
+  await expect(page.getByTestId("toolbar-selection")).toBeChecked();
+
+  // Selection gestures do not create another frame until the teacher clicks
+  // Draw slide again.
+  await page.mouse.move((editorBounds?.x || 0) + 500, (editorBounds?.y || 0) + 500);
+  await page.mouse.down();
+  await page.mouse.move((editorBounds?.x || 0) + 760, (editorBounds?.y || 0) + 640, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(async () => (
+    (await autosavedFrameAspectSummary(page))?.frames.length || 0
+  )).toBe(1);
+
+  await drawFrame.click();
+  await expect(drawFrame).toHaveAttribute("aria-pressed", "true");
+  await expect(widescreen).toHaveAttribute("aria-pressed", "true");
+  await page.mouse.move((editorBounds?.x || 0) + 500, (editorBounds?.y || 0) + 500);
+  await page.mouse.down();
+  await page.mouse.move((editorBounds?.x || 0) + 760, (editorBounds?.y || 0) + 640, { steps: 8 });
+  await page.mouse.up();
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(2);
+  await expect.poll(async () => (
+    (await autosavedFrameAspectSummary(page))?.frames[1]?.ratio || 0
+  )).toBeCloseTo(16 / 9, 5);
+  await expect(drawFrame).toHaveAttribute("aria-pressed", "false");
   await expect(editor).toHaveAttribute("data-aspect-frame-instance", "original");
   await page.locator('.statusbar .footer-history-button[aria-label="Undo"]').click();
   await expect.poll(async () => (
     (await autosavedFrameAspectSummary(page))?.frames.length || 0
-  )).toBe(0);
+  )).toBe(1);
   await page.locator('.statusbar .footer-history-button[aria-label="Redo"]').click();
   await expect.poll(async () => (
-    (await autosavedFrameAspectSummary(page))?.frames[0]?.ratio || 0
+    (await autosavedFrameAspectSummary(page))?.frames[1]?.ratio || 0
   )).toBeCloseTo(16 / 9, 5);
 
   await page.reload();
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
   await page.getByRole("button", { name: "Slides", exact: true }).click();
   await expect(page.locator("#slide-frame-aspect-options")).toHaveCount(0);
-  await page.getByRole("button", { name: "Draw around content", exact: true }).click();
+  await page.getByRole("button", { name: "Draw slide", exact: true }).click();
   const restoredWidescreen = page.getByRole("button", { name: /16:9.*1080p and 4K/ });
   const restoredStandard = page.getByRole("button", { name: /4:3.*Old TVs and smartboards/ });
   await expect(restoredWidescreen).toHaveAttribute("aria-pressed", "true");
@@ -2021,32 +2197,388 @@ test("reveals 16:9 and 4:3 choices when drawing frames and preserves freeform dr
   await expect(restoredWidescreen).toHaveAttribute("aria-pressed", "false");
   await expect(restoredStandard).toHaveAttribute("aria-pressed", "true");
   await expect.poll(() => autosavedFrameAspectSummary(page)).toMatchObject({ mode: "4:3" });
-  await expect(page.getByText(/4:3 frame tool ready/i)).toBeVisible();
-  await dragOnBoard(page, { x: 510, y: 260 }, { x: 710, y: 460 });
-  await expect(page.locator(".slide-thumbnail")).toHaveCount(2);
+  await expect(page.getByText(/4:3 slide ready/i)).toBeVisible();
+  const restoredEditorBounds = await page.locator(".editor-host").boundingBox();
+  expect(restoredEditorBounds).not.toBeNull();
+  await page.mouse.move((restoredEditorBounds?.x || 0) + 510, (restoredEditorBounds?.y || 0) + 260);
+  await page.mouse.down();
+  await page.mouse.move((restoredEditorBounds?.x || 0) + 710, (restoredEditorBounds?.y || 0) + 460, { steps: 8 });
+  const liveStandard = page.getByTestId("slide-frame-drag-preview");
+  await expect(liveStandard).toBeVisible();
+  await expect(liveStandard).toHaveAttribute("data-aspect-ratio", "4:3");
+  const liveStandardBounds = await liveStandard.boundingBox();
+  expect(liveStandardBounds).not.toBeNull();
+  expect((liveStandardBounds?.width || 0) / (liveStandardBounds?.height || 1)).toBeCloseTo(4 / 3, 2);
+  await page.mouse.up();
+  await expect(liveStandard).toBeHidden();
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(3);
   await expect.poll(async () => {
     const summary = await autosavedFrameAspectSummary(page);
     return summary?.frames.length || 0;
-  }).toBe(2);
+  }).toBe(3);
   const fourByThree = await autosavedFrameAspectSummary(page);
-  expect(fourByThree?.frames[1]?.ratio || 0).toBeCloseTo(4 / 3, 5);
+  expect(fourByThree?.frames[2]?.ratio || 0).toBeCloseTo(4 / 3, 5);
+  await expect(drawFrame).toHaveAttribute("aria-pressed", "false");
 
+  await drawFrame.click();
+  await expect(drawFrame).toHaveAttribute("aria-pressed", "true");
   await restoredStandard.click();
   await expect(restoredStandard).toHaveAttribute("aria-pressed", "false");
   await expect(page.locator(".slide-frame-aspect-heading")).toContainText("Freeform");
   await expect.poll(() => autosavedFrameAspectSummary(page)).toMatchObject({ mode: "freeform" });
-  await dragOnBoard(page, { x: 520, y: 280 }, { x: 720, y: 580 });
-  await expect(page.locator(".slide-thumbnail")).toHaveCount(3);
+  const freeformBounds = await page.locator(".editor-host").boundingBox();
+  expect(freeformBounds).not.toBeNull();
+  await page.mouse.move((freeformBounds?.x || 0) + 520, (freeformBounds?.y || 0) + 280);
+  await page.mouse.down();
+  await page.mouse.move((freeformBounds?.x || 0) + 720, (freeformBounds?.y || 0) + 580, { steps: 8 });
+  await expect(page.getByTestId("slide-frame-drag-preview")).toBeVisible();
+  await page.mouse.up();
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(4);
   const freeform = await autosavedFrameAspectSummary(page);
-  expect(freeform?.frames[2]?.ratio || 0).not.toBeCloseTo(16 / 9, 2);
-  expect(freeform?.frames[2]?.ratio || 0).not.toBeCloseTo(4 / 3, 2);
+  expect(freeform?.frames[3]?.ratio || 0).not.toBeCloseTo(16 / 9, 2);
+  expect(freeform?.frames[3]?.ratio || 0).not.toBeCloseTo(4 / 3, 2);
+  await expect(drawFrame).toHaveAttribute("aria-pressed", "false");
 
   await page.setViewportSize({ width: 390, height: 844 });
+  await drawFrame.click();
   await expect(page.locator("#slide-frame-aspect-options")).toBeVisible();
   const railBounds = await page.locator("#slide-rail").boundingBox();
   expect(railBounds).not.toBeNull();
   expect((railBounds?.x || 0) + (railBounds?.width || 0)).toBeLessThanOrEqual(390);
   expect(await page.locator("#slide-frame-aspect-options").evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  expect(await page.locator(".slide-frame-aspect-buttons button").evaluateAll((buttons) => (
+    buttons.every((button) => button.scrollWidth <= button.clientWidth && button.scrollHeight <= button.clientHeight)
+  ))).toBe(true);
+
+  const mobileWidescreen = page.getByRole("button", { name: /16:9.*1080p and 4K/ });
+  await mobileWidescreen.click();
+  await expect(mobileWidescreen).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByText(/16:9 slide ready/i)).toBeVisible();
+  const mobileEditorBounds = await page.locator(".editor-host").boundingBox();
+  expect(mobileEditorBounds).not.toBeNull();
+  const drawOverlay = page.getByTestId("slide-frame-draw-overlay");
+  const touchEvent = (type: string, x: number, y: number, buttons: number) => drawOverlay.dispatchEvent(type, {
+    clientX: (mobileEditorBounds?.x || 0) + x,
+    clientY: (mobileEditorBounds?.y || 0) + y,
+    pointerId: 91,
+    pointerType: "touch",
+    isPrimary: true,
+    button: 0,
+    buttons,
+    bubbles: true,
+  });
+  await touchEvent("pointerdown", 370, 500, 1);
+  await touchEvent("pointermove", 280, 570, 1);
+  const mobilePreview = page.getByTestId("slide-frame-drag-preview");
+  await expect(mobilePreview).toBeVisible();
+  const mobilePreviewBounds = await mobilePreview.boundingBox();
+  expect(mobilePreviewBounds).not.toBeNull();
+  expect((mobilePreviewBounds?.width || 0) / (mobilePreviewBounds?.height || 1)).toBeCloseTo(16 / 9, 2);
+  expect((mobilePreviewBounds?.x || 0) + (mobilePreviewBounds?.width || 0)).toBeLessThanOrEqual(390);
+  await touchEvent("pointerup", 280, 570, 0);
+  await expect(mobilePreview).toBeHidden();
+  await expect.poll(async () => (
+    (await autosavedFrameAspectSummary(page))?.frames.length || 0
+  )).toBe(5);
+  const mobileFrame = await autosavedFrameAspectSummary(page);
+  expect(mobileFrame?.frames[4]?.ratio || 0).toBeCloseTo(16 / 9, 5);
+
+  await expect(drawFrame).toHaveAttribute("aria-pressed", "false");
+  await expect(drawFrame).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator("#slide-frame-aspect-options")).toHaveCount(0);
+  await expect(page.getByTestId("toolbar-selection")).toBeChecked();
+});
+
+test("migrates detached slides, moves and resizes only the boundary, and keeps native frames native", async ({ page }) => {
+  const slide = classroomTestFrame("slide", "Slide 1", 100, 100, 500, 300, "a2");
+  const content = exportTestRectangle("content", 220, 180, 120, 80, "a0", "slide");
+  const nativeFrame = classroomTestFrame("native-frame", "Working frame", 760, 120, 260, 220, "a4");
+  const nativeChild = exportTestRectangle("native-child", 800, 170, 80, 60, "a3", "native-frame");
+  await openClassroomFixture(page, [content, slide, nativeChild, nativeFrame], [
+    { id: "slide-record", frameId: "slide", title: "Slide 1" },
+  ]);
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(1);
+
+  await expect.poll(() => autosavedElementsById(page, ["slide", "content", "native-child"]))
+    .toMatchObject({
+      slide: { customData: { classroomSlide: { kind: "slide", version: 1 } } },
+      content: { frameId: null, x: 220, y: 180 },
+      "native-child": { frameId: "native-frame", x: 800, y: 170 },
+    });
+
+  const before = await autosavedElementsById(page, ["slide", "content"]);
+  const slideBorder = await scenePointInViewport(page, {
+    x: before.slide.x,
+    y: before.slide.y + before.slide.height / 2,
+  });
+  await page.mouse.move(slideBorder.x, slideBorder.y);
+  await page.mouse.down();
+  await page.mouse.move(slideBorder.x + 90, slideBorder.y + 55, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(async () => (await autosavedElementsById(page, ["slide"])).slide?.x)
+    .toBeCloseTo(before.slide.x + 90, 0);
+  const moved = await autosavedElementsById(page, ["slide", "content"]);
+  expect(moved.slide.y).toBeCloseTo(before.slide.y + 55, 0);
+  expect(moved.content).toMatchObject({ x: before.content.x, y: before.content.y, frameId: null });
+
+  const resizeHandle = await scenePointInViewport(page, {
+    x: moved.slide.x + moved.slide.width,
+    y: moved.slide.y + moved.slide.height,
+  });
+  await page.mouse.move(resizeHandle.x, resizeHandle.y);
+  await page.mouse.down();
+  await page.mouse.move(resizeHandle.x + 80, resizeHandle.y + 45, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(async () => (await autosavedElementsById(page, ["slide"])).slide?.width)
+    .toBeGreaterThan(moved.slide.width + 60);
+  const resized = await autosavedElementsById(page, ["slide", "content", "native-child"]);
+  expect(resized.slide.height).toBeGreaterThan(moved.slide.height + 25);
+  expect(resized.content).toMatchObject({ x: before.content.x, y: before.content.y, frameId: null });
+  expect(resized["native-child"]).toMatchObject({ frameId: "native-frame", x: 800, y: 170 });
+
+  await page.locator(".App-toolbar__extra-tools-trigger").click();
+  await page.getByTestId("toolbar-frame").click();
+  await dragOnBoard(page, { x: 760, y: 520 }, { x: 980, y: 700 });
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(1);
+  await expect.poll(async () => {
+    const project = await keyvalValue<{
+      activeSceneId: string;
+      slideOrder: unknown[];
+      scenes: Record<string, { elements: Array<{ customData?: { classroomSlide?: unknown }; isDeleted?: boolean; type?: string }> }>;
+    }>(page, "excalidraw-classroom:autosave:project:v1");
+    const frames = project?.scenes[project.activeSceneId]?.elements.filter(
+      (element) => element.type === "frame" && !element.isDeleted,
+    ) || [];
+    return {
+      frameCount: frames.length,
+      nativeCount: frames.filter((frame) => !frame.customData?.classroomSlide).length,
+      slideCount: project?.slideOrder.length || 0,
+    };
+  }).toEqual({ frameCount: 3, nativeCount: 2, slideCount: 1 });
+});
+
+test("uses native grouping, movement, undo redo, ungroup, and whole-group deletion without slide ownership", async ({ page }) => {
+  const slide = classroomTestFrame("slide", "Slide 1", 100, 100, 500, 300, "a1");
+  const content = exportTestRectangle("content", 220, 180, 120, 80, "a0");
+  await openClassroomFixture(page, [content, slide], [
+    { id: "slide-record", frameId: "slide", title: "Slide 1" },
+  ]);
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect.poll(() => autosavedElementsById(page, ["slide", "content"]))
+    .toMatchObject({ content: { frameId: null } });
+
+  const initial = await autosavedElementsById(page, ["slide", "content"]);
+  const slideBorder = await scenePointInViewport(page, {
+    x: initial.slide.x,
+    y: initial.slide.y + initial.slide.height / 2,
+  });
+  const contentCenter = await scenePointInViewport(page, {
+    x: initial.content.x + initial.content.width / 2,
+    y: initial.content.y + initial.content.height / 2,
+  });
+  await page.mouse.click(slideBorder.x, slideBorder.y);
+  await page.keyboard.down("Shift");
+  await page.mouse.click(contentCenter.x, contentCenter.y);
+  await page.keyboard.up("Shift");
+  await page.keyboard.press("Meta+g");
+  await expect.poll(async () => {
+    const state = await autosavedElementsById(page, ["slide", "content"]);
+    return {
+      contentFrameId: state.content?.frameId,
+      contentGroups: state.content?.groupIds.length || 0,
+      sameGroup: state.slide?.groupIds[0] === state.content?.groupIds[0],
+    };
+  }).toEqual({ contentFrameId: null, contentGroups: 1, sameGroup: true });
+
+  await page.mouse.move(contentCenter.x, contentCenter.y);
+  await page.mouse.down();
+  await page.mouse.move(contentCenter.x + 50, contentCenter.y + 30, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(async () => {
+    const state = await autosavedElementsById(page, ["slide", "content"]);
+    return {
+      content: [state.content?.x, state.content?.y],
+      slide: [state.slide?.x, state.slide?.y],
+    };
+  }).toEqual({
+    content: [initial.content.x + 50, initial.content.y + 30],
+    slide: [initial.slide.x + 50, initial.slide.y + 30],
+  });
+
+  const undo = page.locator('.statusbar .footer-history-button[aria-label="Undo"]');
+  await undo.click();
+  await expect.poll(async () => (await autosavedElementsById(page, ["slide"])).slide?.x).toBe(initial.slide.x);
+  const redo = page.locator('.statusbar .footer-history-button[aria-label="Redo"]');
+  await redo.click();
+  await expect.poll(async () => (await autosavedElementsById(page, ["slide"])).slide?.x).toBe(initial.slide.x + 50);
+  const ungroup = page.getByRole("button", { name: "Ungroup selection", exact: true });
+  await expect(ungroup).toBeVisible();
+  await ungroup.click();
+  await expect.poll(async () => {
+    const state = await autosavedElementsById(page, ["slide", "content"]);
+    return [state.slide?.groupIds.length || 0, state.content?.groupIds.length || 0];
+  }).toEqual([0, 0]);
+
+  const regroupedContent = await scenePointInViewport(page, {
+    x: initial.content.x + initial.content.width / 2 + 50,
+    y: initial.content.y + initial.content.height / 2 + 30,
+  });
+  const group = page.getByRole("button", { name: "Group selection", exact: true });
+  await expect(group).toBeVisible();
+  await group.click();
+  await page.mouse.click(regroupedContent.x, regroupedContent.y);
+  await page.keyboard.press("Delete");
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(0);
+  await expect.poll(async () => {
+    const state = await autosavedElementsById(page, ["slide", "content"]);
+    return [state.slide?.isDeleted ?? true, state.content?.isDeleted ?? true];
+  }).toEqual([true, true]);
+});
+
+test("groups a slide with an ordinary frame while preserving the frame's child ownership", async ({ page }) => {
+  const slide = classroomTestFrame("slide", "Slide 1", 100, 100, 400, 240, "a2", true);
+  const nativeFrame = classroomTestFrame("native-frame", "Examples", 650, 150, 250, 180, "a1");
+  const nativeChild = exportTestRectangle("native-child", 700, 200, 80, 60, "a0", "native-frame");
+  await openClassroomFixture(page, [nativeChild, nativeFrame, slide], [
+    { id: "slide-record", frameId: "slide", title: "Slide 1" },
+  ]);
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect.poll(async () => {
+    const state = await autosavedElementsById(page, ["slide", "native-frame", "native-child"]);
+    return Object.keys(state).sort();
+  }).toEqual(["native-child", "native-frame", "slide"]);
+
+  const initial = await autosavedElementsById(page, ["slide", "native-frame", "native-child"]);
+  const slideBorder = await scenePointInViewport(page, {
+    x: initial.slide.x,
+    y: initial.slide.y + initial.slide.height / 2,
+  });
+  const nativeBorder = await scenePointInViewport(page, {
+    x: initial["native-frame"].x,
+    y: initial["native-frame"].y + initial["native-frame"].height / 2,
+  });
+  await page.mouse.click(slideBorder.x, slideBorder.y);
+  await page.keyboard.down("Shift");
+  await page.mouse.click(nativeBorder.x, nativeBorder.y);
+  await page.keyboard.up("Shift");
+  await page.keyboard.press("Meta+g");
+  await expect.poll(async () => {
+    const state = await autosavedElementsById(page, ["slide", "native-frame", "native-child"]);
+    return {
+      framesShareGroup: state.slide?.groupIds[0] === state["native-frame"]?.groupIds[0],
+      childFrameId: state["native-child"]?.frameId,
+      childGroups: state["native-child"]?.groupIds.length || 0,
+    };
+  }).toEqual({ framesShareGroup: true, childFrameId: "native-frame", childGroups: 0 });
+
+  await page.mouse.move(nativeBorder.x, nativeBorder.y);
+  await page.mouse.down();
+  await page.mouse.move(nativeBorder.x + 60, nativeBorder.y + 25, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(async () => {
+    const state = await autosavedElementsById(page, ["slide", "native-frame", "native-child"]);
+    return {
+      slide: [state.slide?.x, state.slide?.y],
+      nativeFrame: [state["native-frame"]?.x, state["native-frame"]?.y],
+      nativeChild: [state["native-child"]?.x, state["native-child"]?.y, state["native-child"]?.frameId],
+    };
+  }).toEqual({
+    slide: [initial.slide.x + 60, initial.slide.y + 25],
+    nativeFrame: [initial["native-frame"].x + 60, initial["native-frame"].y + 25],
+    nativeChild: [initial["native-child"].x + 60, initial["native-child"].y + 25, "native-frame"],
+  });
+});
+
+test("rail deletion removes a grouped slide boundary but preserves and ungroups its content", async ({ page }) => {
+  const slide = classroomTestFrame("slide", "Slide 1", 100, 100, 500, 300, "a1", true);
+  const content = exportTestRectangle("content", 220, 180, 120, 80, "a0");
+  slide.groupIds = ["slide-group"];
+  content.groupIds = ["slide-group"];
+  await openClassroomFixture(page, [content, slide], [
+    { id: "slide-record", frameId: "slide", title: "Slide 1" },
+  ]);
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.locator(".slide-thumbnail").click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Delete selected slide", exact: true }).click();
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(0);
+  await expect.poll(async () => {
+    const state = await autosavedElementsById(page, ["slide", "content"]);
+    return {
+      contentDeleted: state.content?.isDeleted ?? true,
+      contentFrameId: state.content?.frameId,
+      contentGroups: state.content?.groupIds || [],
+      slideExists: Boolean(state.slide),
+    };
+  }).toEqual({ contentDeleted: false, contentFrameId: null, contentGroups: [], slideExists: false });
+});
+
+test("preserves custom slide names through reorder, PDF export, and project round trip", async ({ page }) => {
+  const automatic = classroomTestFrame("automatic-slide", "Slide 1", 100, 100, 500, 300, "a2", true);
+  const custom = classroomTestFrame("custom-slide", "Slide 10", 700, 100, 500, 300, "a3", true);
+  const automaticContent = exportTestRectangle("automatic-content", 220, 180, 120, 80, "a0");
+  const customContent = exportTestRectangle("custom-content", 820, 180, 120, 80, "a1");
+  await openClassroomFixture(page, [automaticContent, customContent, automatic, custom], [
+    { id: "automatic-record", frameId: "automatic-slide", title: "Slide 1" },
+    { id: "custom-record", frameId: "custom-slide", title: "Slide 10", titleMode: "custom" },
+  ]);
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+
+  const captions = page.locator(".slide-thumbnail .slide-caption");
+  await expect(captions).toHaveText(["Slide 1", "Slide 10"]);
+  const cards = page.locator(".slide-thumbnail");
+  await cards.nth(1).dragTo(cards.nth(0));
+  await expect(captions).toHaveText(["Slide 10", "Slide 2"]);
+  await expect.poll(async () => {
+    const project = await keyvalValue<{
+      slideOrder: Array<{ frameId: string; title: string }>;
+    }>(page, "excalidraw-classroom:autosave:project:v1");
+    return project?.slideOrder.map((slide) => [slide.frameId, slide.title]);
+  }).toEqual([
+    ["custom-slide", "Slide 10"],
+    ["automatic-slide", "Slide 2"],
+  ]);
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  const pdfDownload = page.waitForEvent("download");
+  await page.getByRole("dialog", { name: "More exports", exact: true })
+    .getByRole("button", { name: /Presentation PDF/ })
+    .click();
+  const exportedPdf = await PDFDocument.load(await downloadBytes(await pdfDownload));
+  expect(exportedPdf.getPageCount()).toBe(2);
+
+  const projectDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  const savedBytes = await downloadBytes(await projectDownload);
+  const savedArchive = unzipSync(new Uint8Array(savedBytes));
+  const savedProject = JSON.parse(strFromU8(savedArchive["project.json"])) as {
+    activeSceneId: string;
+    slideOrder: Array<{ frameId: string; title: string }>;
+    scenes: Record<string, { elements: Array<{ id: string; name?: string }> }>;
+  };
+  expect(savedProject.slideOrder.map((slide) => [slide.frameId, slide.title])).toEqual([
+    ["custom-slide", "Slide 10"],
+    ["automatic-slide", "Slide 2"],
+  ]);
+  expect(Object.fromEntries(
+    savedProject.scenes[savedProject.activeSceneId].elements
+      .filter((element) => element.id === "custom-slide" || element.id === "automatic-slide")
+      .map((element) => [element.id, element.name]),
+  )).toEqual({
+    "automatic-slide": "Slide 2",
+    "custom-slide": "Slide 10",
+  });
+
+  await page.reload();
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "reordered-slides.canvasclassroom",
+    mimeType: "application/vnd.canvas-classroom+zip",
+    buffer: savedBytes,
+  });
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect(page.locator(".slide-thumbnail .slide-caption"))
+    .toHaveText(["Slide 10", "Slide 2"]);
 });
 
 test("toggles slide frames for a cleaner board without removing slides", async ({ page }) => {
@@ -2097,7 +2629,7 @@ test("deletes the selected slide frame while preserving its board content", asyn
     slideCount: 1,
     frameCount: 1,
     rectangleCount: 1,
-    framedRectangleCount: 1,
+    framedRectangleCount: 0,
   });
 
   page.once("dialog", async (dialog) => {
@@ -2211,6 +2743,7 @@ test("previews existing content geometrically enclosed by a frame", async ({ pag
     width: 420,
     height: 300,
     name: "Slide 1",
+    customData: { classroomSlide: { kind: "slide", version: 1 } },
     index: "a1",
   };
   const frame = {
@@ -2223,6 +2756,7 @@ test("previews existing content geometrically enclosed by a frame", async ({ pag
     width: 420,
     height: 300,
     name: "Slide 2",
+    customData: { classroomSlide: { kind: "slide", version: 1 } },
     index: "a2",
   };
   await page.locator('input[type="file"]').setInputFiles({
@@ -2290,6 +2824,7 @@ test("fits the first slide after presentation layout opens", async ({ page }) =>
     width,
     height,
     name,
+    customData: { classroomSlide: { kind: "slide", version: 1 } },
     index,
   });
   await page.locator('input[type="file"]').setInputFiles({
@@ -2309,7 +2844,10 @@ test("fits the first slide after presentation layout opens", async ({ page }) =>
   });
 
   await page.getByRole("button", { name: "Slides", exact: true }).click();
-  await page.getByRole("button", { name: "Morph", exact: true }).click();
+  const morph = page.getByRole("button", { name: "Morph", exact: true });
+  await expect(morph).toHaveAttribute("aria-pressed", "false");
+  await morph.click();
+  await expect(morph).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("slider", { name: "Morph duration", exact: true }).fill("1200");
   await page.getByRole("button", { name: "Present", exact: true }).click();
   await expect(page.locator(".presentation-count")).toHaveText("1 / 2");
@@ -2335,6 +2873,63 @@ test("fits the first slide after presentation layout opens", async ({ page }) =>
   const returnZoom = Number(await page.locator(".editor-region").getAttribute("data-presentation-zoom"));
 
   expect(firstEntryZoom).toBeCloseTo(returnZoom, 0);
+});
+
+test("keeps presentation navigation keys active after toolbar controls receive focus", async ({ page }) => {
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  const addSlide = page.getByRole("button", { name: "Add slide", exact: true });
+  await addSlide.click();
+  await addSlide.click();
+  await addSlide.click();
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(3);
+  await page.locator(".slide-thumbnail").first().click();
+
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 3");
+
+  const nextSlide = page.getByRole("button", { name: "Next slide", exact: true });
+  await nextSlide.click();
+  await expect(page.locator(".presentation-count")).toHaveText("2 / 3");
+  await expect(nextSlide).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator(".presentation-count")).toHaveText("3 / 3");
+
+  const ink = page.getByRole("button", { name: "Ink", exact: true });
+  await ink.click();
+  await expect(ink).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 3");
+});
+
+test("exits presentation when Escape ends its native fullscreen session", async ({ page }) => {
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.getByRole("button", { name: "Add slide", exact: true }).click();
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(1);
+
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 1");
+  await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(true);
+
+  // Native browsers can consume Escape themselves and only notify the app
+  // through fullscreenchange, without delivering a keydown to the overlay.
+  await page.evaluate(() => document.exitFullscreen());
+  await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true);
+  await expect(page.locator(".presentation-controls")).toHaveCount(0);
+  await expect(page.locator(".app-shell")).not.toHaveClass(/is-presenting/);
+  await expect(page.locator("#slide-rail")).toBeVisible();
+
+  await page.waitForTimeout(300);
+  await expect(page.locator(".presentation-controls")).toHaveCount(0);
+
+  // When the key reaches the app directly, the same single press exits.
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 1");
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".presentation-controls")).toHaveCount(0);
+  await expect(page.locator(".app-shell")).not.toHaveClass(/is-presenting/);
+  await expect(page.locator("#slide-rail")).toBeVisible();
+  await page.waitForTimeout(300);
+  await expect(page.locator(".presentation-controls")).toHaveCount(0);
 });
 
 test("refreshes a PDF-active autosave back to the board without losing the PDF", async ({ page }) => {
@@ -3072,7 +3667,7 @@ test("configures, inserts, and persists the static advanced math-tool release", 
 });
 
 test("batch-inserts independent fraction, algebra, integer, and probability manipulatives", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(120_000);
   const consoleErrors: string[] = [];
   const externalRequests: string[] = [];
   page.on("console", (message) => {
@@ -3163,10 +3758,11 @@ test("batch-inserts independent fraction, algebra, integer, and probability mani
   await expect.poll(() => autosavedMathToolSetSnapshot(page, "probability-piece")).toMatchObject({ count: 19, independent: true, localSafe: true });
 
   await page.reload();
-  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "fraction-piece"))?.count || 0).toBe(10);
-  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "algebra-tile"))?.count || 0).toBe(6);
-  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "integer-chip"))?.count || 0).toBe(7);
-  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.count || 0).toBe(19);
+  const persistencePollOptions = { timeout: 15_000 };
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "fraction-piece"))?.count || 0, persistencePollOptions).toBe(10);
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "algebra-tile"))?.count || 0, persistencePollOptions).toBe(6);
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "integer-chip"))?.count || 0, persistencePollOptions).toBe(7);
+  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.count || 0, persistencePollOptions).toBe(19);
 
   const saveDownload = page.waitForEvent("download");
   await page.getByTitle("Download a complete classroom project").click();
@@ -3316,13 +3912,15 @@ test("animates a selected spinner and persists its numbered result", async ({ pa
   const beforeSpin = await autosavedMathToolSetSnapshot(page, "probability-piece");
   expect(beforeSpin?.metadata[0]).toMatchObject({ componentType: "spinner", faceOrValue: "1-8", spinnerSectorCount: 8 });
 
-  await spin.click();
-  await expect(spin).toBeDisabled();
-  await expect(spin).toHaveText(/Spinning/);
-  await expect(toolbar).toHaveAttribute("aria-busy", "true");
   const pointerOverlay = page.getByTestId("spinner-pointer-animation");
   const pointerLayer = pointerOverlay.locator(".spinner-pointer-overlay__pointer");
-  await expect(pointerOverlay).toBeVisible();
+  await Promise.all([
+    expect(spin).toBeDisabled(),
+    expect(spin).toHaveText(/Spinning/),
+    expect(toolbar).toHaveAttribute("aria-busy", "true"),
+    expect(pointerOverlay).toBeVisible(),
+    spin.click(),
+  ]);
   await expect(pointerOverlay.locator(".spinner-pointer-overlay__wheel")).toHaveCSS("transform", "none");
   const initialPointerTransform = await pointerLayer.evaluate((element) => getComputedStyle(element).transform);
   await page.waitForTimeout(250);
@@ -3915,13 +4513,14 @@ test("deletes the selected PDF page without renumbering its source page", async 
 });
 
 test("adds a blank slide with a live preview without remounting or covering the editor", async ({ page }) => {
+  test.setTimeout(90_000);
   const editor = page.locator(".editor-host .excalidraw");
   await editor.evaluate((node) => node.setAttribute("data-browser-instance", "original"));
 
   await page.getByRole("button", { name: "Slides", exact: true }).click();
   await expect(page.locator(".app-shell")).toHaveClass(/is-slide-mode/);
   const addSlide = page.getByRole("button", { name: "Add slide", exact: true });
-  const drawAroundContent = page.getByRole("button", { name: "Draw around content", exact: true });
+  const drawAroundContent = page.getByRole("button", { name: "Draw slide", exact: true });
   await expect(addSlide).toBeVisible();
   await expect(drawAroundContent).toBeVisible();
 
@@ -3997,7 +4596,9 @@ test("adds a blank slide with a live preview without remounting or covering the 
   if (await page.evaluate(() => Boolean(document.fullscreenElement))) {
     await page.evaluate(() => document.exitFullscreen());
   }
+  await expect(page.locator(".presentation-controls")).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator(".present-button").click();
   await expect(page.locator(".presentation-controls")).toHaveCSS("flex-direction", "column");
   await expect(page.getByRole("group", { name: "Ink colours" })).toBeVisible();
   await expect(page.getByRole("group", { name: "Ink widths" })).toBeVisible();

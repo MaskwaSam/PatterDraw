@@ -1,3 +1,4 @@
+import { getCommonBounds } from "@excalidraw/element";
 import type {
   ExcalidrawElement,
   ExcalidrawFrameElement,
@@ -5,6 +6,7 @@ import type {
 } from "@excalidraw/excalidraw/element/types";
 import type { BinaryFileData, BinaryFiles } from "@excalidraw/excalidraw/types";
 import type { SerializedScene } from "../types";
+import { isSlideFrame } from "./slides";
 
 export interface SlideRenderData {
   frame: ExcalidrawFrameElement;
@@ -29,20 +31,45 @@ function isSafeSlideElement(
     element.type !== "magicframe";
 }
 
+function rotatedBoxBounds(
+  element: Pick<ExcalidrawElement, "angle" | "height" | "width" | "x" | "y">,
+): readonly [number, number, number, number] {
+  const left = Math.min(element.x, element.x + element.width);
+  const top = Math.min(element.y, element.y + element.height);
+  const right = Math.max(element.x, element.x + element.width);
+  const bottom = Math.max(element.y, element.y + element.height);
+  const angle = Number.isFinite(element.angle) ? element.angle : 0;
+  if (!angle) return [left, top, right, bottom];
+  const halfWidth = (right - left) / 2;
+  const halfHeight = (bottom - top) / 2;
+  const centerX = left + halfWidth;
+  const centerY = top + halfHeight;
+  const extentX = Math.abs(Math.cos(angle)) * halfWidth + Math.abs(Math.sin(angle)) * halfHeight;
+  const extentY = Math.abs(Math.sin(angle)) * halfWidth + Math.abs(Math.cos(angle)) * halfHeight;
+  return [centerX - extentX, centerY - extentY, centerX + extentX, centerY + extentY];
+}
+
+function spatialBounds(element: ExcalidrawElement): readonly [number, number, number, number] {
+  try {
+    const bounds = getCommonBounds(
+      [element] as unknown as Parameters<typeof getCommonBounds>[0],
+    );
+    if (bounds.every(Number.isFinite)) return bounds;
+  } catch {
+    // Older classroom files may contain incomplete linear-element metadata.
+    // Their stored box is still safe to use and remains rotation-aware.
+  }
+  return rotatedBoxBounds(element);
+}
+
 function overlapsFrame(
   element: ExcalidrawElement,
   frame: ExcalidrawFrameElement,
 ): boolean {
   if (![element.x, element.y, element.width, element.height, frame.x, frame.y, frame.width, frame.height]
     .every(Number.isFinite)) return false;
-  const elementLeft = Math.min(element.x, element.x + element.width);
-  const elementTop = Math.min(element.y, element.y + element.height);
-  const elementRight = Math.max(element.x, element.x + element.width);
-  const elementBottom = Math.max(element.y, element.y + element.height);
-  const frameLeft = Math.min(frame.x, frame.x + frame.width);
-  const frameTop = Math.min(frame.y, frame.y + frame.height);
-  const frameRight = Math.max(frame.x, frame.x + frame.width);
-  const frameBottom = Math.max(frame.y, frame.y + frame.height);
+  const [elementLeft, elementTop, elementRight, elementBottom] = spatialBounds(element);
+  const [frameLeft, frameTop, frameRight, frameBottom] = spatialBounds(frame);
   return elementRight >= frameLeft &&
     elementLeft <= frameRight &&
     elementBottom >= frameTop &&
@@ -61,10 +88,20 @@ export function getSlideRenderData(
   const elements = sceneElements(scene);
   const frame = elements.find(
     (element): element is ExcalidrawFrameElement =>
-      !element.isDeleted && element.type === "frame" && element.id === frameId,
+      element.id === frameId && isSlideFrame(element),
   );
   if (!frame) return null;
 
+  const ordinaryFrameIds = new Set(
+    elements
+      .filter((element): element is ExcalidrawFrameElement => (
+        isSafeSlideElement(element)
+        && element.type === "frame"
+        && !isSlideFrame(element)
+        && overlapsFrame(element, frame)
+      ))
+      .map((element) => element.id),
+  );
   const slideElements: NonDeletedExcalidrawElement[] = [];
   for (const element of elements) {
     if (!isSafeSlideElement(element)) continue;
@@ -72,17 +109,16 @@ export function getSlideRenderData(
       slideElements.push(element);
       continue;
     }
-    if (element.type === "frame") continue;
-    if (element.frameId === frame.id) {
-      slideElements.push(element);
-      continue;
-    }
-    if (overlapsFrame(element, frame)) {
-      // Excalidraw's exporter honors frameId even when a different frame is not
-      // part of this render. Normalize only the detached render copy so content
-      // visibly enclosed by this slide cannot be discarded as another frame's child.
-      slideElements.push({ ...element, frameId: frame.id } as NonDeletedExcalidrawElement);
-    }
+    if (element.type === "frame" && isSlideFrame(element)) continue;
+    if (!overlapsFrame(element, frame)) continue;
+    // Excalidraw's exporter honors frameId. Attach independent overlapping
+    // elements and ordinary frame outlines to this render-only slide copy, but
+    // preserve real native-frame ownership when its frame is also rendered.
+    const preserveOrdinaryFrameOwnership = !!element.frameId
+      && ordinaryFrameIds.has(element.frameId);
+    slideElements.push(preserveOrdinaryFrameOwnership
+      ? element
+      : { ...element, frameId: frame.id } as NonDeletedExcalidrawElement);
   }
   const availableFiles = sceneFiles(scene);
   const files: BinaryFiles = {};

@@ -11,18 +11,29 @@ import type {
 } from "@excalidraw/excalidraw/element/types";
 import type { SlideFrameAspectRatio } from "../types";
 import { createLocalId } from "./id";
+import { isSlideFrame, slideFrameCustomData } from "./slides";
 
 type SlideFrameApi = Pick<
   ExcalidrawImperativeAPI,
   "setActiveTool" | "setToast" | "updateFrameRendering"
 >;
 
-export const SLIDE_FRAME_HINT = "Frame tool ready — drag on the board to set the slide bounds.";
+export const SLIDE_FRAME_HINT = "Drag on the board to create one slide frame.";
 export const BLANK_SLIDE_WIDTH = 960;
 export const BLANK_SLIDE_HEIGHT = 540;
 export const BLANK_SLIDE_GAP = 160;
 export const WIDESCREEN_SLIDE_ASPECT_RATIO = 16 / 9;
 export const STANDARD_SLIDE_ASPECT_RATIO = 4 / 3;
+
+export interface SlideFramePoint {
+  x: number;
+  y: number;
+}
+
+export interface SlideFrameBounds extends SlideFramePoint {
+  width: number;
+  height: number;
+}
 
 export function slideFrameAspectRatioValue(mode: SlideFrameAspectRatio): number | null {
   if (mode === "16:9") return WIDESCREEN_SLIDE_ASPECT_RATIO;
@@ -35,11 +46,11 @@ export function activateSlideFrameTool(
   aspectMode: SlideFrameAspectRatio = "freeform",
 ): void {
   api.updateFrameRendering({ outline: true, name: true, clip: false });
-  api.setActiveTool({ type: "frame" });
+  api.setActiveTool({ type: "selection" });
   api.setToast({
     message: aspectMode === "freeform"
       ? SLIDE_FRAME_HINT
-      : `${aspectMode} frame tool ready — drag around the content to set the slide bounds.`,
+      : `${aspectMode} slide ready — drag once on the board to create its bounds.`,
   });
 }
 
@@ -70,6 +81,103 @@ export function frameBoundsAtAspectRatio(
   };
 }
 
+/**
+ * Expands a pointer drag from its fixed origin to the requested aspect ratio.
+ * The resulting rectangle always contains the raw drag in every direction.
+ */
+export function frameBoundsFromDrag(
+  origin: SlideFramePoint,
+  pointer: SlideFramePoint,
+  aspectRatio: number,
+): SlideFrameBounds {
+  if (!Number.isFinite(aspectRatio) || aspectRatio <= 0) {
+    throw new Error("Slide frame aspect ratio must be a positive finite number.");
+  }
+
+  const deltaX = pointer.x - origin.x;
+  const deltaY = pointer.y - origin.y;
+  const rawWidth = Math.abs(deltaX);
+  const rawHeight = Math.abs(deltaY);
+  if (rawWidth === 0 && rawHeight === 0) {
+    return { x: origin.x, y: origin.y, width: 0, height: 0 };
+  }
+
+  const width = rawHeight === 0 || rawWidth / rawHeight >= aspectRatio
+    ? rawWidth
+    : rawHeight * aspectRatio;
+  const height = rawWidth === 0 || rawWidth / Math.max(rawHeight, Number.EPSILON) <= aspectRatio
+    ? rawHeight
+    : rawWidth / aspectRatio;
+  return {
+    x: deltaX < 0 ? origin.x - width : origin.x,
+    y: deltaY < 0 ? origin.y - height : origin.y,
+    width,
+    height,
+  };
+}
+
+export function freeformFrameBoundsFromDrag(
+  origin: SlideFramePoint,
+  pointer: SlideFramePoint,
+): SlideFrameBounds {
+  return {
+    x: Math.min(origin.x, pointer.x),
+    y: Math.min(origin.y, pointer.y),
+    width: Math.abs(pointer.x - origin.x),
+    height: Math.abs(pointer.y - origin.y),
+  };
+}
+
+/** Applies exact bounds to only the frame created by the current drag. */
+export function setNewSlideFrameBounds(
+  elements: readonly ExcalidrawElement[],
+  existingFrameIds: ReadonlySet<string>,
+  bounds: SlideFrameBounds,
+): readonly ExcalidrawElement[] {
+  let changed = false;
+  const nextElements = elements.map((element) => {
+    if (element.type !== "frame" || element.isDeleted || existingFrameIds.has(element.id)) return element;
+    if (
+      Math.abs(element.x - bounds.x) < 0.000_001
+      && Math.abs(element.y - bounds.y) < 0.000_001
+      && Math.abs(element.width - bounds.width) < 0.000_001
+      && Math.abs(element.height - bounds.height) < 0.000_001
+    ) return element;
+    changed = true;
+    return newElementWith(element, bounds);
+  });
+  return changed ? nextElements : elements;
+}
+
+/** Adds one tagged, detached slide boundary as a native frame-shaped element. */
+export function addSlideFrameAtBounds(
+  api: ExcalidrawImperativeAPI,
+  bounds: SlideFrameBounds,
+  name: string,
+  frameId = createLocalId(),
+): ExcalidrawFrameElement {
+  const elements = api.getSceneElements();
+  const [frame] = convertToExcalidrawElements([{
+    id: frameId,
+    type: "frame",
+    children: [],
+    customData: slideFrameCustomData(undefined),
+    groupIds: [],
+    locked: false,
+    name,
+    ...bounds,
+  }], { regenerateIds: false }) as [ExcalidrawFrameElement];
+
+  api.updateFrameRendering({ enabled: true, outline: true, name: true, clip: false });
+  api.setActiveTool({ type: "selection" });
+  api.updateScene({
+    elements: [...elements, frame],
+    appState: { selectedElementIds: { [frame.id]: true } },
+    captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+  });
+  return frame;
+}
+
 /** Expands only newly drawn frames to an aspect ratio while preserving the dragged area. */
 export function constrainNewSlideFramesToAspectRatio(
   elements: readonly ExcalidrawElement[],
@@ -96,9 +204,7 @@ export function blankSlidePosition(
   elements: readonly ExcalidrawElement[],
   api: Pick<ExcalidrawImperativeAPI, "getAppState">,
 ): { x: number; y: number } {
-  const frames = elements.filter(
-    (element): element is ExcalidrawFrameElement => element.type === "frame" && !element.isDeleted,
-  );
+  const frames = elements.filter(isSlideFrame);
   if (frames.length) {
     const rightmost = frames.reduce((current, candidate) => {
       const currentRight = Math.max(current.x, current.x + current.width);
@@ -125,7 +231,7 @@ export function blankSlidePosition(
   };
 }
 
-/** Adds a native, empty Excalidraw frame without replacing or remounting the editor. */
+/** Adds a tagged, detached slide frame without replacing or remounting the editor. */
 export function addBlankSlideFrame(
   api: ExcalidrawImperativeAPI,
   name: string,
@@ -138,6 +244,9 @@ export function addBlankSlideFrame(
       id: frameId,
       type: "frame",
       children: [],
+      customData: slideFrameCustomData(undefined),
+      groupIds: [],
+      locked: false,
       name,
       x: position.x,
       y: position.y,

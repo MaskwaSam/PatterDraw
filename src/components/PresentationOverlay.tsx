@@ -36,11 +36,19 @@ export function PresentationOverlay({
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
         onExit();
         return;
       }
-      const target = event.target;
-      if (target instanceof Element && target.closest("button, input, select, textarea, a[href], [contenteditable='true']")) {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("input, select, textarea, [contenteditable='true']")) {
+        return;
+      }
+      if (
+        (event.key === " " || event.key === "Enter")
+        && target?.closest("button, a[href]")
+      ) {
         return;
       }
       if (["ArrowRight", "ArrowDown", "PageDown", " "].includes(event.key)) {
@@ -49,8 +57,13 @@ export function PresentationOverlay({
       } else if (["ArrowLeft", "ArrowUp", "PageUp"].includes(event.key)) {
         event.preventDefault();
         onIndexChange(Math.max(0, index - 1));
-      } else if (event.key === "Home") onIndexChange(0);
-      else if (event.key === "End") onIndexChange(slides.length - 1);
+      } else if (event.key === "Home") {
+        event.preventDefault();
+        onIndexChange(0);
+      } else if (event.key === "End") {
+        event.preventDefault();
+        onIndexChange(slides.length - 1);
+      }
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);

@@ -16,7 +16,7 @@ This repository is intentionally independent from PolyPad. Nothing here patches 
 - One-click **Export all** downloads every object on the current board as a shareable PNG, including off-screen and off-page content. Editable Excalidraw scene data is embedded when the receiving image workflow preserves PNG metadata.
 - A device-wide, locally persisted Excalidraw library supports adding and reusing canvas objects plus importing and exporting standard `.excalidrawlib` files without enabling public-library browsing or publishing.
 - A separate device-wide **Screenshot Library** captures exact canvas regions, copies PNGs when browser clipboard access permits, and keeps the newest 50 captures available for click or drag insertion without adding them to project files.
-- Frame discovery, explicit slide ordering, optional 16:9 or 4:3 frame drawing for modern screens and older smartboards, fullscreen presentation, keyboard navigation, transient laser, and persistent live ink.
+- Tagged, detached slide windows with explicit ordering, one-shot freeform/16:9/4:3 drawing, native grouping, optional Morph transitions, fullscreen presentation, keyboard navigation, transient laser, and persistent live ink. Ordinary Excalidraw frames remain available for content ownership.
 - One-workspace-per-page PDF import using a bundled PDF.js worker.
 - Toggleable **PDF** mode with real local page thumbnails, drag reordering, accessible move-up/down controls, mixed-document ordering, and Previous/Next navigation that follows the chosen output order.
 - Two annotated-PDF exports:

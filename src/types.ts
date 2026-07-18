@@ -39,6 +39,8 @@ export interface ClassroomSlide {
   sceneId: SceneId;
   frameId: string;
   title: string;
+  /** Explicit title ownership. Optional only for legacy v1 project files. */
+  titleMode?: "automatic" | "custom";
 }
 
 export type SlideFrameAspectRatio = "freeform" | "16:9" | "4:3";

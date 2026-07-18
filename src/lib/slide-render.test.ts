@@ -47,20 +47,20 @@ function scene(elements: readonly Record<string, unknown>[]): SerializedScene {
 describe("slide render data", () => {
   it("keeps source order and includes safe direct or geometrically overlapping content", () => {
     const input = scene([
-      element("first-child", "rectangle", { frameId: "frame" }),
+      element("first-child", "rectangle", { x: 10, y: 10, width: 20, height: 20, frameId: "frame" }),
       element("other", "ellipse"),
       element("overlapping", "diamond", { x: 100, y: 100, width: 80, height: 80, frameId: "other-frame" }),
       element("partial", "line", { x: -20, y: 200, width: 40, height: 20 }),
       element("outside", "rectangle", { x: 1_400, y: 100, width: 50, height: 50 }),
       element("other-frame", "frame", { x: 100, y: 100, width: 100, height: 100 }),
-      element("frame", "frame", { x: 0, y: 0, width: 1_280, height: 720 }),
-      element("image", "image", { frameId: "frame", fileId: "used-file" }),
+      element("frame", "frame", { x: 0, y: 0, width: 1_280, height: 720, customData: { classroomSlide: { kind: "slide", version: 1 } } }),
+      element("image", "image", { x: 40, y: 40, width: 50, height: 50, frameId: "frame", fileId: "used-file" }),
       element("nested-elsewhere", "text", { frameId: "other-frame" }),
       element("deleted", "text", { frameId: "frame", isDeleted: true }),
       element("embed", "embeddable", { frameId: "frame" }),
       element("iframe", "iframe", { frameId: "frame" }),
       element("generated", "magicframe", { frameId: "frame" }),
-      element("last-child", "text", { frameId: "frame" }),
+      element("last-child", "text", { x: 300, y: 300, width: 40, height: 20, frameId: "frame" }),
     ]);
 
     const result = getSlideRenderData(input, "frame");
@@ -70,20 +70,45 @@ describe("slide render data", () => {
       "first-child",
       "overlapping",
       "partial",
+      "other-frame",
       "frame",
       "image",
       "last-child",
     ]);
     expect(Object.keys(result?.files || {})).toEqual(["used-file"]);
-    expect(result?.elements.find((candidate) => candidate.id === "overlapping")?.frameId).toBe("frame");
+    expect(result?.elements.find((candidate) => candidate.id === "overlapping")?.frameId).toBe("other-frame");
+    expect(result?.elements.find((candidate) => candidate.id === "other-frame")?.frameId).toBe("frame");
     expect(input.elements.find((candidate) => candidate.id === "overlapping")?.frameId).toBe("other-frame");
   });
 
   it("returns null for missing or deleted frames", () => {
     expect(getSlideRenderData(scene([]), "missing")).toBeNull();
     expect(getSlideRenderData(
-      scene([element("frame", "frame", { isDeleted: true })]),
+      scene([element("frame", "frame", { isDeleted: true, customData: { classroomSlide: { kind: "slide", version: 1 } } })]),
       "frame",
     )).toBeNull();
+  });
+
+  it("uses rotated Excalidraw bounds for spatial overlap", () => {
+    const input = scene([
+      element("rotated", "rectangle", {
+        x: 0,
+        y: 100,
+        width: 100,
+        height: 10,
+        angle: Math.PI / 4,
+      }),
+      element("frame", "frame", {
+        x: 0,
+        y: 70,
+        width: 100,
+        height: 20,
+        angle: 0,
+        customData: { classroomSlide: { kind: "slide", version: 1 } },
+      }),
+    ]);
+
+    expect(getSlideRenderData(input, "frame")?.elements.map((candidate) => candidate.id))
+      .toEqual(["rotated", "frame"]);
   });
 });

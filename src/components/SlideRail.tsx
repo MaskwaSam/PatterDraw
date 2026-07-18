@@ -1,4 +1,3 @@
-import { useState } from "react";
 import type { ClassroomProject, ClassroomSlide, SlideFrameAspectRatio } from "../types";
 import {
   MAX_SLIDE_MORPH_DURATION_MS,
@@ -12,7 +11,8 @@ interface SlideRailProps {
   project: ClassroomProject;
   activeSlideId: string | null;
   onAddSlide: () => void;
-  onDrawFrame: () => void;
+  frameDrawingActive: boolean;
+  onToggleFrameDrawing: () => void;
   onOpenSlide: (slide: ClassroomSlide) => void;
   onMoveSlide: (slideId: string, targetId: string) => void;
   onDeleteSlide: (slide: ClassroomSlide) => void;
@@ -30,7 +30,8 @@ export function SlideRail({
   project,
   activeSlideId,
   onAddSlide,
-  onDrawFrame,
+  frameDrawingActive,
+  onToggleFrameDrawing,
   onOpenSlide,
   onMoveSlide,
   onDeleteSlide,
@@ -43,11 +44,9 @@ export function SlideRail({
   onToggleMorph,
   onMorphDurationChange,
 }: SlideRailProps) {
-  const [frameAspectOptionsOpen, setFrameAspectOptionsOpen] = useState(false);
   const morphDurationSeconds = `${Number((morphDurationMs / 1_000).toFixed(2))} s`;
   const chooseFrameAspectRatio = (aspectRatio: Exclude<SlideFrameAspectRatio, "freeform">) => {
     onFrameAspectRatioChange(frameAspectRatio === aspectRatio ? "freeform" : aspectRatio);
-    onDrawFrame();
   };
   return (
     <aside id="slide-rail" className="slide-rail" aria-label="Slides">
@@ -68,24 +67,22 @@ export function SlideRail({
           <PlusIcon /> Add slide
         </button>
         <button
-          className="draw-frame-button"
+          className={`draw-frame-button ${frameDrawingActive ? "is-active" : ""}`}
           type="button"
-          aria-expanded={frameAspectOptionsOpen}
+          aria-pressed={frameDrawingActive}
+          aria-expanded={frameDrawingActive}
           aria-controls="slide-frame-aspect-options"
-          onClick={() => {
-            setFrameAspectOptionsOpen((open) => !open);
-            onDrawFrame();
-          }}
+          onClick={onToggleFrameDrawing}
         >
-          <FrameIcon /> Draw around content
+          <FrameIcon /> Draw slide
         </button>
-        {frameAspectOptionsOpen ? (
+        {frameDrawingActive ? (
           <div id="slide-frame-aspect-options" className="slide-frame-aspect-options">
             <div className="slide-frame-aspect-heading">
-              <strong>Frame shape</strong>
+              <strong>Slide shape</strong>
               <span>{frameAspectRatio === "freeform" ? "Freeform" : frameAspectRatio}</span>
             </div>
-            <div className="slide-frame-aspect-buttons" role="group" aria-label="Frame shape">
+            <div className="slide-frame-aspect-buttons" role="group" aria-label="Slide shape">
               <button
                 className={frameAspectRatio === "16:9" ? "is-active" : ""}
                 type="button"
@@ -187,7 +184,7 @@ export function SlideRail({
           <div className="rail-empty">
             <FrameIcon className="rail-empty-icon" />
             <strong>No slides yet</strong>
-            <p>Add a blank slide, or draw around content that is already on your board.</p>
+            <p>Add a blank slide, or draw a movable slide window anywhere on your board.</p>
           </div>
         )}
       </div>

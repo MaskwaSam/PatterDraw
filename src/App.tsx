@@ -6,6 +6,7 @@ import {
   Excalidraw,
   getCommonBounds,
   newElementWith,
+  sceneCoordsToViewportCoords,
   serializeAsJSON,
   Sidebar,
   viewportCoordsToSceneCoords,
@@ -109,9 +110,13 @@ import {
   type PdfExportMode,
 } from "./lib/pdf/export-pdf";
 import {
+  deleteSlideBoundary,
+  detachElementsFromSlideFrames,
   focusSlide,
   moveSlide,
   reconcileSlides,
+  removeSlide,
+  syncSlideFrameNames,
 } from "./lib/slides";
 import {
   DEFAULT_SLIDE_MORPH_DURATION_MS,
@@ -122,8 +127,12 @@ import { openExternalWebLink } from "./lib/offline-network";
 import {
   activateSlideFrameTool,
   addBlankSlideFrame,
-  constrainNewSlideFramesToAspectRatio,
+  addSlideFrameAtBounds,
+  frameBoundsFromDrag,
+  freeformFrameBoundsFromDrag,
   slideFrameAspectRatioValue,
+  type SlideFrameBounds,
+  type SlideFramePoint,
 } from "./lib/slide-frame-tool";
 import {
   sanitizeClassroomMathToolMetadata,
@@ -185,6 +194,11 @@ type MathInteractionState = {
 type SlideFrameAction =
   | { kind: "add"; frameId: string; title: string }
   | { kind: "draw" };
+type SlideFrameGesture = {
+  current: SlideFramePoint;
+  origin: SlideFramePoint;
+  pointerId: number;
+};
 type PendingPresentationTransition = { frameId: string; animate: boolean; durationMs: number };
 const CLASSROOM_UI_OPTIONS: ExcalidrawProps["UIOptions"] = {
   canvasActions: {
@@ -321,6 +335,7 @@ export default function App() {
   const [isPdfRailVisible, setIsPdfRailVisible] = useState(true);
   const [isPdfToolbarVisible, setIsPdfToolbarVisible] = useState(true);
   const [areSlideFramesVisible, setAreSlideFramesVisible] = useState(true);
+  const [isSlideFrameDrawingActive, setIsSlideFrameDrawingActive] = useState(false);
   const [isNavigationVisible, setIsNavigationVisible] = useState(true);
   const [isFooterVisible, setIsFooterVisible] = useState(true);
   const [equationEditor, setEquationEditor] = useState<EquationEditorState | null>(null);
@@ -348,12 +363,11 @@ export default function App() {
   const pendingCreatedFrameIdRef = useRef<string | null>(null);
   const pendingSlideFrameActionRef = useRef<SlideFrameAction | null>(null);
   const slideFramesVisibleRef = useRef(true);
+  const slideFrameDrawingActiveRef = useRef(false);
   const slideFrameAspectRatioRef = useRef<SlideFrameAspectRatio>("freeform");
-  const frameConstraintBeforeDrawRef = useRef<{
-    aspectRatio: number;
-    existingFrameIds: ReadonlySet<string>;
-  } | null>(null);
-  const constrainedFrameUpdateRef = useRef(0);
+  const slideFrameGestureRef = useRef<SlideFrameGesture | null>(null);
+  const slideDetachmentFrameRef = useRef(0);
+  const frameDragPreviewRef = useRef<HTMLDivElement>(null);
   const presentationInkStartElementIdsRef = useRef<ReadonlySet<string> | null>(null);
   const activeToolTypeRef = useRef<string | null>(null);
   const roughnessBeforeLineRef = useRef<number | null>(null);
@@ -366,6 +380,20 @@ export default function App() {
   const probabilityRandomizingRef = useRef(false);
   const lassoActiveRef = useRef(false);
   const preparedLassoSelectionRef = useRef<LassoInitialSelection | null>(null);
+
+  const hideConstrainedFramePreview = useCallback(() => {
+    if (frameDragPreviewRef.current) frameDragPreviewRef.current.hidden = true;
+  }, []);
+
+  const stopSlideFrameDrawing = useCallback(() => {
+    slideFrameGestureRef.current = null;
+    slideFrameDrawingActiveRef.current = false;
+    pendingSlideFrameActionRef.current = null;
+    hideConstrainedFramePreview();
+    setIsSlideFrameDrawingActive(false);
+    api?.setActiveTool({ type: "selection" });
+    api?.updateFrameRendering({ enabled: true, outline: true, name: true, clip: false });
+  }, [api, hideConstrainedFramePreview]);
 
   useEffect(() => {
     if (isMathToolsOpen || !focusAfterMathToolsRef.current) return;
@@ -429,16 +457,21 @@ export default function App() {
     slideFrameAspectRatioRef.current = project?.slideFrameAspectRatio ?? "freeform";
   }, [project?.slideFrameAspectRatio]);
 
-  useEffect(() => () => {
-    window.cancelAnimationFrame(constrainedFrameUpdateRef.current);
-  }, []);
-
   useEffect(() => {
     setMathInteraction(null);
     setIsScreenshotCaptureActive(false);
-    frameConstraintBeforeDrawRef.current = null;
-    window.cancelAnimationFrame(constrainedFrameUpdateRef.current);
-  }, [project?.activeSceneId, workspaceMode]);
+    if (workspaceMode !== "slides" && slideFrameDrawingActiveRef.current) {
+      stopSlideFrameDrawing();
+    }
+    slideFrameGestureRef.current = null;
+    if (frameDragPreviewRef.current) frameDragPreviewRef.current.hidden = true;
+    api?.updateFrameRendering({
+      enabled: slideFramesVisibleRef.current,
+      outline: true,
+      name: true,
+      clip: false,
+    });
+  }, [api, project?.activeSceneId, stopSlideFrameDrawing, workspaceMode]);
 
   useEffect(() => {
     const syncFullscreenState = () => {
@@ -486,17 +519,6 @@ export default function App() {
     } : current);
     if (action.kind === "draw") {
       const aspectMode = slideFrameAspectRatioRef.current;
-      const aspectRatio = slideFrameAspectRatioValue(aspectMode);
-      frameConstraintBeforeDrawRef.current = aspectRatio
-        ? {
-          aspectRatio,
-          existingFrameIds: new Set(
-            api.getSceneElements()
-              .filter((element) => element.type === "frame" && !element.isDeleted)
-              .map((element) => element.id),
-          ),
-        }
-        : null;
       activateSlideFrameTool(api, aspectMode);
       return;
     }
@@ -631,10 +653,12 @@ export default function App() {
     }
     const sceneId = activeSceneIdRef.current;
     if (!sceneId) return;
+    const detachedElements = detachElementsFromSlideFrames(elements);
     setProject((current) => {
       if (!current || !current.scenes[sceneId]) return current;
-      const scene = serializedSceneFromChange(current.scenes[sceneId], elements, appState, files);
-      const slideOrder = reconcileSlides(sceneId, elements, current.slideOrder);
+      const slideOrder = reconcileSlides(sceneId, detachedElements, current.slideOrder);
+      const namedElements = syncSlideFrameNames(detachedElements, slideOrder);
+      const scene = serializedSceneFromChange(current.scenes[sceneId], namedElements, appState, files);
       return {
         ...current,
         updatedAt: nowIso(),
@@ -642,6 +666,26 @@ export default function App() {
         slideOrder,
       };
     });
+    const elementGestureInProgress = !!(
+      appState.newElement
+      || appState.resizingElement
+      || appState.isResizing
+      || appState.isRotating
+      || appState.multiElement
+    );
+    if (api && detachedElements !== elements && !elementGestureInProgress) {
+      window.cancelAnimationFrame(slideDetachmentFrameRef.current);
+      slideDetachmentFrameRef.current = window.requestAnimationFrame(() => {
+        if (switchingSceneRef.current || activeSceneIdRef.current !== sceneId) return;
+        const liveElements = api.getSceneElements();
+        const liveDetachedElements = detachElementsFromSlideFrames(liveElements);
+        if (liveDetachedElements === liveElements) return;
+        api.updateScene({
+          elements: liveDetachedElements,
+          captureUpdate: CaptureUpdateAction.NEVER,
+        });
+      });
+    }
   }, [api]);
 
   const toggleLibrary = useCallback(() => {
@@ -1482,6 +1526,21 @@ export default function App() {
     if (document.fullscreenElement) void document.exitFullscreen();
   }, [api]);
 
+  useEffect(() => {
+    if (!presentation) return;
+    let presentationEnteredFullscreen = document.fullscreenElement === shellRef.current;
+    const stopWhenPresentationFullscreenEnds = () => {
+      if (document.fullscreenElement === shellRef.current) {
+        presentationEnteredFullscreen = true;
+      } else if (presentationEnteredFullscreen) {
+        presentationEnteredFullscreen = false;
+        stopPresentation();
+      }
+    };
+    document.addEventListener("fullscreenchange", stopWhenPresentationFullscreenEnds);
+    return () => document.removeEventListener("fullscreenchange", stopWhenPresentationFullscreenEnds);
+  }, [presentation, stopPresentation]);
+
   const toggleFullscreen = useCallback(async () => {
     try {
       if (document.fullscreenElement) {
@@ -1857,9 +1916,22 @@ export default function App() {
     });
   }, [beginSlideFrameAction, project]);
 
-  const drawSlideFrame = useCallback(() => {
+  const toggleSlideFrameDrawing = useCallback(() => {
+    if (!api || !project) return;
+    if (slideFrameDrawingActiveRef.current) {
+      slideFrameDrawingActiveRef.current = false;
+      setIsSlideFrameDrawingActive(false);
+      pendingSlideFrameActionRef.current = null;
+      slideFrameGestureRef.current = null;
+      if (frameDragPreviewRef.current) frameDragPreviewRef.current.hidden = true;
+      api.setActiveTool({ type: "selection" });
+      api.updateFrameRendering({ enabled: true, outline: true, name: true, clip: false });
+      return;
+    }
+    slideFrameDrawingActiveRef.current = true;
+    setIsSlideFrameDrawingActive(true);
     beginSlideFrameAction({ kind: "draw" });
-  }, [beginSlideFrameAction]);
+  }, [api, beginSlideFrameAction, project]);
 
   const toggleSlideFrames = useCallback(() => {
     if (!api) return;
@@ -1892,7 +1964,8 @@ export default function App() {
       slideFrameAspectRatio: aspectRatio,
       slideWidescreenFrames: undefined,
     } : current);
-  }, []);
+    if (slideFrameDrawingActiveRef.current && api) activateSlideFrameTool(api, aspectRatio);
+  }, [api]);
 
   const toggleSlideMorph = useCallback(() => {
     setProject((current) => current ? {
@@ -1915,17 +1988,16 @@ export default function App() {
     if (!window.confirm(`Delete ${slide.title}? The frame will be removed, but its board content will stay.`)) return;
 
     const slideIndex = project.slideOrder.findIndex((candidate) => candidate.id === slide.id);
-    const remainingSlides = project.slideOrder.filter((candidate) => candidate.id !== slide.id);
+    const remainingSlides = removeSlide(project.slideOrder, slide.id);
     const nextSlide = remainingSlides[Math.min(slideIndex, remainingSlides.length - 1)] || null;
     const isActiveScene = slide.sceneId === activeSceneIdRef.current;
 
     if (isActiveScene) {
       switchingSceneRef.current = true;
-      const nextElements = api.getSceneElements()
-        .filter((element) => element.id !== slide.frameId)
-        .map((element) => element.frameId === slide.frameId
-          ? newElementWith(element, { frameId: null })
-          : element);
+      const nextElements = syncSlideFrameNames(
+        deleteSlideBoundary(api.getSceneElements(), slide.frameId),
+        remainingSlides,
+      );
       api.updateScene({
         elements: nextElements,
         appState: {
@@ -1939,17 +2011,19 @@ export default function App() {
 
     setProject((current) => {
       if (!current?.scenes[slide.sceneId]) return current;
-      const scene = current.scenes[slide.sceneId];
-      const elements = scene.elements
-        .filter((element) => element.id !== slide.frameId)
-        .map((element) => element.frameId === slide.frameId
-          ? { ...element, frameId: null }
-          : element);
+      const scenes = Object.fromEntries(Object.entries(current.scenes).map(([sceneId, scene]) => {
+        const source = scene.elements as unknown as readonly ExcalidrawElement[];
+        const withoutBoundary = sceneId === slide.sceneId
+          ? deleteSlideBoundary(source, slide.frameId)
+          : source;
+        const elements = syncSlideFrameNames(withoutBoundary, remainingSlides);
+        return [sceneId, { ...scene, elements: elements as unknown as readonly Record<string, unknown>[] }];
+      }));
       return {
         ...current,
         updatedAt: nowIso(),
-        scenes: { ...current.scenes, [slide.sceneId]: { ...scene, elements } },
-        slideOrder: current.slideOrder.filter((candidate) => candidate.id !== slide.id),
+        scenes,
+        slideOrder: remainingSlides,
       };
     });
     setActiveSlideId(nextSlide?.id || null);
@@ -1959,6 +2033,30 @@ export default function App() {
       if (nextSlide) openSlide(nextSlide);
     });
   }, [api, openSlide, project]);
+
+  const reorderSlides = useCallback((slideId: string, targetId: string) => {
+    if (!project) return;
+    const slideOrder = moveSlide(project.slideOrder, slideId, targetId);
+    const activeSceneId = activeSceneIdRef.current;
+    if (api && activeSceneId) {
+      const currentElements = api.getSceneElements();
+      const namedElements = syncSlideFrameNames(currentElements, slideOrder);
+      if (namedElements !== currentElements) {
+        api.updateScene({ elements: namedElements, captureUpdate: CaptureUpdateAction.NEVER });
+      }
+    }
+    setProject((current) => {
+      if (!current) return current;
+      const scenes = Object.fromEntries(Object.entries(current.scenes).map(([sceneId, scene]) => {
+        const elements = syncSlideFrameNames(
+          scene.elements as unknown as readonly ExcalidrawElement[],
+          slideOrder,
+        );
+        return [sceneId, { ...scene, elements: elements as unknown as readonly Record<string, unknown>[] }];
+      }));
+      return { ...current, updatedAt: nowIso(), scenes, slideOrder };
+    });
+  }, [api, project]);
 
   const reorderPdfPage = useCallback((movingId: string, targetId: string, edge: PdfPageDropEdge) => {
     setProject((current) => current ? {
@@ -2078,47 +2176,106 @@ export default function App() {
     }
   }, [api]);
 
-  const prepareConstrainedFrameDraw = useCallback<NonNullable<ExcalidrawProps["onPointerDown"]>>((activeTool) => {
-    const aspectRatio = slideFrameAspectRatioValue(slideFrameAspectRatioRef.current);
-    if (!api || activeTool.type !== "frame" || !aspectRatio) {
-      frameConstraintBeforeDrawRef.current = null;
-      return;
-    }
-    if (frameConstraintBeforeDrawRef.current) return;
-    frameConstraintBeforeDrawRef.current = {
-      aspectRatio,
-      existingFrameIds: new Set(
-        api.getSceneElements()
-          .filter((element) => (
-            element.type === "frame"
-            && !element.isDeleted
-            && Math.abs(element.width) > 0
-            && Math.abs(element.height) > 0
-          ))
-          .map((element) => element.id),
-      ),
-    };
+  const renderConstrainedFramePreview = useCallback((bounds: SlideFrameBounds) => {
+    const preview = frameDragPreviewRef.current;
+    const host = editorHostRef.current;
+    if (!api || !preview || !host) return;
+    const appState = api.getAppState();
+    const hostBounds = host.getBoundingClientRect();
+    const topLeft = sceneCoordsToViewportCoords(
+      { sceneX: bounds.x, sceneY: bounds.y },
+      appState,
+    );
+    const bottomRight = sceneCoordsToViewportCoords(
+      { sceneX: bounds.x + bounds.width, sceneY: bounds.y + bounds.height },
+      appState,
+    );
+    preview.hidden = false;
+    preview.dataset.aspectRatio = slideFrameAspectRatioRef.current;
+    preview.style.transform = `translate3d(${topLeft.x - hostBounds.left}px, ${topLeft.y - hostBounds.top}px, 0)`;
+    preview.style.width = `${Math.max(0, bottomRight.x - topLeft.x)}px`;
+    preview.style.height = `${Math.max(0, bottomRight.y - topLeft.y)}px`;
   }, [api]);
 
-  const finishConstrainedFrameDraw = useCallback<NonNullable<ExcalidrawProps["onPointerUp"]>>(() => {
-    const constraint = frameConstraintBeforeDrawRef.current;
-    frameConstraintBeforeDrawRef.current = null;
-    if (!api || !constraint) return;
-    window.cancelAnimationFrame(constrainedFrameUpdateRef.current);
-    constrainedFrameUpdateRef.current = window.requestAnimationFrame(() => {
-      const elements = api.getSceneElements();
-      const constrained = constrainNewSlideFramesToAspectRatio(
-        elements,
-        constraint.existingFrameIds,
-        constraint.aspectRatio,
-      );
-      if (constrained === elements) return;
-      api.updateScene({
-        elements: constrained,
-        captureUpdate: CaptureUpdateAction.NEVER,
-      });
-    });
-  }, [api]);
+  const handleEditorPointerDownCapture = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    captureMathInteractionPoint(event);
+  }, [captureMathInteractionPoint]);
+
+  const slideBoundsForGesture = useCallback((gesture: SlideFrameGesture): SlideFrameBounds => {
+    const aspectRatio = slideFrameAspectRatioValue(slideFrameAspectRatioRef.current);
+    return aspectRatio
+      ? frameBoundsFromDrag(gesture.origin, gesture.current, aspectRatio)
+      : freeformFrameBoundsFromDrag(gesture.origin, gesture.current);
+  }, []);
+
+  const beginSlideFramePointer = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!api || event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Synthetic browser tests and a few touch engines can omit capture
+      // bookkeeping; the full-screen overlay still receives the gesture.
+    }
+    const origin = viewportCoordsToSceneCoords(
+      { clientX: event.clientX, clientY: event.clientY },
+      api.getAppState(),
+    );
+    slideFrameGestureRef.current = {
+      current: origin,
+      origin,
+      pointerId: event.pointerId,
+    };
+    hideConstrainedFramePreview();
+  }, [api, hideConstrainedFramePreview]);
+
+  const updateSlideFramePointer = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = slideFrameGestureRef.current;
+    if (!api || !gesture || gesture.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    gesture.current = viewportCoordsToSceneCoords(
+      { clientX: event.clientX, clientY: event.clientY },
+      api.getAppState(),
+    );
+    const bounds = slideBoundsForGesture(gesture);
+    if (bounds.width >= 1 && bounds.height >= 1) renderConstrainedFramePreview(bounds);
+  }, [api, renderConstrainedFramePreview, slideBoundsForGesture]);
+
+  const finishSlideFramePointer = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = slideFrameGestureRef.current;
+    if (!api || !gesture || gesture.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    gesture.current = viewportCoordsToSceneCoords(
+      { clientX: event.clientX, clientY: event.clientY },
+      api.getAppState(),
+    );
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    const bounds = slideBoundsForGesture(gesture);
+    if (bounds.width >= 4 && bounds.height >= 4) {
+      const frameId = createLocalId();
+      pendingCreatedFrameIdRef.current = frameId;
+      addSlideFrameAtBounds(api, bounds, `Slide ${(project?.slideOrder.length || 0) + 1}`, frameId);
+    } else {
+      api.setToast({ message: "Drag farther to create a slide." });
+    }
+    stopSlideFrameDrawing();
+  }, [api, project?.slideOrder.length, slideBoundsForGesture, stopSlideFrameDrawing]);
+
+  useEffect(() => {
+    const cancelOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && slideFrameDrawingActiveRef.current) {
+        event.preventDefault();
+        event.stopPropagation();
+        stopSlideFrameDrawing();
+      }
+    };
+    window.addEventListener("keydown", cancelOnEscape, true);
+    return () => window.removeEventListener("keydown", cancelOnEscape, true);
+  }, [stopSlideFrameDrawing]);
 
   const screenshotSidebar = useMemo(() => (
     <DefaultSidebar>
@@ -2189,9 +2346,10 @@ export default function App() {
           project={project}
           activeSlideId={activeSlideId}
           onAddSlide={addSlide}
-          onDrawFrame={drawSlideFrame}
+          frameDrawingActive={isSlideFrameDrawingActive}
+          onToggleFrameDrawing={toggleSlideFrameDrawing}
           onOpenSlide={openSlide}
-          onMoveSlide={(slideId, targetId) => setProject((current) => current ? { ...current, slideOrder: moveSlide(current.slideOrder, slideId, targetId) } : current)}
+          onMoveSlide={reorderSlides}
           onDeleteSlide={deleteSlide}
           framesVisible={areSlideFramesVisible}
           onToggleFrames={toggleSlideFrames}
@@ -2251,8 +2409,8 @@ export default function App() {
         )}
         <div
           ref={editorHostRef}
-          className={`editor-host ${isScreenshotCaptureActive ? "is-screenshot-capture-active" : ""}`}
-          onPointerDownCapture={captureMathInteractionPoint}
+          className={`editor-host ${isScreenshotCaptureActive ? "is-screenshot-capture-active" : ""} ${isSlideFrameDrawingActive ? "is-slide-frame-drawing-active" : ""}`}
+          onPointerDownCapture={handleEditorPointerDownCapture}
           onDragOver={handleScreenshotDragOver}
           onDrop={handleScreenshotDrop}
         >
@@ -2260,8 +2418,6 @@ export default function App() {
             excalidrawAPI={setApi}
             initialData={initialExcalidrawData}
             onChange={handleChange}
-            onPointerDown={prepareConstrainedFrameDraw}
-            onPointerUp={finishConstrainedFrameDraw}
             onLibraryChange={handleLibraryChange}
             onPaste={handlePaste}
             onLinkOpen={handleLinkOpen}
@@ -2274,6 +2430,24 @@ export default function App() {
           >
             {screenshotSidebar}
           </Excalidraw>
+          {isSlideFrameDrawingActive && workspaceMode === "slides" && (
+            <div
+              className="slide-frame-draw-overlay"
+              data-testid="slide-frame-draw-overlay"
+              aria-label="Draw slide"
+              onPointerDown={beginSlideFramePointer}
+              onPointerMove={updateSlideFramePointer}
+              onPointerUp={finishSlideFramePointer}
+              onPointerCancel={stopSlideFrameDrawing}
+            />
+          )}
+          <div
+            ref={frameDragPreviewRef}
+            className="slide-frame-drag-preview"
+            data-testid="slide-frame-drag-preview"
+            aria-hidden="true"
+            hidden
+          />
           {isScreenshotCaptureActive && (
             <ScreenshotCaptureOverlay
               onCancel={cancelScreenshotCapture}

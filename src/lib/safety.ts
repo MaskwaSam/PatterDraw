@@ -6,6 +6,13 @@ import {
   MIN_SLIDE_MORPH_DURATION_MS,
   normalizeSlideMorphDurationMs,
 } from "./slide-transition";
+import {
+  CLASSROOM_SLIDE_CUSTOM_DATA_KEY,
+  CLASSROOM_SLIDE_METADATA,
+  reconcileSlideTitleModes,
+  renumberAutomaticSlides,
+  sanitizeClassroomSlideMetadata,
+} from "./slides";
 
 export const MAX_PROJECT_BYTES = 150 * 1024 * 1024;
 export const MAX_PDF_BYTES = 75 * 1024 * 1024;
@@ -86,6 +93,13 @@ export function sanitizeScene(scene: SerializedScene): SerializedScene {
           if (mathTool) customData.classroomMathTool = mathTool;
           else delete customData.classroomMathTool;
         }
+        if (CLASSROOM_SLIDE_CUSTOM_DATA_KEY in customData) {
+          const slide = next.type === "frame"
+            ? sanitizeClassroomSlideMetadata(customData[CLASSROOM_SLIDE_CUSTOM_DATA_KEY])
+            : null;
+          if (slide) customData[CLASSROOM_SLIDE_CUSTOM_DATA_KEY] = slide;
+          else delete customData[CLASSROOM_SLIDE_CUSTOM_DATA_KEY];
+        }
         next.customData = customData;
       }
       return next;
@@ -105,9 +119,49 @@ export function sanitizeScene(scene: SerializedScene): SerializedScene {
 
 export function sanitizeProject(project: ClassroomProject): ClassroomProject {
   const safe = clone(project);
+  safe.slideOrder = reconcileSlideTitleModes(safe.slideOrder);
   safe.scenes = Object.fromEntries(
     Object.entries(safe.scenes).map(([id, scene]) => [id, sanitizeScene(scene)]),
   );
+  // v1 projects historically used slideOrder as the only classification. Tag
+  // those exact frames, detach their children in place, and keep the schema.
+  for (const [sceneId, scene] of Object.entries(safe.scenes)) {
+    const legacySlides = new Map(
+      safe.slideOrder
+        .filter((slide) => slide.sceneId === sceneId)
+        .map((slide) => [slide.frameId, slide.title] as const),
+    );
+    if (!legacySlides.size) continue;
+    const legacyFrameIds = new Set<string>();
+    scene.elements = scene.elements.map((element) => {
+      const elementId = String(element.id);
+      const title = legacySlides.get(elementId);
+      if (element.type === "frame" && legacySlides.has(elementId)) {
+        const customData = element.customData && typeof element.customData === "object"
+          ? element.customData as Record<string, unknown>
+          : {};
+        const alreadyTagged = !!sanitizeClassroomSlideMetadata(
+          customData[CLASSROOM_SLIDE_CUSTOM_DATA_KEY],
+        );
+        legacyFrameIds.add(elementId);
+        return {
+          ...element,
+          ...(!alreadyTagged && title ? { name: title } : {}),
+          customData: {
+            ...customData,
+            [CLASSROOM_SLIDE_CUSTOM_DATA_KEY]: { ...CLASSROOM_SLIDE_METADATA },
+          },
+        };
+      }
+      return element;
+    });
+    scene.elements = scene.elements.map((element) => (
+      typeof element.frameId === "string" && legacyFrameIds.has(element.frameId)
+        ? { ...element, frameId: null }
+        : element
+    ));
+  }
+  safe.slideOrder = renumberAutomaticSlides(safe.slideOrder);
   safe.pdfPageOrder = reconcilePdfPageOrder(safe);
   safe.slideFramesVisible = safe.slideFramesVisible !== false;
   safe.slideFrameAspectRatio = normalizeSlideFrameAspectRatio(
@@ -126,6 +180,13 @@ export function assertSafeProject(project: ClassroomProject): void {
   if (!project.id || !project.activeSceneId) throw new Error("Project identity is missing.");
   if (!project.scenes[project.activeSceneId]) throw new Error("The active scene is missing.");
   if (!Array.isArray(project.slideOrder)) throw new Error("Slide order must be a list.");
+  if (project.slideOrder.some((slide) => (
+    slide.titleMode !== undefined
+    && slide.titleMode !== "automatic"
+    && slide.titleMode !== "custom"
+  ))) {
+    throw new Error("Slide title mode must be automatic or custom.");
+  }
   if (project.slideFramesVisible !== undefined && typeof project.slideFramesVisible !== "boolean") {
     throw new Error("Slide frame visibility must be a boolean.");
   }
@@ -179,6 +240,16 @@ export function assertSafeProject(project: ClassroomProject): void {
       if (customData && typeof customData === "object" && "classroomMathTool" in customData) {
         if (!sanitizeClassroomMathToolMetadata((customData as Record<string, unknown>).classroomMathTool)) {
           throw new Error("A math tool has invalid classroom metadata.");
+        }
+      }
+      if (customData && typeof customData === "object" && CLASSROOM_SLIDE_CUSTOM_DATA_KEY in customData) {
+        if (
+          element.type !== "frame"
+          || !sanitizeClassroomSlideMetadata(
+            (customData as Record<string, unknown>)[CLASSROOM_SLIDE_CUSTOM_DATA_KEY],
+          )
+        ) {
+          throw new Error("A slide frame has invalid classroom metadata.");
         }
       }
     }
