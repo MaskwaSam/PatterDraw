@@ -14,6 +14,7 @@ const mathJaxFontRoot = fileURLToPath(new URL(
   "./node_modules/@mathjax/mathjax-newcm-font/",
   import.meta.url,
 ));
+const releaseLicenseRoot = fileURLToPath(new URL("./licenses/", import.meta.url));
 
 async function fontFiles(root: string, prefix = ""): Promise<Array<{ absolute: string; relative: string }>> {
   const files: Array<{ absolute: string; relative: string }> = [];
@@ -105,9 +106,35 @@ function localMathJaxAssets(): Plugin {
   };
 }
 
+function releaseLicenseBundle(): Plugin {
+  return {
+    name: "release-license-bundle",
+    async generateBundle() {
+      this.emitFile({
+        type: "asset",
+        fileName: "licenses/PatterDraw-LICENSE.txt",
+        source: await readFile(fileURLToPath(new URL("./LICENSE", import.meta.url))),
+      });
+      this.emitFile({
+        type: "asset",
+        fileName: "licenses/THIRD_PARTY_NOTICES.md",
+        source: await readFile(fileURLToPath(new URL("./THIRD_PARTY_NOTICES.md", import.meta.url))),
+      });
+      for (const entry of await readdir(releaseLicenseRoot, { withFileTypes: true })) {
+        if (!entry.isFile()) continue;
+        this.emitFile({
+          type: "asset",
+          fileName: `licenses/${entry.name}`,
+          source: await readFile(path.join(releaseLicenseRoot, entry.name)),
+        });
+      }
+    },
+  };
+}
+
 export default defineConfig({
   base: "./",
-  plugins: [react(), localExcalidrawFonts(), localMathJaxAssets()],
+  plugins: [react(), localExcalidrawFonts(), localMathJaxAssets(), releaseLicenseBundle()],
   define: {
     "process.env.IS_PREACT": JSON.stringify("false"),
   },

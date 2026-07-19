@@ -1,6 +1,8 @@
-# Canvas Classroom
+# PatterDraw
 
-Canvas Classroom is a separate, offline-first classroom whiteboard built on the official Excalidraw component. It opens as a full-width board, removes hosted collaboration and web-content surfaces, and lets the teacher turn slide controls on only when they are needed. Imported PDF pages become locked backgrounds with writable infinite space around them.
+PatterDraw is a separate, offline-first classroom whiteboard built on the official Excalidraw component. It opens as a full-width board, removes hosted collaboration and web-content surfaces, and lets the teacher turn slide controls on only when they are needed. Imported PDF pages become locked backgrounds with writable infinite space around them.
+
+PatterDraw is an independent project and is not affiliated with, endorsed by, or maintained by Excalidraw.
 
 This repository is intentionally independent from PolyPad. Nothing here patches `PolyPadV38` or `mod_polypad`.
 
@@ -12,7 +14,7 @@ This repository is intentionally independent from PolyPad. Nothing here patches 
 - Board-first workspace with an accessible **Slides** toggle. The live editor stays mounted, so switching modes does not discard selections, history, or canvas position.
 - Offline LaTeX equations rendered to movable Excalidraw image elements by a locally bundled MathJax 4.1.3. Select an equation and press **Equation** to edit its original LaTeX.
 - Offline, no-AI Mermaid diagrams with explicit **Preview** and **Insert** actions. Flowchart, sequence, class, ER, and state diagrams become editable Excalidraw objects and can be reopened from a selected diagram.
-- Browser autosave plus portable `.canvasclassroom` project files containing scene data and original PDF bytes.
+- Browser autosave plus portable `.patterdraw` project files containing scene data and original PDF bytes. Existing `.canvasclassroom` files remain supported for import.
 - One-click **Export all** downloads every object on the current board as a shareable PNG, including off-screen and off-page content. Editable Excalidraw scene data is embedded when the receiving image workflow preserves PNG metadata.
 - A device-wide, locally persisted Excalidraw library supports adding and reusing canvas objects plus importing and exporting standard `.excalidrawlib` files without enabling public-library browsing or publishing.
 - A separate device-wide **Screenshot Library** captures exact canvas regions, copies PNGs when browser clipboard access permits, and keeps the newest 50 captures available for click or drag insertion without adding them to project files.
@@ -25,7 +27,7 @@ This repository is intentionally independent from PolyPad. Nothing here patches 
 - Presentation PDF export with one ordered frame per page.
 - Source tests for import safety, project round trips, LaTeX validation, full-board export sizing, slide ordering, PDF page ordering, reordered PDF export, and expanded PDF bounds.
 
-The Moodle activity is designed but not yet implemented. See [the Moodle boundary](moodle/mod_excalidrawclassroom/README.md) and [roadmap](docs/ROADMAP.md).
+The Moodle activity is designed but not yet implemented. See [the Moodle boundary](moodle/mod_patterdraw/README.md) and [roadmap](docs/ROADMAP.md).
 
 ## Run locally
 
@@ -35,6 +37,14 @@ Requires Node 22.13 or newer.
 npm install
 npm run dev
 ```
+
+To make the development server available to other devices on the same trusted LAN:
+
+```bash
+npm run dev -- --host 0.0.0.0
+```
+
+Open the LAN URL printed by Vite from another device. PatterDraw does not provide authentication or TLS, so do not expose this development server to the public internet. For a durable LAN deployment, run `npm run build` and serve `dist/` from an ordinary local HTTP server.
 
 Production verification:
 
@@ -58,4 +68,4 @@ Read [GITHUB_SCAN.md](GITHUB_SCAN.md) for the July 2026 upstream survey and [doc
 
 ## License
 
-The standalone application is MIT licensed. A future Moodle activity under `moodle/mod_excalidrawclassroom` will be GPL-3.0-or-later as required for Moodle plugins. Third-party licenses are summarized in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The standalone application is MIT licensed. A future Moodle activity under `moodle/mod_patterdraw` will be GPL-3.0-or-later as required for Moodle plugins. Third-party licenses are summarized in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); production builds copy the application and third-party notices into `dist/licenses/`.

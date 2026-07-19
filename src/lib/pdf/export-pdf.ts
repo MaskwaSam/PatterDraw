@@ -132,8 +132,8 @@ export async function exportAnnotatedPdf(
 
   const output = await PDFDocument.create();
   output.setTitle(project.title);
-  output.setCreator("Canvas Classroom");
-  output.setProducer("Canvas Classroom offline PDF exporter");
+  output.setCreator("PatterDraw");
+  output.setProducer("PatterDraw offline PDF exporter");
 
   for (const scene of scenes) {
     const workspace = scene.pdfPage;
@@ -189,7 +189,7 @@ export async function exportSlidesPdf(project: ClassroomProject): Promise<Blob> 
   if (!project.slideOrder.length) throw new Error("Add at least one frame slide before exporting.");
   const output = await PDFDocument.create();
   output.setTitle(`${project.title} — slides`);
-  output.setCreator("Canvas Classroom");
+  output.setCreator("PatterDraw");
 
   for (const slide of project.slideOrder) {
     const scene = project.scenes[slide.sceneId];

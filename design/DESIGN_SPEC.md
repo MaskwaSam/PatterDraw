@@ -17,5 +17,5 @@ The concept shows an imported PDF worksheet with blue annotations extending beyo
 
 ## Image generation prompt
 
-The concept was generated with the built-in image generation workflow using a `ui-mockup` brief for a 1440×900 student-safe classroom editor. Required exact labels were “Canvas Classroom,” “Open,” “Save,” “Export,” “Offline,” “Slides,” “Style,” “Stroke,” “Background,” “Layers,” “Page 2 of 4,” “100%,” and “Present.”
+The concept was generated with the built-in image generation workflow using a `ui-mockup` brief for a 1440×900 student-safe classroom editor. Required exact labels were “PatterDraw,” “Open,” “Save,” “Export,” “Offline,” “Slides,” “Style,” “Stroke,” “Background,” “Layers,” “Page 2 of 4,” “100%,” and “Present.”
 

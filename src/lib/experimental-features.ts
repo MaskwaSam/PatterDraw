@@ -1,11 +1,14 @@
 export const EXPERIMENTAL_FEATURES_STORAGE_KEY =
+  "patterdraw:experimental-math-tools:v1";
+const LEGACY_EXPERIMENTAL_FEATURES_STORAGE_KEY =
   "excalidraw-classroom:experimental-math-tools:v1";
 
-const EXPERIMENTAL_FEATURES_EVENT = "excalidraw-classroom:experimental-features-change";
+const EXPERIMENTAL_FEATURES_EVENT = "patterdraw:experimental-features-change";
 
 export function readExperimentalFeaturesPreference(): boolean {
   try {
-    return window.localStorage.getItem(EXPERIMENTAL_FEATURES_STORAGE_KEY) === "enabled";
+    return window.localStorage.getItem(EXPERIMENTAL_FEATURES_STORAGE_KEY) === "enabled"
+      || window.localStorage.getItem(LEGACY_EXPERIMENTAL_FEATURES_STORAGE_KEY) === "enabled";
   } catch {
     return false;
   }
@@ -15,6 +18,7 @@ export function persistExperimentalFeaturesPreference(enabled: boolean): void {
   try {
     if (enabled) window.localStorage.setItem(EXPERIMENTAL_FEATURES_STORAGE_KEY, "enabled");
     else window.localStorage.removeItem(EXPERIMENTAL_FEATURES_STORAGE_KEY);
+    window.localStorage.removeItem(LEGACY_EXPERIMENTAL_FEATURES_STORAGE_KEY);
   } catch {
     // The in-memory feature gate still works if browser storage is unavailable.
   }
@@ -30,7 +34,10 @@ export function subscribeToExperimentalFeaturesPreference(
       : readExperimentalFeaturesPreference());
   };
   const handleStorage = (event: StorageEvent) => {
-    if (event.key === EXPERIMENTAL_FEATURES_STORAGE_KEY) {
+    if (
+      event.key === EXPERIMENTAL_FEATURES_STORAGE_KEY
+      || event.key === LEGACY_EXPERIMENTAL_FEATURES_STORAGE_KEY
+    ) {
       listener(readExperimentalFeaturesPreference());
     }
   };

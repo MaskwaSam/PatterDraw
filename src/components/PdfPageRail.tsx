@@ -3,7 +3,7 @@ import type { ClassroomProject, SceneId, SerializedScene } from "../types";
 import type { PdfPageDropEdge } from "../lib/pdf/page-order";
 import { DownIcon, DragIcon, HidePanelIcon, PlusIcon, TrashIcon, UpIcon } from "./Icons";
 
-const PDF_PAGE_DRAG_TYPE = "application/x-canvas-classroom-pdf-page";
+const PDF_PAGE_DRAG_TYPE = "application/x-patterdraw-pdf-page";
 export const PDF_RAIL_MIN_WIDTH = 180;
 export const PDF_RAIL_MAX_WIDTH = 420;
 export const PDF_RAIL_DEFAULT_WIDTH = 224;

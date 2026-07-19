@@ -21,7 +21,7 @@ Excalidraw   Presenter     Page rail       PDF.js preview
 
 ## Project format
 
-`.canvasclassroom` is a ZIP container with a versioned `project.json` manifest and source PDFs under `documents/<id>.pdf`. Excalidraw image files remain in scene data as local data URLs. Source PDFs are binary entries rather than base64 JSON so projects remain inspectable and do not incur base64 expansion.
+`.patterdraw` is a ZIP container with a versioned `project.json` manifest and source PDFs under `documents/<id>.pdf`. Legacy `.canvasclassroom` archives use the same validated format and remain importable. Excalidraw image files remain in scene data as local data URLs. Source PDFs are binary entries rather than base64 JSON so projects remain inspectable and do not incur base64 expansion.
 
 The model records:
 
@@ -67,7 +67,7 @@ The source is capped at 10,000 characters and 400 lines. Frontmatter, Mermaid co
 
 ## Full-board export
 
-The primary **Export all** action sends all live, non-deleted elements and local files to Excalidraw's PNG exporter rather than using viewport state. Frame clipping is disabled so objects extending beyond frames remain visible. Output dimensions are scaled, never cropped, to stay within an 8,192-pixel edge and 16-megapixel browser-canvas budget. The PNG embeds editable scene metadata where supported; `.canvasclassroom` remains the authoritative multi-scene project backup.
+The primary **Export all** action sends all live, non-deleted elements and local files to Excalidraw's PNG exporter rather than using viewport state. Frame clipping is disabled so objects extending beyond frames remain visible. Output dimensions are scaled, never cropped, to stay within an 8,192-pixel edge and 16-megapixel browser-canvas budget. The PNG embeds editable scene metadata where supported; `.patterdraw` remains the authoritative multi-scene project backup.
 
 ## Safety layers
 

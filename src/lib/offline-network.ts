@@ -1,6 +1,6 @@
 import { sanitizeWebLink } from "./safety";
 
-const blockedMessage = "Canvas Classroom blocks external network access.";
+const blockedMessage = "PatterDraw blocks external network access.";
 const guardedDocuments = new WeakSet<Document>();
 type ExternalWebLinkOpener = (url: string, target: string) => WindowProxy | null;
 let externalWebLinkOpener: ExternalWebLinkOpener | null = null;
@@ -48,8 +48,8 @@ export function openExternalWebLink(
 }
 
 export function installOfflineNetworkGuard(): void {
-  if ((window as unknown as Record<string, unknown>).__canvasClassroomNetworkGuard) return;
-  (window as unknown as Record<string, unknown>).__canvasClassroomNetworkGuard = true;
+  if ((window as unknown as Record<string, unknown>).__patterDrawNetworkGuard) return;
+  (window as unknown as Record<string, unknown>).__patterDrawNetworkGuard = true;
   installOfflineNavigationGuard();
 
   const nativeFetch = window.fetch.bind(window);

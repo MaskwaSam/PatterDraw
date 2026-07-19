@@ -243,6 +243,7 @@ async function openClassroomFixture(
   page: import("@playwright/test").Page,
   elements: Array<Record<string, unknown>>,
   slideOrder: Array<{ id: string; frameId: string; title: string; titleMode?: "automatic" | "custom" }>,
+  fileName = "detached-slides.patterdraw",
 ) {
   const sceneId = "scene";
   const project = {
@@ -271,8 +272,8 @@ async function openClassroomFixture(
   };
   const bytes = zipSync({ "project.json": strToU8(JSON.stringify(project)) });
   await page.locator('input[type="file"]').setInputFiles({
-    name: "detached-slides.canvasclassroom",
-    mimeType: "application/vnd.canvas-classroom+zip",
+    name: fileName,
+    mimeType: "application/vnd.patterdraw+zip",
     buffer: Buffer.from(bytes),
   });
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible();
@@ -297,7 +298,7 @@ async function autosavedElementsById(
   const project = await keyvalValue<{
     activeSceneId: string;
     scenes: Record<string, { elements: Array<Record<string, unknown>> }>;
-  }>(page, "excalidraw-classroom:autosave:project:v1");
+  }>(page, "patterdraw:autosave:project:v1");
   const wanted = new Set(ids);
   return Object.fromEntries(
     (project?.scenes[project.activeSceneId]?.elements || [])
@@ -321,7 +322,7 @@ async function scenePointInViewport(
         zoom?: { value?: number };
       };
     }>;
-  }>(page, "excalidraw-classroom:autosave:project:v1");
+  }>(page, "patterdraw:autosave:project:v1");
   const appState = project?.scenes[project.activeSceneId]?.appState || {};
   const editor = await page.locator(".editor-host").boundingBox();
   if (!editor) throw new Error("Editor host has no visible bounds.");
@@ -454,7 +455,7 @@ async function storedScreenshotSummary(page: import("@playwright/test").Page): P
       }>;
     } | undefined>((resolve, reject) => {
       const request = database.transaction("keyval", "readonly").objectStore("keyval")
-        .get("excalidraw-classroom:screenshot-library:v1");
+        .get("patterdraw:screenshot-library:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -491,7 +492,7 @@ async function storedScreenshotPixelSummary(page: import("@playwright/test").Pag
     });
     const record = await new Promise<{ items: Array<{ blob: Blob }> } | undefined>((resolve, reject) => {
       const request = database.transaction("keyval", "readonly").objectStore("keyval")
-        .get("excalidraw-classroom:screenshot-library:v1");
+        .get("patterdraw:screenshot-library:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -549,7 +550,7 @@ async function autosavedScreenshotImageSummary(page: import("@playwright/test").
       }>;
     } | undefined>((resolve, reject) => {
       const request = database.transaction("keyval", "readonly").objectStore("keyval")
-        .get("excalidraw-classroom:autosave:project:v1");
+        .get("patterdraw:autosave:project:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -608,7 +609,7 @@ async function autosavedFreedrawStroke(page: import("@playwright/test").Page): P
       }>;
     } | undefined>((resolve, reject) => {
       const transaction = database.transaction("keyval", "readonly");
-      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      const request = transaction.objectStore("keyval").get("patterdraw:autosave:project:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -641,7 +642,7 @@ async function autosavedElementRoughness(
       }>;
     } | undefined>((resolve, reject) => {
       const transaction = database.transaction("keyval", "readonly");
-      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      const request = transaction.objectStore("keyval").get("patterdraw:autosave:project:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -670,7 +671,7 @@ async function autosavedWebLink(page: import("@playwright/test").Page): Promise<
       }>;
     } | undefined>((resolve, reject) => {
       const transaction = database.transaction("keyval", "readonly");
-      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      const request = transaction.objectStore("keyval").get("patterdraw:autosave:project:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -703,7 +704,7 @@ async function autosavedWorkspaceSummary(page: import("@playwright/test").Page):
       scenes: Record<string, { pdfPage?: unknown }>;
     } | undefined>((resolve, reject) => {
       const transaction = database.transaction("keyval", "readonly");
-      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      const request = transaction.objectStore("keyval").get("patterdraw:autosave:project:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -768,7 +769,7 @@ async function autosavedMathToolSnapshot(
       }>;
     } | undefined>((resolve, reject) => {
       const transaction = database.transaction("keyval", "readonly");
-      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      const request = transaction.objectStore("keyval").get("patterdraw:autosave:project:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -852,7 +853,7 @@ async function autosavedFrameVisibility(page: import("@playwright/test").Page): 
       slideFramesVisible?: boolean;
     } | undefined>((resolve, reject) => {
       const transaction = database.transaction("keyval", "readonly");
-      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      const request = transaction.objectStore("keyval").get("patterdraw:autosave:project:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -870,7 +871,7 @@ async function autosavedFrameAspectSummary(page: import("@playwright/test").Page
     activeSceneId: string;
     slideFrameAspectRatio?: "freeform" | "16:9" | "4:3";
     scenes: Record<string, { elements: Array<{ customData?: { classroomSlide?: { kind?: string; version?: number } }; height?: number; isDeleted?: boolean; type?: string; width?: number }> }>;
-  }>(page, "excalidraw-classroom:autosave:project:v1");
+  }>(page, "patterdraw:autosave:project:v1");
   if (!project) return null;
   const frames = project.scenes[project.activeSceneId]?.elements
     .filter((element) => (
@@ -902,7 +903,7 @@ async function autosavedMorphSettings(page: import("@playwright/test").Page): Pr
       slideMorphEnabled?: boolean;
     } | undefined>((resolve, reject) => {
       const transaction = database.transaction("keyval", "readonly");
-      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      const request = transaction.objectStore("keyval").get("patterdraw:autosave:project:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -956,7 +957,7 @@ async function autosavedMathToolSetSnapshot(
       }>;
     } | undefined>((resolve, reject) => {
       const transaction = database.transaction("keyval", "readonly");
-      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      const request = transaction.objectStore("keyval").get("patterdraw:autosave:project:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -1009,7 +1010,7 @@ async function autosavedTransformationSnapshot(page: import("@playwright/test").
       scenes: Record<string, { elements: Array<{ customData?: { classroomMathTool?: Record<string, unknown> }; height?: number; id: string; isDeleted?: boolean; type?: string; width?: number; x?: number; y?: number }> }>;
     } | undefined>((resolve, reject) => {
       const transaction = database.transaction("keyval", "readonly");
-      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      const request = transaction.objectStore("keyval").get("patterdraw:autosave:project:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -1042,7 +1043,7 @@ async function autosavedMathToolElementSummary(
       activeSceneId: string;
       scenes: Record<string, { elements: Array<{ customData?: { classroomMathTool?: { kind?: string }; classroomMathToolPart?: string }; isDeleted?: boolean; type?: string; x?: number }> }>;
     } | undefined>((resolve, reject) => {
-      const request = database.transaction("keyval", "readonly").objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      const request = database.transaction("keyval", "readonly").objectStore("keyval").get("patterdraw:autosave:project:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -1083,7 +1084,7 @@ async function autosavedSlideOverflow(page: import("@playwright/test").Page): Pr
       }>;
     } | undefined>((resolve, reject) => {
       const transaction = database.transaction("keyval", "readonly");
-      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      const request = transaction.objectStore("keyval").get("patterdraw:autosave:project:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -1136,7 +1137,7 @@ async function autosavedPresentationInkStack(page: import("@playwright/test").Pa
       }>;
     } | undefined>((resolve, reject) => {
       const transaction = database.transaction("keyval", "readonly");
-      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      const request = transaction.objectStore("keyval").get("patterdraw:autosave:project:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -1176,7 +1177,7 @@ async function autosavedSlideDeletion(page: import("@playwright/test").Page): Pr
       }>;
     } | undefined>((resolve, reject) => {
       const transaction = database.transaction("keyval", "readonly");
-      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      const request = transaction.objectStore("keyval").get("patterdraw:autosave:project:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -1209,7 +1210,7 @@ async function autosavedRectanglePositions(page: import("@playwright/test").Page
       scenes: Record<string, { elements: Array<{ id: string; isDeleted?: boolean; type?: string; x?: number; y?: number }> }>;
     } | undefined>((resolve, reject) => {
       const transaction = database.transaction("keyval", "readonly");
-      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      const request = transaction.objectStore("keyval").get("patterdraw:autosave:project:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -1240,7 +1241,7 @@ async function autosavedPdfBackgroundPosition(page: import("@playwright/test").P
       }>;
     } | undefined>((resolve, reject) => {
       const transaction = database.transaction("keyval", "readonly");
-      const request = transaction.objectStore("keyval").get("excalidraw-classroom:autosave:project:v1");
+      const request = transaction.objectStore("keyval").get("patterdraw:autosave:project:v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -1254,6 +1255,12 @@ async function autosavedPdfBackgroundPosition(page: import("@playwright/test").P
 test.beforeEach(async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+});
+
+test("opens legacy .canvasclassroom project archives", async ({ page }) => {
+  await openClassroomFixture(page, [], [], "legacy-project.canvasclassroom");
+  await expect(page).toHaveTitle("PatterDraw");
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible();
 });
 
 test("imports and exports standard Excalidraw libraries without online controls", async ({ page }) => {
@@ -1306,7 +1313,7 @@ test("imports and exports standard Excalidraw libraries without online controls"
   const item = panel.locator(".library-unit__active").first();
   await expect(item.locator(".library-unit__dragger svg")).toBeVisible();
   await expect.poll(async () => (
-    await keyvalValue<StoredLibraryItem[]>(page, "excalidraw-classroom:library:v1")
+    await keyvalValue<StoredLibraryItem[]>(page, "patterdraw:library:v1")
   )?.length).toBe(1);
 
   await page.reload();
@@ -1367,7 +1374,7 @@ test("imports and exports standard Excalidraw libraries without online controls"
   expect(externalRequests).toEqual([]);
 });
 
-test("persists reusable items separately from canvas classroom projects", async ({ page }) => {
+test("persists reusable items separately from PatterDraw projects", async ({ page }) => {
   const consoleErrors: string[] = [];
   const externalRequests: string[] = [];
   page.on("console", (message) => {
@@ -1399,14 +1406,14 @@ test("persists reusable items separately from canvas classroom projects", async 
   await expect(pendingItem).toHaveCount(1);
   await pendingItem.locator(".library-unit__dragger").click({ force: true });
   await expect.poll(async () => (
-    await keyvalValue<StoredLibraryItem[]>(page, "excalidraw-classroom:library:v1")
+    await keyvalValue<StoredLibraryItem[]>(page, "patterdraw:library:v1")
   )?.length).toBe(1);
   await expect.poll(async () => {
     const autosave = await keyvalValue<{
       title: string;
       activeSceneId: string;
       scenes: Record<string, { elements: Array<{ type: string }> }>;
-    }>(page, "excalidraw-classroom:autosave:project:v1");
+    }>(page, "patterdraw:autosave:project:v1");
     return {
       title: autosave?.title,
       rectangles: autosave?.scenes[autosave.activeSceneId]?.elements.filter((element) => element.type === "rectangle").length,
@@ -1425,7 +1432,7 @@ test("persists reusable items separately from canvas classroom projects", async 
     const autosave = await keyvalValue<{
       activeSceneId: string;
       scenes: Record<string, { elements: Array<{ type: string }> }>;
-    }>(page, "excalidraw-classroom:autosave:project:v1");
+    }>(page, "patterdraw:autosave:project:v1");
     return autosave?.scenes[autosave.activeSceneId]?.elements.filter((element) => element.type === "rectangle").length;
   }).toBe(2);
 
@@ -1435,12 +1442,12 @@ test("persists reusable items separately from canvas classroom projects", async 
   const projectDownloadEvent = page.waitForEvent("download");
   await page.getByRole("button", { name: "Save", exact: true }).click();
   const projectDownload = await projectDownloadEvent;
-  expect(projectDownload.suggestedFilename()).toBe("Library-project-round-trip.canvasclassroom");
+  expect(projectDownload.suggestedFilename()).toBe("Library-project-round-trip.patterdraw");
   const projectBytes = await downloadBytes(projectDownload);
 
   await deleteKeyvalValues(page, [
-    "excalidraw-classroom:library:v1",
-    "excalidraw-classroom:autosave:project:v1",
+    "patterdraw:library:v1",
+    "patterdraw:autosave:project:v1",
   ]);
   await page.reload();
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
@@ -1453,7 +1460,7 @@ test("persists reusable items separately from canvas classroom projects", async 
     const autosave = await keyvalValue<{
       activeSceneId: string;
       scenes: Record<string, { elements: Array<{ type: string }> }>;
-    }>(page, "excalidraw-classroom:autosave:project:v1");
+    }>(page, "patterdraw:autosave:project:v1");
     return autosave?.scenes[autosave.activeSceneId]?.elements.filter((element) => element.type === "rectangle").length;
   }).toBe(2);
 
@@ -1615,8 +1622,8 @@ test("keeps denied clipboard captures and inserts them as one undoable project i
   expect(JSON.stringify(manifest)).not.toContain(stored.ids[0]);
 
   await deleteKeyvalValues(page, [
-    "excalidraw-classroom:screenshot-library:v1",
-    "excalidraw-classroom:autosave:project:v1",
+    "patterdraw:screenshot-library:v1",
+    "patterdraw:autosave:project:v1",
   ]);
   await page.reload();
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
@@ -1658,7 +1665,7 @@ test("exports the exact board rectangle without separated off-selection objects 
     const autosave = await keyvalValue<{
       activeSceneId: string;
       scenes: Record<string, { elements: Array<{ type?: string }> }>;
-    }>(page, "excalidraw-classroom:autosave:project:v1");
+    }>(page, "patterdraw:autosave:project:v1");
     return autosave?.scenes[autosave.activeSceneId]?.elements.filter((element) => element.type === "rectangle").length;
   }).toBe(2);
 
@@ -2346,7 +2353,7 @@ test("migrates detached slides, moves and resizes only the boundary, and keeps n
       activeSceneId: string;
       slideOrder: unknown[];
       scenes: Record<string, { elements: Array<{ customData?: { classroomSlide?: unknown }; isDeleted?: boolean; type?: string }> }>;
-    }>(page, "excalidraw-classroom:autosave:project:v1");
+    }>(page, "patterdraw:autosave:project:v1");
     const frames = project?.scenes[project.activeSceneId]?.elements.filter(
       (element) => element.type === "frame" && !element.isDeleted,
     ) || [];
@@ -2533,7 +2540,7 @@ test("preserves custom slide names through reorder, PDF export, and project roun
   await expect.poll(async () => {
     const project = await keyvalValue<{
       slideOrder: Array<{ frameId: string; title: string }>;
-    }>(page, "excalidraw-classroom:autosave:project:v1");
+    }>(page, "patterdraw:autosave:project:v1");
     return project?.slideOrder.map((slide) => [slide.frameId, slide.title]);
   }).toEqual([
     ["custom-slide", "Slide 10"],
@@ -2572,8 +2579,8 @@ test("preserves custom slide names through reorder, PDF export, and project roun
 
   await page.reload();
   await page.locator('input[type="file"]').setInputFiles({
-    name: "reordered-slides.canvasclassroom",
-    mimeType: "application/vnd.canvas-classroom+zip",
+    name: "reordered-slides.patterdraw",
+    mimeType: "application/vnd.patterdraw+zip",
     buffer: savedBytes,
   });
   await page.getByRole("button", { name: "Slides", exact: true }).click();
@@ -2945,7 +2952,7 @@ test("refreshes a PDF-active autosave back to the board without losing the PDF",
   });
 
   await page.reload();
-  await expect(page).toHaveTitle("Canvas Classroom");
+  await expect(page).toHaveTitle("PatterDraw");
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
   await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
@@ -3645,8 +3652,8 @@ test("configures, inserts, and persists the static advanced math-tool release", 
 
   await page.reload();
   await page.locator('input[type="file"]').setInputFiles({
-    name: "advanced-static-math-tools.canvasclassroom",
-    mimeType: "application/vnd.canvas-classroom+zip",
+    name: "advanced-static-math-tools.patterdraw",
+    mimeType: "application/vnd.patterdraw+zip",
     buffer: savedProject,
   });
   for (const kind of ["set-square", "geometry-stencil", "cartesian-plane", "number-line", "unit-circle", "function-plot", "grid"] as const) {
@@ -3774,8 +3781,8 @@ test("batch-inserts independent fraction, algebra, integer, and probability mani
 
   await page.reload();
   await page.locator('input[type="file"]').setInputFiles({
-    name: "advanced-manipulatives.canvasclassroom",
-    mimeType: "application/vnd.canvas-classroom+zip",
+    name: "advanced-manipulatives.patterdraw",
+    mimeType: "application/vnd.patterdraw+zip",
     buffer: savedProject,
   });
   await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "fraction-piece"))?.count || 0).toBe(10);
@@ -4178,7 +4185,7 @@ test("navigates PDF pages with the left and right arrow keys", async ({ page }) 
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
   });
-  await expect(page).toHaveTitle("Canvas Classroom");
+  await expect(page).toHaveTitle("PatterDraw");
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   await openTestPdf(page, 3);
   const pages = page.locator("#pdf-page-rail .pdf-page-item");
@@ -4385,7 +4392,7 @@ test("exports a locked PDF background with annotations and fits the native dialo
   const pngDownloadEvent = page.waitForEvent("download");
   await nativeDialog.getByRole("button", { name: "Export to PNG", exact: true }).click();
   const png = await pngDownloadEvent;
-  expect(png.suggestedFilename()).toBe("Untitled classroom canvas.png");
+  expect(png.suggestedFilename()).toBe("Untitled PatterDraw project.png");
   const bytes = await downloadBytes(png);
   expect(pngDimensions(bytes)).toEqual({ width: 632, height: 812 });
   expect(bytes.byteLength).toBeGreaterThan(2_000);
@@ -4419,8 +4426,8 @@ test("adds a blank PDF page, reopens the project on Board, and exports it", asyn
 
   await page.reload();
   await page.locator('input[type="file"]').setInputFiles({
-    name: "blank-page-roundtrip.canvasclassroom",
-    mimeType: "application/vnd.canvas-classroom+zip",
+    name: "blank-page-roundtrip.patterdraw",
+    mimeType: "application/vnd.patterdraw+zip",
     buffer: savedBytes,
   });
   await expect(page.getByRole("button", { name: "Board", exact: true })).toHaveAttribute("aria-pressed", "true");
@@ -4495,8 +4502,8 @@ test("deletes the selected PDF page without renumbering its source page", async 
 
   await page.reload();
   await page.locator('input[type="file"]').setInputFiles({
-    name: "deleted-page-roundtrip.canvasclassroom",
-    mimeType: "application/vnd.canvas-classroom+zip",
+    name: "deleted-page-roundtrip.patterdraw",
+    mimeType: "application/vnd.patterdraw+zip",
     buffer: savedBytes,
   });
   await page.getByRole("button", { name: "PDF", exact: true }).click();

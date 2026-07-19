@@ -17,6 +17,5 @@ export function safeFileStem(value: string): string {
     .trim()
     .replace(/\s+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return stem || "canvas-classroom";
+  return stem || "patterdraw";
 }
-

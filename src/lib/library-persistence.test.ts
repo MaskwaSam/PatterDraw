@@ -49,6 +49,16 @@ describe("personal library persistence", () => {
     expect(restoreLibraryItemsMock).toHaveBeenCalledWith(storedItems, "unpublished");
   });
 
+  it("falls back to the legacy Canvas Classroom storage key", async () => {
+    const storedItems = [[{ id: "legacy-brand-element" }]];
+    getMock.mockResolvedValueOnce(undefined).mockResolvedValueOnce(storedItems);
+    restoreLibraryItemsMock.mockReturnValue(restoredItems);
+
+    await expect(loadLibraryItems()).resolves.toBe(restoredItems);
+    expect(getMock).toHaveBeenNthCalledWith(1, "patterdraw:library:v1");
+    expect(getMock).toHaveBeenNthCalledWith(2, "excalidraw-classroom:library:v1");
+  });
+
   it("rejects malformed saved data instead of passing it to Excalidraw", async () => {
     getMock.mockResolvedValue({ libraryItems: [] });
 
@@ -60,6 +70,6 @@ describe("personal library persistence", () => {
     setMock.mockResolvedValue(undefined);
 
     await saveLibraryItems(restoredItems);
-    expect(setMock).toHaveBeenCalledWith("excalidraw-classroom:library:v1", restoredItems);
+    expect(setMock).toHaveBeenCalledWith("patterdraw:library:v1", restoredItems);
   });
 });

@@ -3,7 +3,7 @@ import type { StoredScreenshot } from "../lib/screenshots/persistence";
 import { ScreenshotIcon } from "./Icons";
 
 export const SCREENSHOT_SIDEBAR_TAB = "screenshots";
-export const SCREENSHOT_DRAG_MIME = "application/x-excalidraw-classroom-screenshot";
+export const SCREENSHOT_DRAG_MIME = "application/x-patterdraw-screenshot";
 
 const captureTimeFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",

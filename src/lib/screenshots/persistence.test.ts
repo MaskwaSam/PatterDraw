@@ -51,6 +51,16 @@ describe("Screenshot Library persistence", () => {
     ]);
   });
 
+  it("falls back to the legacy Canvas Classroom storage key", async () => {
+    getMock.mockResolvedValueOnce(undefined).mockResolvedValueOnce({
+      version: 1,
+      items: [screenshot("legacy-brand", 10)],
+    });
+    await expect(loadScreenshotLibrary()).resolves.toMatchObject([{ id: "legacy-brand" }]);
+    expect(getMock).toHaveBeenNthCalledWith(1, "patterdraw:screenshot-library:v1");
+    expect(getMock).toHaveBeenNthCalledWith(2, "excalidraw-classroom:screenshot-library:v1");
+  });
+
   it("rejects malformed PNG metadata and duplicate IDs", async () => {
     getMock.mockResolvedValue({
       version: 1,

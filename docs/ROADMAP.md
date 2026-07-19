@@ -20,7 +20,7 @@ The implementation-ready expansion plan for classroom instruments, graphs, manip
 
 ## Phase 3 — Moodle 5.2.1 activity
 
-- Implement `mod_excalidrawclassroom` with teacher starter project/PDF, per-user drafts, autosave, submission/resubmission, completion, capabilities, and Moodle file APIs.
+- Implement `mod_patterdraw` with teacher starter project/PDF, per-user drafts, autosave, submission/resubmission, completion, capabilities, and Moodle file APIs.
 - Add privacy provider, backup/restore, event logging limited to Moodle-required activity events, and deterministic plugin packaging.
 - Verify fresh install, upgrade, backup/restore, separate student copies, and source/PDF downloads in the target local Moodle stack.
 

@@ -28,9 +28,9 @@ These two tools establish the current behavior to preserve. Their hard-coded two
 - Generate or load all images from bundled local code/assets. Use SVG for static visual content, run generated SVG through the wrapper-owned sanitizer, and embed it as a local data URL. No remote resources, links, fonts, images, fetches, workers, iframes, embeds, or telemetry.
 - Use `72` scene points per inch for physically calibrated tools. Record `calibration: "pdf-points"`, `sceneUnitsPerInch: 72`, and natural dimensions; state in the UI that resizing a calibrated tool changes its measurement scale.
 - Insert tools as ordinary selectable board objects. A user must retain standard Excalidraw movement, rotation, resize, duplicate, delete, and lock behavior after insertion. Interactive editing must be an explicit wrapper mode and must return to normal selection cleanly.
-- Put a validated, discriminated, schema-versioned record in `customData.classroomMathTool` on every generated tool or piece. Preserve it through autosave, `.canvasclassroom` encode/decode, imported-project sanitization, and regeneration. Reject or strip invalid metadata at the project boundary rather than trusting arbitrary imported custom data.
+- Put a validated, discriminated, schema-versioned record in `customData.classroomMathTool` on every generated tool or piece. Preserve it through autosave, `.patterdraw` encode/decode, imported-project sanitization, and regeneration. Reject or strip invalid metadata at the project boundary rather than trusting arbitrary imported custom data.
 - Store user-visible configuration in metadata, not only in rendered SVG or component state. Multi-piece sets must include a stable set ID plus piece type/index on every independently movable piece. Interactive results must retain enough source parameters to re-enter the wrapper editor without depending on transient UI state.
-- Include every inserted element and local file in full-board PNG, slide export when inside a frame, annotated PDF export when on a PDF scene, and `.canvasclassroom` backup. Objects outside a PDF page or overflowing a frame must remain visible under the existing export rules.
+- Include every inserted element and local file in full-board PNG, slide export when inside a frame, annotated PDF export when on a PDF scene, and `.patterdraw` backup. Objects outside a PDF page or overflowing a frame must remain visible under the existing export rules.
 - Keep insertion transactional: either all requested files/elements and metadata are committed in one captured update or none are. Restore editor focus, select the inserted object(s), and present an accessible result/error message.
 - Use deterministic geometry and bounded inputs. Cap counts, ranges, labels, expression length, generated elements, SVG nodes, and output bounds before inserting anything.
 - Keep the catalogue and forms keyboard-operable, focus-trapped, labelled, and usable at a 390-by-844 viewport without horizontal overflow. Do not remount the live Excalidraw editor when changing categories or opening configuration.
@@ -67,7 +67,7 @@ These two tools establish the current behavior to preserve. Their hard-coded two
   - **Unit acceptance:** safe fixtures remain geometrically unchanged; malicious/oversized fixtures are rejected; Unicode labels encode and decode correctly; every catalogue preview and generated tool passes the sanitizer.
   - **Browser acceptance:** the catalogue works under the existing CSP and offline network guard; a test records zero requests outside the launch origin through preview, insertion, reload, and export.
 
-- [x] **P0 `ROUNDTRIP-1` — Add shared math-tool round-trip assertions.** Extend helpers to inspect any discriminated math-tool kind/set, rather than hard-coding ruler/protractor. Cover board scenes, PDF scenes, frames, autosave, `.canvasclassroom`, full-board PNG, slide/PDF export, and off-page/frame-overflow placement.
+- [x] **P0 `ROUNDTRIP-1` — Add shared math-tool round-trip assertions.** Extend helpers to inspect any discriminated math-tool kind/set, rather than hard-coding ruler/protractor. Cover board scenes, PDF scenes, frames, autosave, `.patterdraw`, full-board PNG, slide/PDF export, and off-page/frame-overflow placement.
   - **Unit acceptance:** project sanitization and encode/decode preserve valid tool metadata/local files and reject unsafe files or invalid metadata without corrupting unrelated scene content.
   - **Browser acceptance:** a representative static tool and multi-piece set survive movement, rotation, locking, scene navigation, reload, project download/reopen, and each applicable export; off-page content remains included and no external request occurs.
 
@@ -176,7 +176,7 @@ Release gate: Releases 1–2 plus `INTERACT-1`. Interactive mode is temporary wr
 A checkbox above may be marked complete only when all of the following are true:
 
 - Generated content is local, sanitized, bounded, and covered by the build-time offline-safety check plus a browser assertion of zero external requests.
-- Configuration is validated and preserved in the typed `classroomMathTool` metadata union; imported-project sanitization and `.canvasclassroom` round trips are covered.
+- Configuration is validated and preserved in the typed `classroomMathTool` metadata union; imported-project sanitization and `.patterdraw` round trips are covered.
 - Every generated object supports the applicable ordinary movement, rotation, resize, duplication, deletion, and locking behavior, and it survives autosave/reload.
 - Full-board export includes the complete active board, including off-screen and frame-overflow math content. PDF annotations beyond page edges and slide content behave under the existing export contracts.
 - Unit tests verify exact dimensions, geometry, labels, calibration where applicable, input limits, and deterministic local SVG/output generation.

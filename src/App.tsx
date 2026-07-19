@@ -741,12 +741,15 @@ export default function App() {
             pdfDocuments: { ...base.pdfDocuments, [imported.source.id]: imported.source },
           };
         });
-      } else if (file.name.toLowerCase().endsWith(".canvasclassroom")) {
+      } else if (
+        file.name.toLowerCase().endsWith(".patterdraw")
+        || file.name.toLowerCase().endsWith(".canvasclassroom")
+      ) {
         await openLoadedProject(decodeProjectFile(new Uint8Array(await file.arrayBuffer())));
       } else if (file.name.toLowerCase().endsWith(".excalidraw")) {
         await openLoadedProject({ project: nativeExcalidrawProject(await file.text()), pdfBytes: {} });
       } else {
-        throw new Error("Open a .canvasclassroom, .excalidraw, or PDF file.");
+        throw new Error("Open a .patterdraw, legacy .canvasclassroom, .excalidraw, or PDF file.");
       }
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
@@ -761,8 +764,8 @@ export default function App() {
     try {
       const bytes = encodeProjectFile(project, pdfBytes);
       downloadBlob(
-        new Blob([Uint8Array.from(bytes).buffer], { type: "application/vnd.canvas-classroom+zip" }),
-        `${safeFileStem(project.title)}.canvasclassroom`,
+        new Blob([Uint8Array.from(bytes).buffer], { type: "application/vnd.patterdraw+zip" }),
+        `${safeFileStem(project.title)}.patterdraw`,
       );
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
@@ -2312,7 +2315,7 @@ export default function App() {
     startScreenshotCapture,
   ]);
 
-  if (!project || !currentScene) return <div className="loading-screen">Opening Canvas Classroom…</div>;
+  if (!project || !currentScene) return <div className="loading-screen">Opening PatterDraw…</div>;
 
   return (
     <div
@@ -2608,7 +2611,7 @@ export default function App() {
         ref={inputRef}
         className="visually-hidden"
         type="file"
-        accept=".canvasclassroom,.excalidraw,.pdf,application/pdf"
+        accept=".patterdraw,.canvasclassroom,.excalidraw,.pdf,application/pdf"
         onChange={(event) => event.target.files?.[0] && void handleFile(event.target.files[0])}
       />
       {exportOpen && (

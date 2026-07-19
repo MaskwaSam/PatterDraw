@@ -37,7 +37,7 @@ OpenBoard's behavior was verified in source:
 - [`UBExportFullPDF.cpp`](https://github.com/OpenBoard-org/OpenBoard/blob/master/src/adaptors/UBExportFullPDF.cpp) merges the source PDF page beneath an annotation overlay.
 - [OpenBoard PR #649](https://github.com/OpenBoard-org/OpenBoard/pull/649) confirms that overflow is scaled into the original paper dimensions.
 
-That corrects an easy misconception: OpenBoard does **not** enlarge the PDF paper. Canvas Classroom therefore exposes two explicit modes. “Expand pages” implements the requested preserve-scale behavior; “Fit like OpenBoard” reproduces the observed OpenBoard geometry independently without copying GPL source.
+That corrects an easy misconception: OpenBoard does **not** enlarge the PDF paper. PatterDraw therefore exposes two explicit modes. “Expand pages” implements the requested preserve-scale behavior; “Fit like OpenBoard” reproduces the observed OpenBoard geometry independently without copying GPL source.
 
 Recommended v1 architecture:
 
@@ -51,13 +51,13 @@ Future writer candidates include active but beta [LibPDF](https://github.com/Lib
 
 ## LaTeX findings
 
-Excalidraw 0.18.1 exposes image/file and scene APIs but no built-in equation tool or LaTeX conversion API. Canvas Classroom therefore renders equations in its wrapper and inserts the result as an ordinary Excalidraw image, retaining the source LaTeX in element metadata for later editing. The relevant official surfaces are the [v0.18.1 exports](https://github.com/excalidraw/excalidraw/blob/v0.18.1/packages/excalidraw/index.tsx), [imperative API](https://docs.excalidraw.com/docs/@excalidraw/excalidraw/api/props/excalidraw-api), and [element skeleton API](https://docs.excalidraw.com/docs/@excalidraw/excalidraw/api/excalidraw-element-skeleton).
+Excalidraw 0.18.1 exposes image/file and scene APIs but no built-in equation tool or LaTeX conversion API. PatterDraw therefore renders equations in its wrapper and inserts the result as an ordinary Excalidraw image, retaining the source LaTeX in element metadata for later editing. The relevant official surfaces are the [v0.18.1 exports](https://github.com/excalidraw/excalidraw/blob/v0.18.1/packages/excalidraw/index.tsx), [imperative API](https://docs.excalidraw.com/docs/@excalidraw/excalidraw/api/props/excalidraw-api), and [element skeleton API](https://docs.excalidraw.com/docs/@excalidraw/excalidraw/api/excalidraw-element-skeleton).
 
 [MathJax 4.1.3](https://www.npmjs.com/package/mathjax) was selected over KaTeX because MathJax directly produces standalone SVG suitable for an Excalidraw image element. It is self-hosted according to MathJax's [local hosting guidance](https://docs.mathjax.org/en/latest/web/hosting.html), uses local font ranges, and follows MathJax's [untrusted-input guidance](https://docs.mathjax.org/en/latest/web/typeset.html). No remote equation service or CDN is used.
 
 ## Mermaid without AI
 
-Mermaid is useful independently of AI, but Excalidraw's native dialog previews continuously and can fall back to generated SVG images. Canvas Classroom therefore keeps `aiEnabled={false}` and uses a wrapper-owned explicit Preview/Insert dialog around pinned `@excalidraw/mermaid-to-excalidraw` 2.2.2 and Mermaid 11.16.0. The converter is loaded locally only on Preview, and only diagram families that produce native editable Excalidraw objects are accepted.
+Mermaid is useful independently of AI, but Excalidraw's native dialog previews continuously and can fall back to generated SVG images. PatterDraw therefore keeps `aiEnabled={false}` and uses a wrapper-owned explicit Preview/Insert dialog around pinned `@excalidraw/mermaid-to-excalidraw` 2.2.2 and Mermaid 11.16.0. The converter is loaded locally only on Preview, and only diagram families that produce native editable Excalidraw objects are accepted.
 
 The version choice includes Excalidraw's [Mermaid conversion XSS patch](https://github.com/excalidraw/excalidraw/security/advisories/GHSA-39h7-pwv7-rc3x). Mermaid's documented default `securityLevel: "strict"` encodes HTML and disables click behavior, but the wrapper also rejects diagram-authored configuration, HTML, links, styles, URLs, and SVG-image fallback rather than relying on that single setting.
 
@@ -67,7 +67,7 @@ Additional Excalidraw advisories reinforce blocking web content: embedded-webpag
 
 No maintained Moodle Excalidraw activity was found. Moodle's [`mod_whiteboard`](https://moodle.org/plugins/mod_whiteboard) embeds external Miro or Conceptboard services and explicitly carries external-provider data implications. [Hyperchalk](https://github.com/Hyperchalk/Hyperchalk) is an older Django/Redis/LTI platform rather than a Moodle plugin and does not match the local-first requirement.
 
-The clean Moodle direction is a new `mod_excalidrawclassroom`: Moodle-native capabilities, local file APIs, per-user work, teacher templates, completion/submission, backup/restore, and a privacy provider, with no LTI or external service.
+The clean Moodle direction is a new `mod_patterdraw`: Moodle-native capabilities, local file APIs, per-user work, teacher templates, completion/submission, backup/restore, and a privacy provider, with no LTI or external service.
 
 ## Reuse rules
 

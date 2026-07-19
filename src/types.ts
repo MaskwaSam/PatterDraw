@@ -89,7 +89,7 @@ export function createBlankProject(now = new Date()): ClassroomProject {
   return {
     schemaVersion: CLASSROOM_PROJECT_VERSION,
     id: createLocalId(),
-    title: "Untitled classroom canvas",
+    title: "Untitled PatterDraw project",
     createdAt: timestamp,
     updatedAt: timestamp,
     activeSceneId: sceneId,

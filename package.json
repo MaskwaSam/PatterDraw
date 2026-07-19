@@ -1,9 +1,9 @@
 {
-  "name": "excalidraw-classroom",
+  "name": "patterdraw",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Offline-first, student-safe Excalidraw with frame slides and PDF annotation.",
+  "description": "PatterDraw: an offline-first, student-safe whiteboard with frame slides and PDF annotation.",
   "engines": {
     "node": ">=22.13.0"
   },

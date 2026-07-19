@@ -145,7 +145,7 @@ async function loadMathJax(): Promise<MathJaxApi> {
   mathJaxPromise = new Promise<MathJaxApi>((resolve, reject) => {
     window.MathJax = mathJaxConfiguration();
     const script = document.createElement("script");
-    script.id = "canvas-classroom-mathjax";
+    script.id = "patterdraw-mathjax";
     script.src = localAssetUrl("./mathjax/tex-svg.js");
     script.async = true;
     script.addEventListener("error", () => reject(new Error("The local equation renderer could not be loaded.")), { once: true });

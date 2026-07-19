@@ -5,7 +5,8 @@ import {
   MAX_SCREENSHOT_PIXELS,
 } from "./limits";
 
-export const SCREENSHOT_LIBRARY_KEY = "excalidraw-classroom:screenshot-library:v1";
+export const SCREENSHOT_LIBRARY_KEY = "patterdraw:screenshot-library:v1";
+const LEGACY_SCREENSHOT_LIBRARY_KEY = "excalidraw-classroom:screenshot-library:v1";
 export const SCREENSHOT_LIBRARY_LIMIT = 50;
 
 export interface StoredScreenshot {
@@ -82,7 +83,8 @@ function validateScreenshotLibrary(value: unknown): StoredScreenshot[] {
 }
 
 export async function loadScreenshotLibrary(): Promise<StoredScreenshot[]> {
-  const stored = await get<unknown>(SCREENSHOT_LIBRARY_KEY);
+  const current = await get<unknown>(SCREENSHOT_LIBRARY_KEY);
+  const stored = current ?? await get<unknown>(LEGACY_SCREENSHOT_LIBRARY_KEY);
   if (stored === undefined || stored === null) return [];
   return validateScreenshotLibrary(stored);
 }
