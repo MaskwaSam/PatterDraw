@@ -50,6 +50,7 @@ Production verification:
 
 ```bash
 npm run check
+npm run test:browser
 ```
 
 The Vite build uses a relative base so `dist/` can be served from a static subdirectory or packaged into Moodle. Browsers still require an HTTP origin for workers and IndexedDB; opening `index.html` directly with `file://` is not a supported launch path.

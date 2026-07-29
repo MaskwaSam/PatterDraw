@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import type { RenderedLatex } from "../lib/latex/render-latex";
+import { useModalDialog } from "./useModalDialog";
 
 const SYMBOLS = [
   { label: "Fraction", value: "\\frac{}{}" },
@@ -17,14 +18,20 @@ interface EquationDialogProps {
   editing: boolean;
   onCancel: () => void;
   onSubmit: (rendered: RenderedLatex) => void;
+  returnFocusRef?: RefObject<HTMLElement>;
 }
 
-export function EquationDialog({ initialSource, editing, onCancel, onSubmit }: EquationDialogProps) {
+export function EquationDialog({ initialSource, editing, onCancel, onSubmit, returnFocusRef }: EquationDialogProps) {
   const [source, setSource] = useState(initialSource);
   const [preview, setPreview] = useState<RenderedLatex | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [rendering, setRendering] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const dialogRef = useModalDialog<HTMLFormElement>({
+    initialFocusRef: textareaRef,
+    onClose: onCancel,
+    returnFocusRef,
+  });
 
   useEffect(() => {
     const trimmed = source.trim();
@@ -76,10 +83,12 @@ export function EquationDialog({ initialSource, editing, onCancel, onSubmit }: E
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onCancel}>
       <form
+        ref={dialogRef}
         className="equation-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="equation-title"
+        tabIndex={-1}
         onMouseDown={(event) => event.stopPropagation()}
         onSubmit={(event) => {
           event.preventDefault();

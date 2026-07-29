@@ -19,14 +19,17 @@ export function getBoardExportDimensions(width: number, height: number): {
   height: number;
   scale: number;
 } {
+  if (!Number.isFinite(width) || !Number.isFinite(height)) {
+    throw new Error("Board export bounds must be finite.");
+  }
   const safeWidth = Math.max(1, width);
   const safeHeight = Math.max(1, height);
-  const scale = Math.max(0.01, Math.min(
+  const scale = Math.min(
     PREFERRED_EXPORT_SCALE,
     MAX_EXPORT_EDGE / safeWidth,
     MAX_EXPORT_EDGE / safeHeight,
-    Math.sqrt(MAX_EXPORT_PIXELS / (safeWidth * safeHeight)),
-  ));
+    Math.sqrt(MAX_EXPORT_PIXELS) / Math.sqrt(safeWidth) / Math.sqrt(safeHeight),
+  );
   return {
     width: Math.max(1, Math.floor(safeWidth * scale)),
     height: Math.max(1, Math.floor(safeHeight * scale)),

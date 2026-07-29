@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createBlankProject, type ClassroomProject, type SerializedScene } from "../types";
-import { assertSafeProject, sanitizeProject, sanitizeScene, sanitizeWebLink } from "./safety";
+import { assertSafeProject, isSafeLocalImageSource, sanitizeProject, sanitizeScene } from "./safety";
 import { MATH_TOOL_CATALOGUE } from "./math-tools/catalogue";
 
 const scene = (elements: readonly Record<string, unknown>[]): SerializedScene => ({
@@ -11,8 +11,51 @@ const scene = (elements: readonly Record<string, unknown>[]): SerializedScene =>
   files: {},
 });
 
+const pdfScene = (id: string, pageIndex: number): SerializedScene => ({
+  id,
+  name: `Page ${pageIndex + 1}`,
+  elements: [{
+    id: `${id}-background`,
+    type: "image",
+    fileId: `${id}-file`,
+    x: 0,
+    y: 0,
+    width: 600,
+    height: 800,
+    angle: 0,
+    locked: true,
+    isDeleted: false,
+    opacity: 100,
+    frameId: null,
+    groupIds: [],
+    scale: [1, 1],
+    status: "saved",
+    customData: {
+      classroomRole: "pdf-background",
+      pdfDocumentId: "pdf",
+      pdfPageIndex: pageIndex,
+    },
+  }],
+  appState: {},
+  files: {
+    [`${id}-file`]: {
+      id: `${id}-file`,
+      mimeType: "image/png",
+      dataURL: "data:image/png;base64,AA==",
+    },
+  },
+  pdfPage: {
+    documentId: "pdf",
+    pageIndex,
+    width: 600,
+    height: 800,
+    rotation: 0,
+    backgroundElementId: `${id}-background`,
+  },
+});
+
 describe("student safety", () => {
-  it("removes iframe and embeddable elements while preserving safe web links", () => {
+  it("removes iframe, embeddable, and linked elements from imported scenes", () => {
     const safe = sanitizeScene(scene([
       { id: "shape", type: "rectangle", link: "https://example.com/lesson" },
       { id: "unsafe", type: "rectangle", link: "javascript:alert(1)" },
@@ -21,17 +64,42 @@ describe("student safety", () => {
       { id: "generated", type: "magicframe" },
     ]));
     expect(safe.elements).toEqual([
-      { id: "shape", type: "rectangle", link: "https://example.com/lesson" },
+      { id: "shape", type: "rectangle", link: null },
       { id: "unsafe", type: "rectangle", link: null },
     ]);
   });
 
-  it("allows only HTTP and HTTPS hyperlink schemes", () => {
-    expect(sanitizeWebLink(" https://example.com/lesson ")).toBe("https://example.com/lesson");
-    expect(sanitizeWebLink("http://localhost:5173/help")).toBe("http://localhost:5173/help");
-    expect(sanitizeWebLink("mailto:teacher@example.com")).toBeNull();
-    expect(sanitizeWebLink("javascript:alert(1)")).toBeNull();
-    expect(sanitizeWebLink("data:text/html,unsafe")).toBeNull();
+  it("accepts only embedded base64 image data for persisted files", () => {
+    expect(isSafeLocalImageSource("data:image/png;base64,AA==")).toBe(true);
+    expect(isSafeLocalImageSource("data:image/svg+xml;base64,PHN2Zy8+")).toBe(true);
+    expect(isSafeLocalImageSource("design/editor-concept.png?offline-probe=1")).toBe(false);
+    expect(isSafeLocalImageSource("?offline-probe=1")).toBe(false);
+    expect(isSafeLocalImageSource("blob:https://classroom.local/transient")).toBe(false);
+    expect(isSafeLocalImageSource("data:image/svg+xml,<svg/>")).toBe(false);
+    expect(isSafeLocalImageSource("https://example.test/image.png")).toBe(false);
+  });
+
+  it("drops imported image elements when their local embedded file is rejected", () => {
+    const imported = scene([
+      { id: "probe", type: "image", fileId: "probe-file" },
+      { id: "valid", type: "image", fileId: "valid-file" },
+    ]);
+    imported.files = {
+      "probe-file": {
+        id: "probe-file",
+        mimeType: "image/png",
+        dataURL: "design/editor-concept.png?offline-probe=1",
+      },
+      "valid-file": {
+        id: "valid-file",
+        mimeType: "image/png",
+        dataURL: "data:image/png;base64,AA==",
+      },
+    };
+
+    const safe = sanitizeScene(imported);
+    expect(Object.keys(safe.files)).toEqual(["valid-file"]);
+    expect(safe.elements.map((element) => element.id)).toEqual(["valid"]);
   });
 
   it("sanitizes every scene in a project", () => {
@@ -150,11 +218,7 @@ describe("student safety", () => {
       updatedAt: "2026-07-12T00:00:00.000Z",
       activeSceneId: "page",
       scenes: {
-        page: {
-          ...scene([]),
-          id: "page",
-          pdfPage: { documentId: "pdf", pageIndex: 0, width: 600, height: 800, rotation: 0, backgroundElementId: "background" },
-        },
+        page: pdfScene("page", 0),
       },
       slideOrder: [],
       pdfPageOrder: ["page", "page"],
@@ -176,9 +240,11 @@ describe("student safety", () => {
       activeSceneId: "page",
       scenes: {
         page: {
-          ...scene([]),
-          id: "page",
-          pdfPage: { documentId: "pdf", pageIndex: 2, width: 600, height: 800, rotation: 0, backgroundElementId: "background" },
+          ...pdfScene("page", 2),
+          pdfPage: {
+            ...pdfScene("page", 2).pdfPage!,
+            pageIndex: 2,
+          },
         },
       },
       slideOrder: [],
@@ -190,14 +256,104 @@ describe("student safety", () => {
     expect(() => assertSafeProject(project)).toThrow(/source-page index/);
   });
 
+  it("repairs stored PDF background transforms and rejects a missing local raster", () => {
+    const project = createBlankProject();
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "source.pdf",
+      mimeType: "application/pdf",
+      byteLength: 1,
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+    };
+    const page = pdfScene("page", 0);
+    page.elements = [{
+      ...page.elements[0],
+      x: 100,
+      locked: false,
+      isDeleted: true,
+      opacity: 10,
+    }];
+    project.scenes.page = page;
+
+    expect(sanitizeProject(project).scenes.page.elements[0]).toMatchObject({
+      id: "page-background",
+      x: 0,
+      y: 0,
+      width: 600,
+      height: 800,
+      locked: true,
+      isDeleted: false,
+      opacity: 100,
+    });
+
+    page.files = {};
+    expect(() => assertSafeProject(project)).toThrow(/missing or unsafe local image/);
+  });
+
+  it("rejects PDF document identities that alias the same archive entry", () => {
+    const project = createBlankProject();
+    project.pdfDocuments.first = {
+      id: "first",
+      name: "first.pdf",
+      mimeType: "application/pdf",
+      byteLength: 1,
+      pageCount: 1,
+      archivePath: "documents/shared.pdf",
+    };
+    project.pdfDocuments.second = {
+      id: "second",
+      name: "second.pdf",
+      mimeType: "application/pdf",
+      byteLength: 1,
+      pageCount: 1,
+      archivePath: "documents/shared.pdf",
+    };
+
+    expect(() => assertSafeProject(project)).toThrow(/duplicate archive path/);
+  });
+
+  it("rejects duplicate element identities in imported scenes", () => {
+    const project = createBlankProject();
+    project.scenes[project.activeSceneId].elements = [
+      { id: "duplicate", type: "rectangle" },
+      { id: "duplicate", type: "ellipse" },
+    ];
+    expect(() => assertSafeProject(project)).toThrow(/duplicate element identity/);
+  });
+
   it("preserves valid math metadata and strips or rejects invalid imported metadata", () => {
     const generated = MATH_TOOL_CATALOGUE.find((tool) => tool.kind === "ruler")!.generate({ kind: "ruler" });
     if ("pieces" in generated) throw new Error("Ruler must be a single tool.");
     const ruler = generated.metadata;
-    const validScene = scene([{ id: "ruler", type: "image", customData: { classroomMathTool: ruler } }]);
+    const validScene = scene([{
+      id: "ruler",
+      type: "image",
+      fileId: "ruler-file",
+      customData: { classroomMathTool: ruler },
+    }]);
+    validScene.files = {
+      "ruler-file": {
+        id: "ruler-file",
+        mimeType: "image/svg+xml",
+        dataURL: "data:image/svg+xml;base64,PHN2Zy8+",
+      },
+    };
     expect((sanitizeScene(validScene).elements[0].customData as Record<string, unknown>).classroomMathTool).toEqual(ruler);
 
-    const invalidScene = scene([{ id: "bad", type: "image", customData: { classroomMathTool: { ...ruler, naturalWidth: -1 }, note: "keep" } }]);
+    const invalidScene = scene([{
+      id: "bad",
+      type: "image",
+      fileId: "bad-file",
+      customData: { classroomMathTool: { ...ruler, naturalWidth: -1 }, note: "keep" },
+    }]);
+    invalidScene.files = {
+      "bad-file": {
+        id: "bad-file",
+        mimeType: "image/svg+xml",
+        dataURL: "data:image/svg+xml;base64,PHN2Zy8+",
+      },
+    };
     expect(sanitizeScene(invalidScene).elements[0].customData).toEqual({ note: "keep" });
 
     const project = {

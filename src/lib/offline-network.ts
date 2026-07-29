@@ -1,9 +1,5 @@
-import { sanitizeWebLink } from "./safety";
-
 const blockedMessage = "PatterDraw blocks external network access.";
 const guardedDocuments = new WeakSet<Document>();
-type ExternalWebLinkOpener = (url: string, target: string) => WindowProxy | null;
-let externalWebLinkOpener: ExternalWebLinkOpener | null = null;
 
 declare global {
   interface Window {
@@ -33,18 +29,6 @@ export function installOfflineNavigationGuard(targetDocument = document): void {
     if (!href || isAllowedOfflineUrl(href, targetDocument.baseURI)) return;
     event.preventDefault();
   }, true);
-}
-
-export function openExternalWebLink(
-  value: unknown,
-  opener: ExternalWebLinkOpener | null = externalWebLinkOpener,
-): boolean {
-  const link = sanitizeWebLink(value);
-  if (!link || !opener) return false;
-  const opened = opener(link, "_blank");
-  if (!opened) return false;
-  opened.opener = null;
-  return true;
 }
 
 export function installOfflineNetworkGuard(): void {
@@ -80,7 +64,6 @@ export function installOfflineNetworkGuard(): void {
   }
 
   const nativeWindowOpen = window.open.bind(window);
-  externalWebLinkOpener = nativeWindowOpen;
   window.open = ((url?: string | URL, target?: string, features?: string) => {
     if (url && !isAllowedOfflineUrl(url)) return null;
     return nativeWindowOpen(url, target, features);

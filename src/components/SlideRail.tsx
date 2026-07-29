@@ -1,10 +1,21 @@
+import { useState } from "react";
 import type { ClassroomProject, ClassroomSlide, SlideFrameAspectRatio } from "../types";
 import {
   MAX_SLIDE_MORPH_DURATION_MS,
   MIN_SLIDE_MORPH_DURATION_MS,
   SLIDE_MORPH_DURATION_STEP_MS,
 } from "../lib/slide-transition";
-import { DragIcon, EyeIcon, EyeOffIcon, FrameIcon, MorphIcon, PlusIcon, TrashIcon } from "./Icons";
+import {
+  DownIcon,
+  DragIcon,
+  EyeIcon,
+  EyeOffIcon,
+  FrameIcon,
+  MorphIcon,
+  PlusIcon,
+  TrashIcon,
+  UpIcon,
+} from "./Icons";
 import { SlidePreview } from "./SlidePreview";
 
 interface SlideRailProps {
@@ -44,9 +55,16 @@ export function SlideRail({
   onToggleMorph,
   onMorphDurationChange,
 }: SlideRailProps) {
+  const [announcement, setAnnouncement] = useState("");
   const morphDurationSeconds = `${Number((morphDurationMs / 1_000).toFixed(2))} s`;
   const chooseFrameAspectRatio = (aspectRatio: Exclude<SlideFrameAspectRatio, "freeform">) => {
     onFrameAspectRatioChange(frameAspectRatio === aspectRatio ? "freeform" : aspectRatio);
+  };
+  const shiftSlide = (slide: ClassroomSlide, index: number, direction: -1 | 1) => {
+    const target = project.slideOrder[index + direction];
+    if (!target) return;
+    onMoveSlide(slide.id, target.id);
+    setAnnouncement(`Moved ${slide.title} to slide position ${index + direction + 1}.`);
   };
   return (
     <aside id="slide-rail" className="slide-rail" aria-label="Slides">
@@ -157,7 +175,14 @@ export function SlideRail({
                 aria-label={`Open slide ${index + 1}: ${slide.title}`}
                 onDragStart={(event) => event.dataTransfer.setData("text/plain", slide.id)}
                 onDragOver={(event) => event.preventDefault()}
-                onDrop={(event) => onMoveSlide(event.dataTransfer.getData("text/plain"), slide.id)}
+                onDrop={(event) => {
+                  const movingId = event.dataTransfer.getData("text/plain");
+                  if (movingId && movingId !== slide.id) {
+                    const movingSlide = project.slideOrder.find((candidate) => candidate.id === movingId);
+                    onMoveSlide(movingId, slide.id);
+                    setAnnouncement(`Moved ${movingSlide?.title || "slide"} to slide position ${index + 1}.`);
+                  }
+                }}
                 onClick={() => onOpenSlide(slide)}
               >
                 <span className="slide-number" aria-hidden="true">{index + 1}</span>
@@ -178,6 +203,30 @@ export function SlideRail({
                   <TrashIcon />
                 </button>
               ) : null}
+              <div
+                className="slide-thumbnail-actions"
+                role="group"
+                aria-label={`Reorder slide ${index + 1}: ${slide.title}`}
+              >
+                <button
+                  type="button"
+                  disabled={index === 0}
+                  aria-label={`Move slide ${index + 1} earlier: ${slide.title}`}
+                  title="Move earlier"
+                  onClick={() => shiftSlide(slide, index, -1)}
+                >
+                  <UpIcon />
+                </button>
+                <button
+                  type="button"
+                  disabled={index === project.slideOrder.length - 1}
+                  aria-label={`Move slide ${index + 1} later: ${slide.title}`}
+                  title="Move later"
+                  onClick={() => shiftSlide(slide, index, 1)}
+                >
+                  <DownIcon />
+                </button>
+              </div>
             </div>
           );
         }) : (
@@ -188,6 +237,7 @@ export function SlideRail({
           </div>
         )}
       </div>
+      <span className="visually-hidden" aria-live="polite">{announcement}</span>
     </aside>
   );
 }

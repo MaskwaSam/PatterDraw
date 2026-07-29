@@ -1,6 +1,122 @@
+import { createCanvas } from "@napi-rs/canvas";
 import { expect, test, type Download } from "@playwright/test";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
-import { PDFDocument } from "pdf-lib";
+import {
+  degrees,
+  PDFDocument,
+  PDFName,
+  PDFNumber,
+  rgb,
+  StandardFonts,
+} from "pdf-lib";
+import { getDocument, OPS } from "pdfjs-dist/legacy/build/pdf.mjs";
+
+const pdfStandardFontDataUrl = decodeURIComponent(new URL(
+  "./standard_fonts/",
+  import.meta.resolve("pdfjs-dist/package.json"),
+).pathname);
+
+interface RenderedPdfPage {
+  width: number;
+  height: number;
+  rgba: Uint8ClampedArray;
+  operators: number[];
+  text: string;
+}
+
+async function renderPdfPage(
+  bytes: Uint8Array,
+  pageNumber = 1,
+): Promise<RenderedPdfPage> {
+  const loadingTask = getDocument({
+    data: Uint8Array.from(bytes),
+    useSystemFonts: false,
+    useWorkerFetch: false,
+    useWasm: false,
+    standardFontDataUrl: pdfStandardFontDataUrl,
+  });
+  const document = await loadingTask.promise;
+  try {
+    const page = await document.getPage(pageNumber);
+    try {
+      const viewport = page.getViewport({ scale: 1 });
+      const width = Math.ceil(viewport.width);
+      const height = Math.ceil(viewport.height);
+      const canvas = createCanvas(width, height);
+      const context = canvas.getContext("2d");
+      await page.render({
+        canvas: canvas as unknown as HTMLCanvasElement,
+        canvasContext: context as unknown as CanvasRenderingContext2D,
+        viewport,
+        background: "#ffffff",
+      }).promise;
+      const operatorList = await page.getOperatorList();
+      const textContent = await page.getTextContent();
+      return {
+        width,
+        height,
+        rgba: Uint8ClampedArray.from(context.getImageData(0, 0, width, height).data),
+        operators: Array.from(operatorList.fnArray),
+        text: textContent.items
+          .map((item) => ("str" in item ? item.str : ""))
+          .join(" "),
+      };
+    } finally {
+      page.cleanup();
+    }
+  } finally {
+    await loadingTask.destroy();
+  }
+}
+
+function matchingPixelBounds(
+  page: RenderedPdfPage,
+  matches: (red: number, green: number, blue: number) => boolean,
+): readonly [number, number, number, number] | null {
+  let minX = page.width;
+  let minY = page.height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < page.height; y += 1) {
+    for (let x = 0; x < page.width; x += 1) {
+      const offset = (y * page.width + x) * 4;
+      if (!matches(page.rgba[offset], page.rgba[offset + 1], page.rgba[offset + 2])) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+  return maxX < 0 ? null : [minX, minY, maxX, maxY];
+}
+
+function normalizedPixelBounds(
+  page: RenderedPdfPage,
+  bounds: readonly [number, number, number, number] | null,
+): number[] {
+  if (!bounds) return [];
+  return [
+    bounds[0] / page.width,
+    bounds[1] / page.height,
+    bounds[2] / page.width,
+    bounds[3] / page.height,
+  ];
+}
+
+function nonWhitePixelsAfter(page: RenderedPdfPage, minX: number): number {
+  let count = 0;
+  for (let y = 0; y < page.height; y += 1) {
+    for (let x = Math.max(0, minX); x < page.width; x += 1) {
+      const offset = (y * page.width + x) * 4;
+      if (
+        page.rgba[offset] < 245
+        || page.rgba[offset + 1] < 245
+        || page.rgba[offset + 2] < 245
+      ) count += 1;
+    }
+  }
+  return count;
+}
 
 async function enableExperimentalMathTools(page: import("@playwright/test").Page) {
   const toggle = page.getByRole("switch", { name: "Experimental features" });
@@ -154,6 +270,32 @@ async function openTestPdf(page: import("@playwright/test").Page, pageCount = 1)
   });
   await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, { timeout: 15_000 });
   await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(pageCount, { timeout: 15_000 });
+}
+
+async function unusualPdfBytes(): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const page = document.addPage([612, 792]);
+  page.setCropBox(72, 108, 360, 480);
+  page.node.set(PDFName.of("UserUnit"), PDFNumber.of(2));
+  page.setRotation(degrees(90));
+  page.drawRectangle({ x: 82, y: 118, width: 36, height: 28, color: rgb(1, 0, 0) });
+  page.drawRectangle({ x: 386, y: 540, width: 36, height: 28, color: rgb(0, 0, 1) });
+  const font = await document.embedFont(StandardFonts.Helvetica);
+  page.drawText("VECTOR_RESUME_SENTINEL", { x: 150, y: 340, size: 18, font });
+  const field = document.getForm().createTextField("fixture.resume");
+  field.setText("FORM RESUMES");
+  field.addToPage(page, {
+    x: 130,
+    y: 180,
+    width: 220,
+    height: 44,
+    font,
+    borderWidth: 2,
+    borderColor: rgb(1, 0, 1),
+    backgroundColor: rgb(1, 1, 0),
+    textColor: rgb(0, 0, 0),
+  });
+  return document.save({ useObjectStreams: false });
 }
 
 async function downloadBytes(download: Download): Promise<Buffer> {
@@ -1263,6 +1405,66 @@ test("opens legacy .canvasclassroom project archives", async ({ page }) => {
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible();
 });
 
+test("flushes ordinary project-title typing without the trailing autosave delay", async ({ page }) => {
+  const title = page.getByRole("textbox", { name: "Project title" });
+  await title.fill("Immediate autosav");
+  await title.focus();
+  await page.keyboard.type("e");
+
+  await expect.poll(async () => (
+    await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
+  )?.title, {
+    intervals: [20, 50, 100],
+    timeout: 500,
+  }).toBe("Immediate autosave");
+});
+
+test("rejects imported relative image sources without issuing a request", async ({ page }) => {
+  const probeRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("offline-image-probe")) probeRequests.push(request.url());
+  });
+  const probeImage = {
+    ...exportTestRectangle("relative-image-probe", 100, 100, 200, 120, "a0"),
+    type: "image",
+    fileId: "relative-image-file",
+    status: "saved",
+    scale: [1, 1],
+  };
+
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "relative-image-probe.excalidraw",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({
+      type: "excalidraw",
+      version: 2,
+      source: "local",
+      elements: [probeImage],
+      appState: {},
+      files: {
+        "relative-image-file": {
+          id: "relative-image-file",
+          mimeType: "image/png",
+          dataURL: "design/editor-concept.png?offline-image-probe=1",
+          created: 1,
+        },
+      },
+    })),
+  });
+
+  await expect.poll(async () => {
+    const autosave = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, { elements: Array<{ id?: string }> }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    return autosave?.scenes[autosave.activeSceneId]?.elements.some(
+      (element) => element.id === "relative-image-probe",
+    );
+  }).toBe(false);
+  await page.waitForTimeout(250);
+  expect(probeRequests).toEqual([]);
+});
+
 test("imports and exports standard Excalidraw libraries without online controls", async ({ page }) => {
   const consoleErrors: string[] = [];
   const externalRequests: string[] = [];
@@ -1842,27 +2044,28 @@ test("defaults line drawings to no sloppiness without changing other shape tools
   await expect.poll(() => autosavedElementRoughness(page, "rectangle")).toBe(2);
 });
 
-test("adds and explicitly opens safe web links without enabling embeds", async ({ page }) => {
+test("strips canvas links and blocks external navigation", async ({ page }) => {
   const consoleErrors: string[] = [];
+  const externalRequests: string[] = [];
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
   });
-  await page.context().route("https://example.test/**", async (route) => {
-    await route.fulfill({ status: 200, contentType: "text/html", body: "Linked classroom resource" });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== new URL(page.url()).origin) {
+      externalRequests.push(request.url());
+    }
   });
 
   await page.getByTestId("toolbar-rectangle").check({ force: true });
   await dragOnBoard(page, { x: 320, y: 230 }, { x: 560, y: 390 });
+  await expect(page.getByRole("button", { name: "Add link", exact: true })).toBeHidden();
   await page.keyboard.press("ControlOrMeta+k");
   const linkInput = page.locator(".excalidraw-hyperlinkContainer-input");
-  await expect(linkInput).toBeVisible();
-  await linkInput.fill("https://example.test/class-resource");
-  await linkInput.press("Enter");
+  await expect(linkInput).toBeHidden();
 
-  const link = page.locator(".excalidraw-hyperlinkContainer-link");
-  await expect(link).toHaveText("https://example.test/class-resource");
   await expect.poll(() => autosavedWebLink(page)).toEqual({
-    link: "https://example.test/class-resource",
+    link: null,
     blockedElementCount: 0,
   });
   await expect.poll(() => page.evaluate(async () => {
@@ -1873,19 +2076,15 @@ test("adds and explicitly opens safe web links without enabling embeds", async (
       return error instanceof Error ? error.message : String(error);
     }
   })).toContain("blocks external network access");
-
-  const popupPromise = page.waitForEvent("popup");
-  await link.click();
-  const popup = await popupPromise;
-  await expect(popup).toHaveURL("https://example.test/class-resource");
-  await popup.close();
+  expect(await page.evaluate(() => window.open("https://example.test/class-resource"))).toBeNull();
 
   await page.reload();
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
   await expect.poll(() => autosavedWebLink(page)).toEqual({
-    link: "https://example.test/class-resource",
+    link: null,
     blockedElementCount: 0,
   });
+  expect(externalRequests).toEqual([]);
   expect(consoleErrors).toEqual([]);
 });
 
@@ -2521,6 +2720,44 @@ test("rail deletion removes a grouped slide boundary but preserves and ungroups 
   }).toEqual({ contentDeleted: false, contentFrameId: null, contentGroups: [], slideExists: false });
 });
 
+test("reorders slides with visible keyboard and touch controls", async ({ page }) => {
+  const opening = classroomTestFrame("opening-slide", "Opening", 100, 100, 500, 300, "a0", true);
+  const practice = classroomTestFrame("practice-slide", "Practice", 700, 100, 500, 300, "a1", true);
+  await openClassroomFixture(page, [opening, practice], [
+    { id: "opening-record", frameId: "opening-slide", title: "Opening", titleMode: "custom" },
+    { id: "practice-record", frameId: "practice-slide", title: "Practice", titleMode: "custom" },
+  ]);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+
+  const captions = page.locator(".slide-thumbnail .slide-caption");
+  const liveAnnouncement = page.locator("#slide-rail [aria-live='polite']");
+  await expect(captions).toHaveText(["Opening", "Practice"]);
+  await expect(page.getByRole("button", { name: "Move slide 1 earlier: Opening", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Move slide 2 later: Practice", exact: true })).toBeDisabled();
+
+  const movePracticeEarlier = page.getByRole("button", {
+    name: "Move slide 2 earlier: Practice",
+    exact: true,
+  });
+  await expect(movePracticeEarlier).toBeVisible();
+  await movePracticeEarlier.focus();
+  await movePracticeEarlier.press("Enter");
+  await expect(captions).toHaveText(["Practice", "Opening"]);
+  await expect(liveAnnouncement).toHaveText("Moved Practice to slide position 1.");
+  await expect(page.getByRole("button", { name: "Move slide 1 earlier: Practice", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Move slide 2 later: Opening", exact: true })).toBeDisabled();
+
+  const movePracticeLater = page.getByRole("button", {
+    name: "Move slide 1 later: Practice",
+    exact: true,
+  });
+  await expect(movePracticeLater).toBeVisible();
+  await movePracticeLater.click();
+  await expect(captions).toHaveText(["Opening", "Practice"]);
+  await expect(liveAnnouncement).toHaveText("Moved Practice to slide position 2.");
+});
+
 test("preserves custom slide names through reorder, PDF export, and project round trip", async ({ page }) => {
   const automatic = classroomTestFrame("automatic-slide", "Slide 1", 100, 100, 500, 300, "a2", true);
   const custom = classroomTestFrame("custom-slide", "Slide 10", 700, 100, 500, 300, "a3", true);
@@ -2965,6 +3202,121 @@ test("refreshes a PDF-active autosave back to the board without losing the PDF",
   expect(consoleErrors).toEqual([]);
 });
 
+test("saves and resumes unusual PDF geometry with the original source intact", async ({ page }) => {
+  test.setTimeout(90_000);
+  const sourceBytes = await unusualPdfBytes();
+  const workspaceSnapshot = async () => {
+    const project = await keyvalValue<{
+      pdfPageOrder: string[];
+      scenes: Record<string, {
+        pdfPage?: {
+          documentId: string;
+          pageIndex: number;
+          width: number;
+          height: number;
+          rotation: number;
+        };
+      }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    const scene = project?.scenes[project.pdfPageOrder[0]];
+    return scene?.pdfPage
+      ? {
+          pageIndex: scene.pdfPage.pageIndex,
+          width: scene.pdfPage.width,
+          height: scene.pdfPage.height,
+          rotation: scene.pdfPage.rotation,
+        }
+      : null;
+  };
+
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "unusual-resume.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(sourceBytes),
+  });
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, { timeout: 15_000 });
+  await expect.poll(workspaceSnapshot).toEqual({
+    pageIndex: 0,
+    width: 960,
+    height: 720,
+    rotation: 90,
+  });
+
+  const saveDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  const savedBytes = await downloadBytes(await saveDownload);
+  const archive = unzipSync(new Uint8Array(savedBytes));
+  const manifest = JSON.parse(strFromU8(archive["project.json"])) as {
+    pdfDocuments: Record<string, { archivePath: string }>;
+  };
+  const [source] = Object.values(manifest.pdfDocuments);
+  expect(source).toBeDefined();
+  expect(archive[source.archivePath]).toEqual(sourceBytes);
+
+  await page.reload();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await expect.poll(workspaceSnapshot).toEqual({
+    pageIndex: 0,
+    width: 960,
+    height: 720,
+    rotation: 90,
+  });
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1);
+
+  await page.reload();
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "unusual-resume.patterdraw",
+    mimeType: "application/vnd.patterdraw+zip",
+    buffer: savedBytes,
+  });
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect.poll(workspaceSnapshot).toEqual({
+    pageIndex: 0,
+    width: 960,
+    height: 720,
+    rotation: 90,
+  });
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  const pdfDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: /Annotated PDF — expand pages/ }).click();
+  const exportedBytes = await downloadBytes(await pdfDownload);
+  const exported = await PDFDocument.load(exportedBytes);
+  expect(exported.getPage(0).getSize()).toEqual({ width: 960, height: 720 });
+  expect(exported.getPage(0).node.Annots()?.size() || 0).toBe(0);
+
+  const sourceRender = await renderPdfPage(sourceBytes);
+  const exportedRender = await renderPdfPage(exportedBytes);
+  expect(exportedRender.text).toContain("VECTOR_RESUME_SENTINEL");
+  expect(exportedRender.text).toContain("FORM RESUMES");
+  const imageOperators = new Set<number>([
+    OPS.paintImageMaskXObject,
+    OPS.paintImageXObject,
+    OPS.paintInlineImageXObject,
+  ]);
+  expect(exportedRender.operators.every((operator) => !imageOperators.has(operator))).toBe(true);
+  const red = (r: number, g: number, b: number) => r > 220 && g < 80 && b < 80;
+  const blue = (r: number, g: number, b: number) => r < 80 && g < 80 && b > 220;
+  const yellow = (r: number, g: number, b: number) => r > 220 && g > 220 && b < 80;
+  for (const color of [red, blue, yellow]) {
+    const sourceBounds = normalizedPixelBounds(
+      sourceRender,
+      matchingPixelBounds(sourceRender, color),
+    );
+    const exportedBounds = normalizedPixelBounds(
+      exportedRender,
+      matchingPixelBounds(exportedRender, color),
+    );
+    expect(sourceBounds).toHaveLength(4);
+    expect(exportedBounds).toHaveLength(4);
+    for (let coordinate = 0; coordinate < 4; coordinate += 1) {
+      expect(exportedBounds[coordinate]).toBeCloseTo(sourceBounds[coordinate], 2);
+    }
+  }
+});
+
 test("docks the drawing toolbar and resizes or hides the PDF page rail", async ({ page }) => {
   test.setTimeout(60_000);
   const toolbar = page.locator(".shapes-section");
@@ -3136,6 +3488,10 @@ test("inserts and persists a Letter-calibrated ruler from Math tools", async ({ 
 
   const closeMathTools = page.getByRole("button", { name: "Close math tools" });
   await page.keyboard.press("Tab");
+  await expect(protractorButton).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(closeMathTools).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
   await expect(protractorButton).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(closeMathTools).toBeFocused();
@@ -4214,6 +4570,106 @@ test("navigates PDF pages with the left and right arrow keys", async ({ page }) 
   expect(consoleErrors).toEqual([]);
 });
 
+test("reorders PDF output pages without changing their immutable source indexes", async ({ page }) => {
+  test.setTimeout(60_000);
+  const document = await PDFDocument.create();
+  for (const [width, height] of [[500, 700], [600, 800], [700, 900]] as const) {
+    document.addPage([width, height]);
+  }
+  const bytes = await document.save();
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "reorder-pages.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(bytes),
+  });
+
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await expect(pages).toHaveCount(3, { timeout: 15_000 });
+  await pages.nth(2).getByRole("button", { name: "Move output page 3 earlier", exact: true }).click();
+  await pages.nth(1).getByRole("button", { name: "Move output page 2 earlier", exact: true }).click();
+  await expect(pages.locator(".pdf-page-label span")).toHaveText([
+    "Original page 3",
+    "Original page 1",
+    "Original page 2",
+  ]);
+  await expect.poll(async () => {
+    const project = await keyvalValue<{
+      pdfPageOrder: string[];
+      scenes: Record<string, { pdfPage?: { pageIndex: number } }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    return project?.pdfPageOrder.map((sceneId) => project.scenes[sceneId].pdfPage?.pageIndex);
+  }).toEqual([2, 0, 1]);
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  const pdfDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: /Annotated PDF — expand pages/ }).click();
+  const exported = await PDFDocument.load(await downloadBytes(await pdfDownload));
+  expect(exported.getPages().map((outputPage) => outputPage.getSize())).toEqual([
+    { width: 700, height: 900 },
+    { width: 500, height: 700 },
+    { width: 600, height: 800 },
+  ]);
+});
+
+test("traps focus in wrapper dialogs and restores their invoking controls", async ({ page }) => {
+  await openClassroomFixture(page, [
+    exportTestRectangle("dialog-focus-object", 100, 120, 160, 100, "a0"),
+  ], []);
+
+  const moreExports = page.getByRole("button", { name: "More export options", exact: true });
+  await moreExports.click();
+  const exportDialog = page.getByRole("dialog", { name: "More exports", exact: true });
+  const firstExportControl = exportDialog.locator("button:not(:disabled)").first();
+  const cancelExport = exportDialog.getByRole("button", { name: "Cancel", exact: true });
+  await expect(exportDialog).toBeVisible();
+  await expect(firstExportControl).toBeFocused();
+  await cancelExport.focus();
+  await page.keyboard.press("Tab");
+  await expect(firstExportControl).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(cancelExport).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(exportDialog).toBeHidden();
+  await expect(moreExports).toBeFocused();
+
+  const insert = page.getByRole("button", { name: "Insert", exact: true });
+  await insert.click();
+  await page.getByRole("menuitem", { name: /Equation/ }).click();
+  const equationDialog = page.getByRole("dialog", { name: "Insert equation", exact: true });
+  const equationSource = equationDialog.getByLabel("LaTeX", { exact: true });
+  const closeEquation = equationDialog.getByRole("button", { name: "Close equation editor", exact: true });
+  const cancelEquation = equationDialog.getByRole("button", { name: "Cancel", exact: true });
+  await expect(equationSource).toBeFocused();
+  await closeEquation.focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(cancelEquation).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(closeEquation).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(equationDialog).toBeHidden();
+  await expect(insert).toBeFocused();
+
+  await insert.click();
+  await page.getByRole("menuitem", { name: /Diagram/ }).click();
+  const mermaidDialog = page.getByRole("dialog", { name: "Insert Mermaid diagram", exact: true });
+  const mermaidSource = mermaidDialog.getByLabel("Mermaid source", { exact: true });
+  const closeMermaid = mermaidDialog.getByRole("button", { name: "Close Mermaid editor", exact: true });
+  const previewMermaid = mermaidDialog.getByRole("button", { name: "Preview", exact: true });
+  await expect(mermaidSource).toBeFocused();
+  await closeMermaid.focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(previewMermaid).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(closeMermaid).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(mermaidDialog).toBeHidden();
+  await expect(insert).toBeFocused();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("button", { name: "Insert", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Export all", exact: true })).toBeVisible();
+});
+
 test("opens the official image export dialog with native controls and export semantics", async ({ page }) => {
   const consoleErrors: string[] = [];
   const externalRequests: string[] = [];
@@ -4396,6 +4852,74 @@ test("exports a locked PDF background with annotations and fits the native dialo
   const bytes = await downloadBytes(png);
   expect(pngDimensions(bytes)).toEqual({ width: 632, height: 812 });
   expect(bytes.byteLength).toBeGreaterThan(2_000);
+});
+
+test("keeps off-page PDF annotations through reload and both annotated export modes", async ({ page }) => {
+  test.setTimeout(90_000);
+  await openTestPdf(page);
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  await dragOnBoard(page, { x: 632, y: 300 }, { x: 672, y: 340 });
+  await page.getByTestId("toolbar-selection").check({ force: true });
+
+  const annotations = async () => {
+    const project = await keyvalValue<{
+      pdfPageOrder: string[];
+      scenes: Record<string, {
+        elements: Array<{
+          id: string;
+          isDeleted?: boolean;
+          type?: string;
+          width?: number;
+          x?: number;
+        }>;
+        pdfPage?: { backgroundElementId: string };
+      }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    const scene = project?.scenes[project.pdfPageOrder[0]];
+    return scene?.elements
+      .filter((element) => !element.isDeleted && element.id !== scene.pdfPage?.backgroundElementId)
+      .map((element) => ({
+        type: element.type,
+        width: element.width || 0,
+        x: element.x || 0,
+      })) || [];
+  };
+  await expect.poll(annotations).toHaveLength(1);
+  const [initialAnnotation] = await annotations();
+  expect(initialAnnotation).toMatchObject({ type: "rectangle" });
+  expect(initialAnnotation.width).toBeGreaterThan(20);
+  expect(initialAnnotation.width).toBeLessThan(60);
+
+  await page.locator(".editor-host .excalidraw").focus();
+  const nudgeCount = Math.max(0, Math.ceil((632 - initialAnnotation.x) / 5));
+  for (let nudge = 0; nudge < nudgeCount; nudge += 1) {
+    await page.keyboard.press("Shift+ArrowRight");
+  }
+  await expect.poll(async () => (await annotations())[0]?.x || 0).toBeGreaterThanOrEqual(632);
+
+  await page.reload();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1);
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  const expandedDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: /Annotated PDF — expand pages/ }).click();
+  const expandedBytes = await downloadBytes(await expandedDownload);
+  const expanded = await PDFDocument.load(expandedBytes);
+  expect(expanded.getPage(0).getWidth()).toBeGreaterThan(612);
+  expect(expanded.getPage(0).getHeight()).toBe(792);
+  const expandedRender = await renderPdfPage(expandedBytes);
+  expect(nonWhitePixelsAfter(expandedRender, 620)).toBeGreaterThan(20);
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  const fittedDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: /Annotated PDF — fit like OpenBoard/ }).click();
+  const fittedBytes = await downloadBytes(await fittedDownload);
+  const fitted = await PDFDocument.load(fittedBytes);
+  expect(fitted.getPage(0).getSize()).toEqual({ width: 612, height: 792 });
+  const fittedRender = await renderPdfPage(fittedBytes);
+  expect(nonWhitePixelsAfter(fittedRender, 550)).toBeGreaterThan(20);
 });
 
 test("adds a blank PDF page, reopens the project on Board, and exports it", async ({ page }) => {

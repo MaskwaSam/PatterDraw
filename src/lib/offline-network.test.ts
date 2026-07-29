@@ -3,7 +3,6 @@ import {
   filterOfflineFontSources,
   installOfflineNavigationGuard,
   isAllowedOfflineUrl,
-  openExternalWebLink,
 } from "./offline-network";
 
 describe("offline network policy", () => {
@@ -45,22 +44,5 @@ describe("offline network policy", () => {
     const localClick = new MouseEvent("click", { bubbles: true, cancelable: true });
     local.dispatchEvent(localClick);
     expect(localClick.defaultPrevented).toBe(false);
-  });
-
-  it("opens validated web links only through the explicit link action", () => {
-    let openedUrl = "";
-    let openedTarget = "";
-    const openedWindow = { opener: window } as unknown as WindowProxy;
-    const opener = (url: string, target: string) => {
-      openedUrl = url;
-      openedTarget = target;
-      return openedWindow;
-    };
-
-    expect(openExternalWebLink("https://example.test/lesson", opener)).toBe(true);
-    expect(openedUrl).toBe("https://example.test/lesson");
-    expect(openedTarget).toBe("_blank");
-    expect(openedWindow.opener).toBeNull();
-    expect(openExternalWebLink("javascript:alert(1)", opener)).toBe(false);
   });
 });

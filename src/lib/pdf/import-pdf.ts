@@ -16,6 +16,7 @@ import type {
 } from "../../types";
 import { createLocalId } from "../id";
 import { MAX_PDF_BYTES, MAX_PDF_PAGES } from "../safety";
+import { getPdfImportRasterScale, type PdfPageRasterSize } from "./raster-limits";
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -32,7 +33,11 @@ function normalizedRotation(value: number): 0 | 90 | 180 | 270 {
 }
 
 function canvasToPngDataUrl(canvas: HTMLCanvasElement): DataURL {
-  return canvas.toDataURL("image/png") as DataURL;
+  const dataURL = canvas.toDataURL("image/png");
+  if (!dataURL.startsWith("data:image/png")) {
+    throw new Error("This PDF page is too large for the browser to render safely.");
+  }
+  return dataURL as DataURL;
 }
 
 async function renderPageScene(
@@ -40,75 +45,81 @@ async function renderPageScene(
   documentId: string,
   pageIndex: number,
   name: string,
+  rasterScale: number,
 ): Promise<SerializedScene> {
   const page = await pdfDocument.getPage(pageIndex + 1);
-  const viewport = page.getViewport({ scale: 1 });
-  const renderViewport = page.getViewport({ scale: Math.min(window.devicePixelRatio || 1, 2) * 1.5 });
-  const canvas = window.document.createElement("canvas");
-  canvas.width = Math.ceil(renderViewport.width);
-  canvas.height = Math.ceil(renderViewport.height);
-  const context = canvas.getContext("2d", { alpha: false });
-  if (!context) throw new Error("This browser cannot render PDF pages.");
+  try {
+    const viewport = page.getViewport({ scale: 1 });
+    const renderViewport = page.getViewport({ scale: rasterScale });
+    const canvas = window.document.createElement("canvas");
+    canvas.width = Math.ceil(renderViewport.width);
+    canvas.height = Math.ceil(renderViewport.height);
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) throw new Error("This browser cannot render PDF pages.");
 
-  await page.render({ canvas, canvasContext: context, viewport: renderViewport }).promise;
-  const sceneId = createLocalId();
-  const backgroundElementId = createLocalId();
-  const fileId = createLocalId() as FileId;
-  const workspace: PdfPageWorkspace = {
-    documentId,
-    pageIndex,
-    width: viewport.width,
-    height: viewport.height,
-    rotation: normalizedRotation(viewport.rotation),
-    backgroundElementId,
-  };
-  const dataURL = canvasToPngDataUrl(canvas);
-  const file: BinaryFileData = {
-    id: fileId,
-    mimeType: "image/png",
-    dataURL,
-    created: Date.now(),
-  };
-  const elements = convertToExcalidrawElements(
-    [
-      {
-        id: backgroundElementId,
-        type: "image",
-        x: 0,
-        y: 0,
-        width: viewport.width,
-        height: viewport.height,
-        fileId,
-        status: "saved",
-        locked: true,
-        strokeColor: "transparent",
-        backgroundColor: "transparent",
-        customData: {
-          classroomRole: "pdf-background",
-          pdfDocumentId: documentId,
-          pdfPageIndex: pageIndex,
+    await page.render({ canvas, canvasContext: context, viewport: renderViewport }).promise;
+    const sceneId = createLocalId();
+    const backgroundElementId = createLocalId();
+    const fileId = createLocalId() as FileId;
+    const workspace: PdfPageWorkspace = {
+      documentId,
+      pageIndex,
+      width: viewport.width,
+      height: viewport.height,
+      rotation: normalizedRotation(viewport.rotation),
+      backgroundElementId,
+    };
+    const dataURL = canvasToPngDataUrl(canvas);
+    canvas.width = 1;
+    canvas.height = 1;
+    const file: BinaryFileData = {
+      id: fileId,
+      mimeType: "image/png",
+      dataURL,
+      created: Date.now(),
+    };
+    const elements = convertToExcalidrawElements(
+      [
+        {
+          id: backgroundElementId,
+          type: "image",
+          x: 0,
+          y: 0,
+          width: viewport.width,
+          height: viewport.height,
+          fileId,
+          status: "saved",
+          locked: true,
+          strokeColor: "transparent",
+          backgroundColor: "transparent",
+          customData: {
+            classroomRole: "pdf-background",
+            pdfDocumentId: documentId,
+            pdfPageIndex: pageIndex,
+          },
         },
-      },
-    ],
-    { regenerateIds: false },
-  );
-  page.cleanup();
+      ],
+      { regenerateIds: false },
+    );
 
-  return {
-    id: sceneId,
-    name: `${name} — page ${pageIndex + 1}`,
-    elements: elements as unknown as readonly Record<string, unknown>[],
-    appState: {
-      viewBackgroundColor: "#f2f4f7",
-      scrollX: 80,
-      scrollY: 60,
-      zoom: { value: 0.9 },
-    },
-    files: {
-      [fileId]: file as unknown as Record<string, unknown>,
-    },
-    pdfPage: workspace,
-  };
+    return {
+      id: sceneId,
+      name: `${name} — page ${pageIndex + 1}`,
+      elements: elements as unknown as readonly Record<string, unknown>[],
+      appState: {
+        viewBackgroundColor: "#f2f4f7",
+        scrollX: 80,
+        scrollY: 60,
+        zoom: { value: 0.9 },
+      },
+      files: {
+        [fileId]: file as unknown as Record<string, unknown>,
+      },
+      pdfPage: workspace,
+    };
+  } finally {
+    page.cleanup();
+  }
 }
 
 export async function importPdf(file: File): Promise<ImportedPdf> {
@@ -129,9 +140,20 @@ export async function importPdf(file: File): Promise<ImportedPdf> {
       throw new Error(`The PDF has more than ${MAX_PDF_PAGES} pages.`);
     }
     const documentId = createLocalId();
+    const pageSizes: PdfPageRasterSize[] = [];
+    for (let pageIndex = 0; pageIndex < document.numPages; pageIndex += 1) {
+      const page = await document.getPage(pageIndex + 1);
+      try {
+        const viewport = page.getViewport({ scale: 1 });
+        pageSizes.push({ width: viewport.width, height: viewport.height });
+      } finally {
+        page.cleanup();
+      }
+    }
+    const rasterScale = getPdfImportRasterScale(pageSizes, window.devicePixelRatio || 1);
     const scenes: SerializedScene[] = [];
     for (let pageIndex = 0; pageIndex < document.numPages; pageIndex += 1) {
-      scenes.push(await renderPageScene(document, documentId, pageIndex, file.name));
+      scenes.push(await renderPageScene(document, documentId, pageIndex, file.name, rasterScale));
     }
     return {
       source: {

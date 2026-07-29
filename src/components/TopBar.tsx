@@ -24,6 +24,7 @@ interface TopBarProps {
   onMermaid: () => void;
   onExportAll: () => void;
   onExportOptions: () => void;
+  insertButtonRef: RefObject<HTMLButtonElement>;
   exportOptionsButtonRef: RefObject<HTMLButtonElement>;
   mode: WorkspaceMode;
   onModeChange: (mode: WorkspaceMode) => void;
@@ -34,7 +35,11 @@ interface TopBarProps {
   onHide: () => void;
 }
 
-function InsertMenu({ onEquation, onMermaid }: Pick<TopBarProps, "onEquation" | "onMermaid">) {
+function InsertMenu({
+  insertButtonRef,
+  onEquation,
+  onMermaid,
+}: Pick<TopBarProps, "insertButtonRef" | "onEquation" | "onMermaid">) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -57,8 +62,10 @@ function InsertMenu({ onEquation, onMermaid }: Pick<TopBarProps, "onEquation" | 
   return (
     <div ref={menuRef} className={`topbar-menu ${open ? "is-open" : ""}`}>
       <button
+        ref={insertButtonRef}
         className="topbar-menu-trigger"
         type="button"
+        aria-label="Insert"
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
@@ -91,6 +98,7 @@ export function TopBar({
   onMermaid,
   onExportAll,
   onExportOptions,
+  insertButtonRef,
   exportOptionsButtonRef,
   mode,
   onModeChange,
@@ -150,9 +158,9 @@ export function TopBar({
       <nav className="file-actions" aria-label="File actions">
         <button className="topbar-action" type="button" onClick={onOpen} title="Open a project or PDF"><OpenIcon /><span>Open</span></button>
         <button className="topbar-action" type="button" onClick={onSave} title="Download a complete classroom project"><SaveIcon /><span>Save</span></button>
-        <InsertMenu onEquation={onEquation} onMermaid={onMermaid} />
+        <InsertMenu insertButtonRef={insertButtonRef} onEquation={onEquation} onMermaid={onMermaid} />
         <div className="export-split">
-          <button type="button" onClick={onExportAll}><ExportIcon /><span>Export all</span></button>
+          <button type="button" aria-label="Export all" onClick={onExportAll}><ExportIcon /><span>Export all</span></button>
           <button
             ref={exportOptionsButtonRef}
             className="export-options-button"

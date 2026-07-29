@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   MATH_TOOL_CATALOGUE,
   MATH_TOOL_CATEGORIES,
@@ -17,6 +17,7 @@ import {
   readExperimentalFeaturesPreference,
   subscribeToExperimentalFeaturesPreference,
 } from "../lib/experimental-features";
+import { useModalDialog } from "./useModalDialog";
 
 interface MathToolsDialogProps {
   initialConfiguration?: MathToolConfiguration | null;
@@ -210,7 +211,10 @@ function initialConfigurations(initialConfiguration?: MathToolConfiguration | nu
 }
 
 export function MathToolsDialog({ initialConfiguration, onCancel, onInsert, onStartInteraction }: MathToolsDialogProps) {
-  const dialogRef = useRef<HTMLElement>(null);
+  const dialogRef = useModalDialog<HTMLElement>({
+    onClose: onCancel,
+    restoreFocus: false,
+  });
   const [experimentalFeaturesEnabled, setExperimentalFeaturesEnabled] = useState(readExperimentalFeaturesPreference);
   const initialDefinition = initialConfiguration
     ? MATH_TOOL_CATALOGUE.find((candidate) => candidate.kind === initialConfiguration.kind) || null
@@ -234,49 +238,6 @@ export function MathToolsDialog({ initialConfiguration, onCancel, onInsert, onSt
   useEffect(() => {
     return subscribeToExperimentalFeaturesPreference(setExperimentalFeaturesEnabled);
   }, []);
-
-  useEffect(() => {
-    const handleDialogKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        if (editingId) setEditingId(null);
-        else onCancel();
-        return;
-      }
-      if (event.key !== "Tab") return;
-
-      const dialog = dialogRef.current;
-      if (!dialog) return;
-      const controls = Array.from(dialog.querySelectorAll<HTMLElement>(
-        'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
-      )).filter((control) => control.getClientRects().length > 0);
-      if (!controls.length) {
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-
-      const first = controls[0];
-      const last = controls[controls.length - 1];
-      const active = document.activeElement;
-      if (!dialog.contains(active)) {
-        event.preventDefault();
-        event.stopPropagation();
-        first.focus();
-      } else if (event.shiftKey && active === first) {
-        event.preventDefault();
-        event.stopPropagation();
-        last.focus();
-      } else if (!event.shiftKey && active === last) {
-        event.preventDefault();
-        event.stopPropagation();
-        first.focus();
-      }
-    };
-    window.addEventListener("keydown", handleDialogKeyDown, true);
-    return () => window.removeEventListener("keydown", handleDialogKeyDown, true);
-  }, [editingId, onCancel]);
 
   const changeCategory = (next: MathToolCategory) => {
     setCategory(next);
@@ -333,6 +294,7 @@ export function MathToolsDialog({ initialConfiguration, onCancel, onInsert, onSt
         aria-modal="true"
         aria-labelledby="math-tools-title"
         aria-describedby="math-tools-help"
+        tabIndex={-1}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="dialog-heading">

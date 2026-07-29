@@ -26,6 +26,19 @@ describe("full-board export dimensions", () => {
     expect(result.scale).toBeLessThan(1);
   });
 
+  it("still respects both bitmap caps for objects a million canvas units apart", () => {
+    const result = getBoardExportDimensions(1_000_000, 1_000_000);
+    expect(result.width).toBeLessThanOrEqual(8_192);
+    expect(result.height).toBeLessThanOrEqual(8_192);
+    expect(result.width * result.height).toBeLessThanOrEqual(16_000_000);
+    expect(result.width).toBe(result.height);
+    expect(result.scale).toBeLessThan(0.01);
+  });
+
+  it("rejects non-finite board bounds instead of returning invalid dimensions", () => {
+    expect(() => getBoardExportDimensions(Number.POSITIVE_INFINITY, 800)).toThrow(/must be finite/);
+  });
+
   it("never creates a zero-sized bitmap", () => {
     expect(getBoardExportDimensions(0, 0)).toEqual({
       width: 2,

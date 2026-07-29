@@ -16,11 +16,20 @@ import type {
 } from "../../types";
 import { getSlideRenderData } from "../slide-render";
 import { orderedPdfScenes } from "./page-order";
+import {
+  getSourcePageUserUnit,
+  getVisibleSourcePageBox,
+  prepareSourcePdfForEmbedding,
+  type PdfSourcePageBox,
+} from "./source-page";
 
 export type PdfExportMode = "expand" | "openboard-fit";
 
 const EXPORT_PADDING = 24;
 const ANNOTATION_SCALE = 2;
+const MAX_ANNOTATION_EDGE = 8_192;
+const MAX_ANNOTATION_PIXELS = 16_000_000;
+const MAX_PDF_PAGE_EDGE_POINTS = 14_400;
 
 function asElements(scene: SerializedScene): ExcalidrawElement[] {
   return scene.elements as unknown as ExcalidrawElement[];
@@ -61,7 +70,35 @@ async function canvasPngBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> {
   return new Uint8Array(await blob.arrayBuffer());
 }
 
-async function renderAnnotations(scene: SerializedScene): Promise<{
+export function getPdfAnnotationExportDimensions(
+  width: number,
+  height: number,
+  pageScale = 1,
+): { width: number; height: number; scale: number } {
+  if (
+    !Number.isFinite(width)
+    || !Number.isFinite(height)
+    || width <= 0
+    || height <= 0
+    || !Number.isFinite(pageScale)
+    || pageScale <= 0
+  ) {
+    throw new Error("PDF annotation bounds must be positive finite numbers.");
+  }
+  const scale = Math.min(
+    ANNOTATION_SCALE * pageScale,
+    MAX_ANNOTATION_EDGE / width,
+    MAX_ANNOTATION_EDGE / height,
+    Math.sqrt(MAX_ANNOTATION_PIXELS) / Math.sqrt(width) / Math.sqrt(height),
+  );
+  return {
+    width: Math.max(1, Math.floor(width * scale)),
+    height: Math.max(1, Math.floor(height * scale)),
+    scale,
+  };
+}
+
+async function renderAnnotations(scene: SerializedScene, pageScale: number): Promise<{
   bytes: Uint8Array;
   bounds: readonly [number, number, number, number];
 } | null> {
@@ -84,13 +121,41 @@ async function renderAnnotations(scene: SerializedScene): Promise<{
       viewBackgroundColor: "#ffffff",
     },
     exportPadding: 0,
-    getDimensions: (width: number, height: number) => ({
-      width: Math.max(1, Math.ceil(width * ANNOTATION_SCALE)),
-      height: Math.max(1, Math.ceil(height * ANNOTATION_SCALE)),
-      scale: ANNOTATION_SCALE,
-    }),
+    getDimensions: (width: number, height: number) => (
+      getPdfAnnotationExportDimensions(width, height, pageScale)
+    ),
   });
   return { bytes: await canvasPngBytes(canvas), bounds };
+}
+
+function validateSourcePageGeometry(
+  rotation: 0 | 90 | 180 | 270,
+  workspaceWidth: number,
+  workspaceHeight: number,
+  sourceBox: PdfSourcePageBox,
+  sourceUserUnit: number,
+  sourceRotation: number,
+): void {
+  const sourceWidth = sourceBox.right - sourceBox.left;
+  const sourceHeight = sourceBox.top - sourceBox.bottom;
+  const expectedWorkspaceWidth = (
+    rotation === 0 || rotation === 180 ? sourceWidth : sourceHeight
+  ) * sourceUserUnit;
+  const expectedWorkspaceHeight = (
+    rotation === 0 || rotation === 180 ? sourceHeight : sourceWidth
+  ) * sourceUserUnit;
+  const widthMismatch = Math.abs(workspaceWidth / expectedWorkspaceWidth - 1);
+  const heightMismatch = Math.abs(workspaceHeight / expectedWorkspaceHeight - 1);
+  const normalizedSourceRotation = ((sourceRotation % 360) + 360) % 360;
+  if (
+    !Number.isFinite(widthMismatch)
+    || !Number.isFinite(heightMismatch)
+    || widthMismatch > 0.005
+    || heightMismatch > 0.005
+    || normalizedSourceRotation !== rotation
+  ) {
+    throw new Error("The saved PDF page geometry no longer matches its original source page.");
+  }
 }
 
 function drawEmbeddedSourcePage(
@@ -100,17 +165,19 @@ function drawEmbeddedSourcePage(
   x: number,
   y: number,
   scale: number,
+  workspaceWidth: number,
+  workspaceHeight: number,
 ): void {
-  const width = embeddedPage.width * scale;
-  const height = embeddedPage.height * scale;
+  const width = (rotation === 0 || rotation === 180 ? workspaceWidth : workspaceHeight) * scale;
+  const height = (rotation === 0 || rotation === 180 ? workspaceHeight : workspaceWidth) * scale;
   if (rotation === 0) {
     targetPage.drawPage(embeddedPage, { x, y, width, height });
   } else if (rotation === 90) {
-    targetPage.drawPage(embeddedPage, { x: x + height, y, width, height, rotate: degrees(90) });
+    targetPage.drawPage(embeddedPage, { x, y: y + width, width, height, rotate: degrees(270) });
   } else if (rotation === 180) {
     targetPage.drawPage(embeddedPage, { x: x + width, y: y + height, width, height, rotate: degrees(180) });
   } else {
-    targetPage.drawPage(embeddedPage, { x, y: y + width, width, height, rotate: degrees(270) });
+    targetPage.drawPage(embeddedPage, { x: x + height, y, width, height, rotate: degrees(90) });
   }
 }
 
@@ -127,7 +194,14 @@ export async function exportAnnotatedPdf(
   for (const id of new Set(scenes.map((scene) => scene.pdfPage.documentId))) {
     const bytes = pdfBytes[id];
     if (!bytes) throw new Error("The project is missing source PDF data.");
-    sourceDocuments.set(id, await PDFDocument.load(bytes, { updateMetadata: false }));
+    const sourceDocument = await PDFDocument.load(bytes, { updateMetadata: false });
+    prepareSourcePdfForEmbedding(
+      sourceDocument,
+      scenes
+        .filter((scene) => scene.pdfPage.documentId === id)
+        .map((scene) => scene.pdfPage.pageIndex),
+    );
+    sourceDocuments.set(id, sourceDocument);
   }
 
   const output = await PDFDocument.create();
@@ -146,17 +220,41 @@ export async function exportAnnotatedPdf(
       : 1;
     const targetWidth = mode === "openboard-fit" ? workspace.width : bounds.width;
     const targetHeight = mode === "openboard-fit" ? workspace.height : bounds.height;
+    if (
+      !Number.isFinite(targetWidth)
+      || !Number.isFinite(targetHeight)
+      || targetWidth <= 0
+      || targetHeight <= 0
+      || targetWidth > MAX_PDF_PAGE_EDGE_POINTS
+      || targetHeight > MAX_PDF_PAGE_EDGE_POINTS
+    ) {
+      throw new Error(
+        mode === "expand"
+          ? "Expanded PDF pages cannot exceed 200 inches. Move distant writing closer or use Fit like OpenBoard."
+          : "The source PDF page is too large to export safely.",
+      );
+    }
     const contentWidth = bounds.width * scale;
     const contentHeight = bounds.height * scale;
     const originX = (targetWidth - contentWidth) / 2 - bounds.minX * scale;
     const originFromTop = (targetHeight - contentHeight) / 2 - bounds.minY * scale;
     const sourceBottom = targetHeight - originFromTop - workspace.height * scale;
     const targetPage = output.addPage([targetWidth, targetHeight]);
+    const sourceBox = getVisibleSourcePageBox(sourcePage);
+    validateSourcePageGeometry(
+      workspace.rotation,
+      workspace.width,
+      workspace.height,
+      sourceBox,
+      getSourcePageUserUnit(sourcePage),
+      sourcePage.getRotation().angle,
+    );
 
-    // pdf-lib defers a failure for valid blank pages until save time. A source
-    // page without a content stream is already represented by the blank target.
+    // pdf-lib defers a failure for valid blank pages until save time. A truly
+    // blank page is already represented by the blank target. Widget- or
+    // annotation-only pages now have vector content after source preparation.
     if (sourcePage.node.Contents()) {
-      const embeddedPage = await output.embedPage(sourcePage);
+      const embeddedPage = await output.embedPage(sourcePage, sourceBox);
       drawEmbeddedSourcePage(
         targetPage,
         embeddedPage,
@@ -164,10 +262,12 @@ export async function exportAnnotatedPdf(
         originX,
         sourceBottom,
         scale,
+        workspace.width,
+        workspace.height,
       );
     }
 
-    const annotations = await renderAnnotations(scene);
+    const annotations = await renderAnnotations(scene, scale);
     if (annotations) {
       const [x1, y1, x2, y2] = annotations.bounds;
       const image = await output.embedPng(annotations.bytes);

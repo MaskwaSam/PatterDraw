@@ -1,9 +1,54 @@
 import { describe, expect, it } from "vitest";
 import { strToU8, zipSync } from "fflate";
-import { createBlankProject } from "../types";
+import { createBlankProject, type SerializedScene } from "../types";
 import { decodeProjectFile, encodeProjectFile } from "./project-file";
 import { sanitizeProject } from "./safety";
 import { MATH_TOOL_CATALOGUE } from "./math-tools/catalogue";
+
+function pdfPageScene(id: string, pageIndex: number): SerializedScene {
+  return {
+    id,
+    name: id,
+    elements: [{
+      id: `${id}-background`,
+      type: "image",
+      fileId: `${id}-file`,
+      x: 0,
+      y: 0,
+      width: 600,
+      height: 800,
+      angle: 0,
+      locked: true,
+      isDeleted: false,
+      opacity: 100,
+      frameId: null,
+      groupIds: [],
+      scale: [1, 1],
+      status: "saved",
+      customData: {
+        classroomRole: "pdf-background",
+        pdfDocumentId: "pdf",
+        pdfPageIndex: pageIndex,
+      },
+    }],
+    appState: {},
+    files: {
+      [`${id}-file`]: {
+        id: `${id}-file`,
+        mimeType: "image/png",
+        dataURL: "data:image/png;base64,AA==",
+      },
+    },
+    pdfPage: {
+      documentId: "pdf",
+      pageIndex,
+      width: 600,
+      height: 800,
+      rotation: 0,
+      backgroundElementId: `${id}-background`,
+    },
+  };
+}
 
 describe("classroom project files", () => {
   it("round-trips project metadata and original PDF bytes", () => {
@@ -68,6 +113,20 @@ describe("classroom project files", () => {
     expect(() => encodeProjectFile(project, { bad: new Uint8Array([1]) })).toThrow(/does not match/);
   });
 
+  it("rejects archives whose expanded entries exceed the project limit", () => {
+    const archive = zipSync({
+      "project.json": strToU8("x".repeat(1_024)),
+    });
+    expect(archive.byteLength).toBeLessThan(1_024);
+    expect(() => decodeProjectFile(archive, 512)).toThrow(/expands beyond/);
+  });
+
+  it("refuses to create a project whose complete uncompressed contents exceed the limit", () => {
+    const project = createBlankProject();
+    project.title = "A".repeat(8_192);
+    expect(() => encodeProjectFile(project, {}, 1_024)).toThrow(/too large to save safely/);
+  });
+
   it("round-trips an explicit reordered PDF page list", () => {
     const project = createBlankProject();
     const bytes = new Uint8Array([37, 80, 68, 70]);
@@ -80,14 +139,7 @@ describe("classroom project files", () => {
       archivePath: "documents/pdf.pdf",
     };
     for (const [id, pageIndex] of [["page-1", 0], ["page-2", 1]] as const) {
-      project.scenes[id] = {
-        id,
-        name: id,
-        elements: [],
-        appState: {},
-        files: {},
-        pdfPage: { documentId: "pdf", pageIndex, width: 600, height: 800, rotation: 0, backgroundElementId: `${id}-background` },
-      };
+      project.scenes[id] = pdfPageScene(id, pageIndex);
     }
     project.pdfPageOrder = ["page-2", "page-1"];
     const decoded = decodeProjectFile(encodeProjectFile(project, { pdf: bytes }));
@@ -105,14 +157,7 @@ describe("classroom project files", () => {
       pageCount: 1,
       archivePath: "documents/pdf.pdf",
     };
-    project.scenes.page = {
-      id: "page",
-      name: "Legacy page",
-      elements: [],
-      appState: {},
-      files: {},
-      pdfPage: { documentId: "pdf", pageIndex: 0, width: 600, height: 800, rotation: 0, backgroundElementId: "page-background" },
-    };
+    project.scenes.page = { ...pdfPageScene("page", 0), name: "Legacy page" };
     delete project.pdfPageOrder;
     const archive = zipSync({
       "project.json": strToU8(JSON.stringify(project)),

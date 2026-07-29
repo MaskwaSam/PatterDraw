@@ -308,7 +308,7 @@ button { color: inherit; }
   grid-template-columns: 18px minmax(0, 1fr) 16px;
   align-items: start;
   gap: 6px;
-  margin: 0 0 12px;
+  margin: 0 0 3px;
   padding: 5px 4px;
   border: 0;
   border-radius: 8px;
@@ -362,6 +362,29 @@ button { color: inherit; }
 }
 .slide-thumbnail-delete svg { width: 15px; height: 15px; }
 .drag-handle { align-self: center; width: 15px; height: 20px; color: #8590a3; }
+.slide-thumbnail-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  margin: 0 4px 12px 28px;
+}
+.slide-thumbnail-actions button {
+  width: 27px;
+  height: 27px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #647086;
+  cursor: pointer;
+}
+.slide-thumbnail-actions button:hover:not(:disabled) { border-color: #cbd3df; background: #fff; color: #2e3b53; }
+.slide-thumbnail-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.slide-thumbnail-actions button:disabled { opacity: .3; cursor: default; }
+.slide-thumbnail-actions svg { width: 15px; height: 15px; }
 .page-thumbnail {
   width: 100%;
   display: grid;
@@ -607,6 +630,8 @@ button { color: inherit; }
 }
 .editor-host .excalidraw [data-testid="main-menu-trigger"] { display: none !important; }
 .editor-host .excalidraw button[data-testid="toolbar-embeddable"],
+.editor-host .excalidraw button[title^="Link"],
+.editor-host .excalidraw .excalidraw-hyperlinkContainer,
 .editor-host .excalidraw .dropdown-menu-container > div[style*="font-weight: 600"],
 .editor-host .excalidraw .layer-ui__wrapper__footer-right .help-icon,
 .editor-host .excalidraw .sidebar-trigger__label-element:has(> .default-sidebar-trigger),

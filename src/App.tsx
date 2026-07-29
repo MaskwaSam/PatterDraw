@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import {
   CaptureUpdateAction,
   convertToExcalidrawElements,
@@ -41,6 +41,7 @@ import {
 } from "./components/LassoOverlay";
 import { EquationDialog } from "./components/EquationDialog";
 import { MermaidDialog } from "./components/MermaidDialog";
+import { useModalDialog } from "./components/useModalDialog";
 import { ScreenshotCaptureOverlay } from "./components/ScreenshotCaptureOverlay";
 import {
   SCREENSHOT_DRAG_MIME,
@@ -95,6 +96,7 @@ import {
 } from "./lib/screenshots/persistence";
 import type { RenderedLatex } from "./lib/latex/render-latex";
 import type { RenderedMermaid } from "./lib/mermaid/safe-mermaid";
+import { canonicalizePdfBackground } from "./lib/pdf/background";
 import { importPdf } from "./lib/pdf/import-pdf";
 import { createBlankPdfFile } from "./lib/pdf/create-blank-page";
 import {
@@ -122,8 +124,7 @@ import {
   DEFAULT_SLIDE_MORPH_DURATION_MS,
   normalizeSlideMorphDurationMs,
 } from "./lib/slide-transition";
-import { sanitizeProject, sanitizeScene, sanitizeWebLink } from "./lib/safety";
-import { openExternalWebLink } from "./lib/offline-network";
+import { MAX_PROJECT_BYTES, sanitizeProject, sanitizeScene } from "./lib/safety";
 import {
   activateSlideFrameTool,
   addBlankSlideFrame,
@@ -352,6 +353,7 @@ export default function App() {
   const [isProbabilitySpinning, setIsProbabilitySpinning] = useState(false);
   const [spinnerPointerAnimations, setSpinnerPointerAnimations] = useState<SpinnerPointerAnimation[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+  const insertTriggerRef = useRef<HTMLButtonElement>(null);
   const exportOptionsTriggerRef = useRef<HTMLButtonElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
   const editorHostRef = useRef<HTMLDivElement>(null);
@@ -380,6 +382,52 @@ export default function App() {
   const probabilityRandomizingRef = useRef(false);
   const lassoActiveRef = useRef(false);
   const preparedLassoSelectionRef = useRef<LassoInitialSelection | null>(null);
+  const autosaveSnapshotRef = useRef<LoadedClassroomProject | null>(null);
+  const autosaveDirtyRef = useRef(false);
+  const autosaveSavingRef = useRef(false);
+  const autosaveTimerRef = useRef<number | null>(null);
+  const autosaveLastQueuedAtRef = useRef(0);
+  const autosaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const closeExportDialog = useCallback(() => setExportOpen(false), []);
+  const shouldRestoreExportDialogFocus = useCallback(
+    () => !nativeImageExportOpenRef.current,
+    [],
+  );
+  const exportDialogRef = useModalDialog<HTMLElement>({
+    onClose: closeExportDialog,
+    open: exportOpen,
+    restoreFocus: shouldRestoreExportDialogFocus,
+    returnFocusRef: exportOptionsTriggerRef,
+  });
+  const flushAutosave = useCallback(() => {
+    const snapshot = autosaveSnapshotRef.current;
+    if (!snapshot || !autosaveDirtyRef.current) return;
+    if (autosaveTimerRef.current !== null) {
+      window.clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+
+    autosaveDirtyRef.current = false;
+    autosaveSavingRef.current = true;
+    autosaveLastQueuedAtRef.current = Date.now();
+    setSaveStatus("saving");
+    const queuedSave = autosaveQueueRef.current
+      .catch(() => undefined)
+      .then(() => saveAutosave(snapshot.project, snapshot.pdfBytes));
+    autosaveQueueRef.current = queuedSave;
+    queuedSave.then(
+      () => {
+        if (autosaveQueueRef.current !== queuedSave) return;
+        autosaveSavingRef.current = false;
+        if (!autosaveDirtyRef.current) setSaveStatus("saved");
+      },
+      () => {
+        if (autosaveQueueRef.current !== queuedSave) return;
+        autosaveSavingRef.current = false;
+        setSaveStatus("error");
+      },
+    );
+  }, []);
 
   const hideConstrainedFramePreview = useCallback(() => {
     if (frameDragPreviewRef.current) frameDragPreviewRef.current.hidden = true;
@@ -496,16 +544,78 @@ export default function App() {
     return () => window.removeEventListener("keydown", toggleChrome, true);
   }, [presentation]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!project) return;
+    autosaveSnapshotRef.current = { project, pdfBytes };
+    autosaveDirtyRef.current = true;
     setSaveStatus("saving");
-    const timer = window.setTimeout(() => {
-      saveAutosave(project, pdfBytes)
-        .then(() => setSaveStatus("saved"))
-        .catch(() => setSaveStatus("error"));
-    }, 700);
-    return () => window.clearTimeout(timer);
-  }, [project, pdfBytes]);
+    if (autosaveTimerRef.current !== null) window.clearTimeout(autosaveTimerRef.current);
+
+    const elapsed = Date.now() - autosaveLastQueuedAtRef.current;
+    if (!autosaveSavingRef.current && elapsed >= 700) {
+      flushAutosave();
+      return;
+    }
+    autosaveTimerRef.current = window.setTimeout(flushAutosave, Math.max(0, 700 - elapsed));
+    return () => {
+      if (autosaveTimerRef.current !== null) {
+        window.clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+    };
+  }, [project, pdfBytes, flushAutosave]);
+
+  useEffect(() => {
+    const flushAfterInteraction = () => {
+      if (autosaveTimerRef.current !== null) window.clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = window.setTimeout(flushAutosave, 0);
+    };
+    const flushAfterMutationKey = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      const target = event.target;
+      const textEntry = (
+        target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || (target instanceof HTMLElement && target.isContentEditable)
+      );
+      if (
+        textEntry
+        || key === "delete"
+        || key === "backspace"
+        || key === "enter"
+        || key === "escape"
+        || key.startsWith("arrow")
+        || ((event.ctrlKey || event.metaKey) && (key === "z" || key === "y"))
+      ) {
+        flushAfterInteraction();
+      }
+    };
+    const flushWhenHidden = () => {
+      if (document.visibilityState === "hidden") flushAutosave();
+    };
+    const flushBeforePageExit = (event: BeforeUnloadEvent) => {
+      if (!autosaveDirtyRef.current && !autosaveSavingRef.current) return;
+      flushAutosave();
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const flushOnPageHide = () => flushAutosave();
+    window.addEventListener("pointerup", flushAfterInteraction);
+    window.addEventListener("click", flushAfterInteraction);
+    window.addEventListener("keyup", flushAfterMutationKey);
+    document.addEventListener("visibilitychange", flushWhenHidden);
+    window.addEventListener("beforeunload", flushBeforePageExit);
+    window.addEventListener("pagehide", flushOnPageHide);
+    return () => {
+      window.removeEventListener("pointerup", flushAfterInteraction);
+      window.removeEventListener("click", flushAfterInteraction);
+      window.removeEventListener("keyup", flushAfterMutationKey);
+      document.removeEventListener("visibilitychange", flushWhenHidden);
+      window.removeEventListener("beforeunload", flushBeforePageExit);
+      window.removeEventListener("pagehide", flushOnPageHide);
+      if (autosaveTimerRef.current !== null) window.clearTimeout(autosaveTimerRef.current);
+    };
+  }, [flushAutosave]);
 
   const runSlideFrameAction = useCallback((action: SlideFrameAction) => {
     if (!api) return;
@@ -632,7 +742,7 @@ export default function App() {
         element.type === "embeddable" ||
         element.type === "iframe" ||
         element.type === "magicframe" ||
-        (!!element.link && !sanitizeWebLink(element.link)),
+        !!element.link,
     );
     if (containsBlockedContent) {
       const safeElements = elements
@@ -642,18 +752,27 @@ export default function App() {
             element.type !== "iframe" &&
             element.type !== "magicframe",
         )
-        .map((element) => element.link && !sanitizeWebLink(element.link)
+        .map((element) => element.link
           ? { ...element, link: null }
           : element) as readonly ExcalidrawElement[];
       switchingSceneRef.current = true;
       api?.updateScene({ elements: safeElements, captureUpdate: CaptureUpdateAction.NEVER });
-      api?.setToast({ message: "Only HTTP and HTTPS links are allowed. Web embeds remain disabled." });
+      api?.setToast({ message: "External links and web embeds are disabled in PatterDraw." });
       window.requestAnimationFrame(() => { switchingSceneRef.current = false; });
       return;
     }
     const sceneId = activeSceneIdRef.current;
     if (!sceneId) return;
-    const detachedElements = detachElementsFromSlideFrames(elements);
+    const persistedScene = currentSceneRef.current?.id === sceneId
+      ? currentSceneRef.current
+      : null;
+    const backgroundSafeElements = persistedScene
+      ? canonicalizePdfBackground(
+        persistedScene,
+        elements as unknown as readonly Record<string, unknown>[],
+      ) as unknown as readonly ExcalidrawElement[]
+      : elements;
+    const detachedElements = detachElementsFromSlideFrames(backgroundSafeElements);
     setProject((current) => {
       if (!current || !current.scenes[sceneId]) return current;
       const slideOrder = reconcileSlides(sceneId, detachedElements, current.slideOrder);
@@ -678,7 +797,16 @@ export default function App() {
       slideDetachmentFrameRef.current = window.requestAnimationFrame(() => {
         if (switchingSceneRef.current || activeSceneIdRef.current !== sceneId) return;
         const liveElements = api.getSceneElements();
-        const liveDetachedElements = detachElementsFromSlideFrames(liveElements);
+        const liveScene = currentSceneRef.current?.id === sceneId
+          ? currentSceneRef.current
+          : null;
+        const liveBackgroundSafeElements = liveScene
+          ? canonicalizePdfBackground(
+            liveScene,
+            liveElements as unknown as readonly Record<string, unknown>[],
+          ) as unknown as readonly ExcalidrawElement[]
+          : liveElements;
+        const liveDetachedElements = detachElementsFromSlideFrames(liveBackgroundSafeElements);
         if (liveDetachedElements === liveElements) return;
         api.updateScene({
           elements: liveDetachedElements,
@@ -702,6 +830,13 @@ export default function App() {
   }, []);
 
   const openLoadedProject = useCallback(async (loaded: LoadedClassroomProject) => {
+    autosaveDirtyRef.current = false;
+    if (autosaveTimerRef.current !== null) {
+      window.clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+    await autosaveQueueRef.current.catch(() => undefined);
+    autosaveSavingRef.current = false;
     await clearAutosave(project || undefined);
     setPdfBytes(loaded.pdfBytes);
     const framesVisible = loaded.project.slideFramesVisible !== false;
@@ -722,7 +857,11 @@ export default function App() {
     setErrorMessage(null);
     setBusyMessage(`Opening ${file.name}…`);
     try {
-      if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+      const isPdfFile = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+      if (!isPdfFile && file.size > MAX_PROJECT_BYTES) {
+        throw new Error("The selected project is too large to open safely.");
+      }
+      if (isPdfFile) {
         const imported = await importPdf(file);
         const scenes = Object.fromEntries(imported.scenes.map((scene) => [scene.id, scene]));
         const importedPageIds = imported.scenes.map((scene) => scene.id);
@@ -2167,16 +2306,18 @@ export default function App() {
     return true;
   }, [api]);
 
-  const handleLinkOpen = useCallback<NonNullable<ExcalidrawProps["onLinkOpen"]>>((element, event) => {
+  const handleEditorKeyDownCapture = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      event.stopPropagation();
+      event.nativeEvent.stopImmediatePropagation();
+      api?.setToast({ message: "External links are disabled in PatterDraw." });
+    }
+  }, [api]);
+
+  const handleLinkOpen = useCallback<NonNullable<ExcalidrawProps["onLinkOpen"]>>((_element, event) => {
     event.preventDefault();
-    const link = sanitizeWebLink(element.link);
-    if (!link) {
-      api?.setToast({ message: "Only HTTP and HTTPS links can be opened." });
-      return;
-    }
-    if (!openExternalWebLink(link)) {
-      api?.setToast({ message: "The browser blocked this link. Allow pop-ups to open it." });
-    }
+    api?.setToast({ message: "External links are disabled in PatterDraw." });
   }, [api]);
 
   const renderConstrainedFramePreview = useCallback((bounds: SlideFrameBounds) => {
@@ -2334,6 +2475,7 @@ export default function App() {
           onMermaid={openMermaidEditor}
           onExportAll={() => void runFullBoardExport()}
           onExportOptions={() => setExportOpen(true)}
+          insertButtonRef={insertTriggerRef}
           exportOptionsButtonRef={exportOptionsTriggerRef}
           mode={workspaceMode}
           onModeChange={changeWorkspaceMode}
@@ -2413,6 +2555,7 @@ export default function App() {
         <div
           ref={editorHostRef}
           className={`editor-host ${isScreenshotCaptureActive ? "is-screenshot-capture-active" : ""} ${isSlideFrameDrawingActive ? "is-slide-frame-drawing-active" : ""}`}
+          onKeyDownCapture={handleEditorKeyDownCapture}
           onPointerDownCapture={handleEditorPointerDownCapture}
           onDragOver={handleScreenshotDragOver}
           onDrop={handleScreenshotDrop}
@@ -2615,8 +2758,8 @@ export default function App() {
         onChange={(event) => event.target.files?.[0] && void handleFile(event.target.files[0])}
       />
       {exportOpen && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setExportOpen(false)}>
-          <section className="export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-backdrop" role="presentation" onMouseDown={closeExportDialog}>
+          <section ref={exportDialogRef} className="export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title" tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
             <h2 id="export-title">More exports</h2>
             <p>Export the current board, presentation frames, or imported PDF pages.</p>
             <button type="button" onClick={openNativeImageExport} disabled={!api?.getSceneElements().length}>
@@ -2636,7 +2779,7 @@ export default function App() {
             <button type="button" onClick={() => void runPdfExport("openboard-fit")} disabled={!Object.keys(project.pdfDocuments).length}>
               <strong>Annotated PDF — fit like OpenBoard</strong><span>Keep original paper size and scale all visible content to fit.</span>
             </button>
-            <button className="dialog-cancel" type="button" onClick={() => setExportOpen(false)}>Cancel</button>
+            <button className="dialog-cancel" type="button" onClick={closeExportDialog}>Cancel</button>
           </section>
         </div>
       )}
@@ -2646,6 +2789,7 @@ export default function App() {
           editing={!!equationEditor.targetId}
           onCancel={() => setEquationEditor(null)}
           onSubmit={insertEquation}
+          returnFocusRef={insertTriggerRef}
         />
       )}
       {mermaidEditor && (
@@ -2654,6 +2798,7 @@ export default function App() {
           editing={!!mermaidEditor.targetDiagramId}
           onCancel={() => setMermaidEditor(null)}
           onSubmit={insertMermaid}
+          returnFocusRef={insertTriggerRef}
         />
       )}
       {isMathToolsOpen && (

@@ -5,17 +5,26 @@ import path from "node:path";
 import process from "node:process";
 
 const root = path.resolve(import.meta.dirname, "..");
-const scanRoots = [path.join(root, "src"), path.join(root, "index.html")];
+const scanRoots = [
+  path.join(root, "src"),
+  path.join(root, "index.html"),
+  path.join(root, "vite.config.ts"),
+];
 const sourceExtensions = new Set([".ts", ".tsx", ".js", ".mjs", ".html"]);
 const rules = [
   [/<script\b[^>]*\bsrc\s*=\s*["']https?:\/\//gi, "remote script source"],
   [/<link\b[^>]*\bhref\s*=\s*["']https?:\/\//gi, "remote stylesheet or preload"],
+  [/<img\b[^>]*\bsrc\s*=\s*["']https?:\/\//gi, "remote image source"],
   [/\bfetch\s*\(\s*["'`]https?:\/\//g, "remote fetch"],
   [/\bimport\s*\(\s*["'`]https?:\/\//g, "remote dynamic import"],
+  [/\bnew\s+(?:Worker|SharedWorker)\s*\(\s*["'`]https?:\/\//g, "remote worker"],
+  [/\bserviceWorker\.register\s*\(\s*["'`]https?:\/\//g, "remote service worker"],
   [/\bnew\s+(?:WebSocket|EventSource)\s*\(/g, "live network channel"],
   [/\bsendBeacon\s*\(/g, "telemetry beacon"],
   [/\b(?:gtag|plausible|posthog|mixpanel|amplitude)\s*\(/gi, "analytics call"],
-  [/<iframe\b/gi, "iframe markup"],
+  [/<(?:iframe|object|embed)\b/gi, "embedded web-content markup"],
+  [/\bwindow\.open\s*\(\s*["'`]https?:\/\//g, "external window navigation"],
+  [/\blocation\.(?:assign|replace)\s*\(\s*["'`]https?:\/\//g, "external location navigation"],
   [/LiveCollaborationTrigger/g, "collaboration UI"],
   [/onCollabButtonClick/g, "collaboration callback"],
   [/useHandleLibrary/g, "URL-driven public library installation"],
@@ -56,7 +65,40 @@ if (!mainSource.includes("installLocalExcalidrawAssets()")) {
   findings.push("src/main.tsx:1 local Excalidraw asset path is not installed");
 }
 const indexSource = await readFile(path.join(root, "index.html"), "utf8");
-if (!indexSource.includes("connect-src 'self'") || !indexSource.includes("frame-src 'none'") || !indexSource.includes("worker-src 'self' blob:")) {
+const cspMatch = indexSource.match(
+  /<meta\s+http-equiv=["']Content-Security-Policy["'][^>]*\scontent="([^"]+)"/i,
+);
+const expectedCsp = new Map([
+  ["default-src", ["'self'", "blob:", "data:"]],
+  ["script-src", ["'self'", "'wasm-unsafe-eval'"]],
+  ["worker-src", ["'self'", "blob:"]],
+  ["style-src", ["'self'", "'unsafe-inline'"]],
+  ["img-src", ["'self'", "blob:", "data:"]],
+  ["font-src", ["'self'", "data:"]],
+  ["connect-src", ["'self'"]],
+  ["media-src", ["'self'", "blob:", "data:"]],
+  ["frame-src", ["'none'"]],
+  ["object-src", ["'none'"]],
+  ["base-uri", ["'none'"]],
+  ["form-action", ["'self'"]],
+]);
+const actualCsp = new Map(
+  (cspMatch?.[1] || "")
+    .split(";")
+    .map((directive) => directive.trim())
+    .filter(Boolean)
+    .map((directive) => {
+      const [name, ...tokens] = directive.split(/\s+/);
+      return [name, tokens];
+    }),
+);
+const cspMatches = actualCsp.size === expectedCsp.size
+  && [...expectedCsp].every(([name, expectedTokens]) => {
+    const actualTokens = actualCsp.get(name);
+    return actualTokens?.length === expectedTokens.length
+      && expectedTokens.every((token) => actualTokens.includes(token));
+  });
+if (!cspMatches) {
   findings.push("index.html:1 restrictive CSP is missing");
 }
 const packageSource = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
@@ -83,6 +125,17 @@ if (!latexSource.includes('"[-]": ["autoload", "require"]') || !latexSource.incl
 const appSource = await readFile(path.join(root, "src/App.tsx"), "utf8");
 if (!appSource.includes("aiEnabled={false}") || !appSource.includes("MermaidDialog")) {
   findings.push("src/App.tsx:1 AI must stay disabled and the safe Mermaid dialog must stay installed");
+}
+if (appSource.includes("openExternalWebLink") || !appSource.includes("External links are disabled")) {
+  findings.push("src/App.tsx:1 external canvas links must remain blocked");
+}
+const safetySource = await readFile(path.join(root, "src/lib/safety.ts"), "utf8");
+if (
+  !safetySource.includes("embeddedImageDataUrl")
+  || safetySource.includes('candidate.startsWith("blob:")')
+  || !safetySource.includes("next.link = null")
+) {
+  findings.push("src/lib/safety.ts:1 imported links and non-embedded image sources must remain blocked");
 }
 const stylesSource = await readFile(path.join(root, "src/styles.css"), "utf8");
 for (const selector of [

@@ -1,6 +1,8 @@
 import type { ClassroomProject, SerializedScene, SlideFrameAspectRatio } from "../types";
 import { sanitizeClassroomMathToolMetadata } from "./math-tools/types";
+import { canonicalizePdfBackground } from "./pdf/background";
 import { reconcilePdfPageOrder } from "./pdf/page-order";
+import { MAX_PDF_PAGE_EDGE_POINTS } from "./pdf/raster-limits";
 import {
   MAX_SLIDE_MORPH_DURATION_MS,
   MIN_SLIDE_MORPH_DURATION_MS,
@@ -18,7 +20,8 @@ export const MAX_PROJECT_BYTES = 150 * 1024 * 1024;
 export const MAX_PDF_BYTES = 75 * 1024 * 1024;
 export const MAX_PDF_PAGES = 250;
 
-const safeDataUrl = /^data:image\/(?:png|jpe?g|gif|webp|svg\+xml)(?:;[^,]*)?,/i;
+const embeddedImageDataUrl = /^data:image\/(?:png|jpe?g|gif|webp|svg\+xml);base64,([a-z\d+/]*={0,2})$/i;
+const MAX_EMBEDDED_IMAGE_SOURCE_LENGTH = Math.ceil(MAX_PROJECT_BYTES * 4 / 3) + 128;
 
 export function normalizeSlideFrameAspectRatio(
   value: ClassroomProject["slideFrameAspectRatio"],
@@ -28,49 +31,12 @@ export function normalizeSlideFrameAspectRatio(
   return legacyWidescreen === true ? "16:9" : "freeform";
 }
 
-export function isRemoteUrl(value: unknown): boolean {
-  if (typeof value !== "string") return false;
-  const candidate = value.trim();
-  return (
-    candidate.startsWith("//") ||
-    candidate.startsWith("\\\\") ||
-    /^[a-z][a-z\d+.-]*:/i.test(candidate)
-  );
-}
-
-export function sanitizeWebLink(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const candidate = value.trim();
-  if (!candidate) return null;
-  try {
-    const url = new URL(candidate);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
-  } catch {
-    return null;
-  }
-}
-
 export function isSafeLocalImageSource(value: unknown): value is string {
   if (typeof value !== "string") return false;
   const candidate = value.trim();
-  if (!candidate) return false;
-  if (safeDataUrl.test(candidate) || candidate.startsWith("blob:")) return true;
-  if (isRemoteUrl(candidate) || candidate.startsWith("/") || candidate.startsWith("\\")) {
-    return false;
-  }
-
-  let decoded = candidate;
-  for (let pass = 0; pass < 3; pass += 1) {
-    try {
-      const next = decodeURIComponent(decoded);
-      if (next === decoded) break;
-      decoded = next;
-    } catch {
-      return false;
-    }
-  }
-
-  return !decoded.split(/[\\/]+/).some((part) => part === "." || part === "..");
+  if (!candidate || candidate.length > MAX_EMBEDDED_IMAGE_SOURCE_LENGTH) return false;
+  const match = embeddedImageDataUrl.exec(candidate);
+  return !!match && match[1].length > 0 && match[1].length % 4 === 0;
 }
 
 function clone<T>(value: T): T {
@@ -83,7 +49,7 @@ export function sanitizeScene(scene: SerializedScene): SerializedScene {
     .filter((element) => element.type !== "embeddable" && element.type !== "iframe" && element.type !== "magicframe")
     .map((element) => {
       const next = { ...element };
-      if ("link" in next) next.link = sanitizeWebLink(next.link);
+      if ("link" in next) next.link = null;
       if ("customData" in next && next.customData && typeof next.customData === "object") {
         const customData = { ...(next.customData as Record<string, unknown>) };
         delete customData.url;
@@ -112,8 +78,19 @@ export function sanitizeScene(scene: SerializedScene): SerializedScene {
   };
 
   safe.files = Object.fromEntries(
-    Object.entries(safe.files).filter(([, file]) => isSafeLocalImageSource(file.dataURL)),
+    Object.entries(safe.files).filter(([, file]) => (
+      !!file
+      && typeof file === "object"
+      && isSafeLocalImageSource(file.dataURL)
+    )),
   );
+  safe.elements = safe.elements.filter((element) => (
+    element.type !== "image"
+    || (
+      typeof element.fileId === "string"
+      && Object.hasOwn(safe.files, element.fileId)
+    )
+  ));
   return safe;
 }
 
@@ -123,6 +100,9 @@ export function sanitizeProject(project: ClassroomProject): ClassroomProject {
   safe.scenes = Object.fromEntries(
     Object.entries(safe.scenes).map(([id, scene]) => [id, sanitizeScene(scene)]),
   );
+  for (const scene of Object.values(safe.scenes)) {
+    scene.elements = canonicalizePdfBackground(scene, scene.elements);
+  }
   // v1 projects historically used slideOrder as the only classification. Tag
   // those exact frames, detach their children in place, and keep the schema.
   for (const [sceneId, scene] of Object.entries(safe.scenes)) {
@@ -178,6 +158,12 @@ export function assertSafeProject(project: ClassroomProject): void {
   if (!project || typeof project !== "object") throw new Error("Project must be an object.");
   if (project.schemaVersion !== 1) throw new Error("Unsupported classroom project version.");
   if (!project.id || !project.activeSceneId) throw new Error("Project identity is missing.");
+  if (!project.scenes || typeof project.scenes !== "object" || Array.isArray(project.scenes)) {
+    throw new Error("Project scenes must be an object.");
+  }
+  if (!project.pdfDocuments || typeof project.pdfDocuments !== "object" || Array.isArray(project.pdfDocuments)) {
+    throw new Error("Project PDF metadata must be an object.");
+  }
   if (!project.scenes[project.activeSceneId]) throw new Error("The active scene is missing.");
   if (!Array.isArray(project.slideOrder)) throw new Error("Slide order must be a list.");
   if (project.slideOrder.some((slide) => (
@@ -230,12 +216,66 @@ export function assertSafeProject(project: ClassroomProject): void {
     }
   }
 
-  for (const scene of Object.values(project.scenes)) {
-    if (!scene.id || !Array.isArray(scene.elements)) throw new Error("A scene is malformed.");
+  const slideIds = new Set<string>();
+  const slideFrames = new Set<string>();
+  for (const slide of project.slideOrder) {
+    if (
+      !slide
+      || typeof slide !== "object"
+      || typeof slide.id !== "string"
+      || !slide.id
+      || typeof slide.sceneId !== "string"
+      || typeof slide.frameId !== "string"
+      || typeof slide.title !== "string"
+    ) {
+      throw new Error("A slide record is malformed.");
+    }
+    const scene = project.scenes[slide.sceneId];
+    if (!scene) throw new Error("A slide references a missing scene.");
+    if (slideIds.has(slide.id)) throw new Error("Slide order contains a duplicate slide identity.");
+    const frameKey = `${slide.sceneId}\u0000${slide.frameId}`;
+    if (slideFrames.has(frameKey)) throw new Error("Slide order contains a duplicate frame.");
+    if (!scene.elements.some((element) => element?.id === slide.frameId && element.type === "frame")) {
+      throw new Error("A slide references a missing frame.");
+    }
+    slideIds.add(slide.id);
+    slideFrames.add(frameKey);
+  }
+
+  for (const [sceneKey, scene] of Object.entries(project.scenes)) {
+    if (
+      !scene
+      || typeof scene !== "object"
+      || !scene.id
+      || scene.id !== sceneKey
+      || !Array.isArray(scene.elements)
+      || !scene.appState
+      || typeof scene.appState !== "object"
+      || Array.isArray(scene.appState)
+      || !scene.files
+      || typeof scene.files !== "object"
+      || Array.isArray(scene.files)
+    ) {
+      throw new Error("A scene is malformed.");
+    }
+    if (scene.elements.some((element) => !element || typeof element !== "object" || Array.isArray(element))) {
+      throw new Error("A scene element is malformed.");
+    }
     if (scene.elements.some((element) => element.type === "embeddable" || element.type === "iframe" || element.type === "magicframe")) {
       throw new Error("Web embeds and generated frames are not supported in classroom projects.");
     }
+    const elementIds = new Set<string>();
     for (const element of scene.elements) {
+      if (
+        typeof element.id !== "string"
+        || !element.id
+        || typeof element.type !== "string"
+        || !element.type
+      ) {
+        throw new Error("A scene element identity is malformed.");
+      }
+      if (elementIds.has(element.id)) throw new Error("A scene contains a duplicate element identity.");
+      elementIds.add(element.id);
       const customData = element.customData;
       if (customData && typeof customData === "object" && "classroomMathTool" in customData) {
         if (!sanitizeClassroomMathToolMetadata((customData as Record<string, unknown>).classroomMathTool)) {
@@ -262,18 +302,58 @@ export function assertSafeProject(project: ClassroomProject): void {
       if (!Number.isFinite(scene.pdfPage.width) || scene.pdfPage.width <= 0 || !Number.isFinite(scene.pdfPage.height) || scene.pdfPage.height <= 0) {
         throw new Error("A PDF page has invalid dimensions.");
       }
+      if (
+        scene.pdfPage.width > MAX_PDF_PAGE_EDGE_POINTS
+        || scene.pdfPage.height > MAX_PDF_PAGE_EDGE_POINTS
+      ) {
+        throw new Error("A PDF page has unsupported dimensions.");
+      }
       if (![0, 90, 180, 270].includes(scene.pdfPage.rotation) || !scene.pdfPage.backgroundElementId) {
         throw new Error("A PDF page has malformed workspace metadata.");
+      }
+      const backgrounds = scene.elements.filter(
+        (element) => element.id === scene.pdfPage?.backgroundElementId,
+      );
+      if (
+        backgrounds.length !== 1
+        || backgrounds[0].type !== "image"
+        || typeof backgrounds[0].fileId !== "string"
+      ) {
+        throw new Error("A PDF page is missing its local background image.");
+      }
+      const backgroundFile = scene.files[backgrounds[0].fileId];
+      if (!backgroundFile || !isSafeLocalImageSource(backgroundFile.dataURL)) {
+        throw new Error("A PDF page background has missing or unsafe local image data.");
       }
     }
   }
 
-  for (const document of Object.values(project.pdfDocuments)) {
-    if (document.mimeType !== "application/pdf") throw new Error("PDF metadata is malformed.");
+  const archivePaths = new Set<string>();
+  for (const [documentKey, document] of Object.entries(project.pdfDocuments)) {
+    if (
+      !document
+      || typeof document !== "object"
+      || document.id !== documentKey
+      || typeof document.name !== "string"
+      || !document.name
+      || document.mimeType !== "application/pdf"
+    ) {
+      throw new Error("PDF metadata is malformed.");
+    }
+    if (!Number.isSafeInteger(document.byteLength) || document.byteLength <= 0) {
+      throw new Error("PDF byte length is malformed.");
+    }
     if (document.byteLength > MAX_PDF_BYTES) throw new Error("An imported PDF is too large.");
+    if (!Number.isSafeInteger(document.pageCount) || document.pageCount <= 0) {
+      throw new Error("PDF page count is malformed.");
+    }
     if (document.pageCount > MAX_PDF_PAGES) throw new Error("An imported PDF has too many pages.");
     if (!/^documents\/[a-zA-Z0-9_-]+\.pdf$/.test(document.archivePath)) {
       throw new Error("A PDF archive path is unsafe.");
     }
+    if (archivePaths.has(document.archivePath)) {
+      throw new Error("PDF metadata contains a duplicate archive path.");
+    }
+    archivePaths.add(document.archivePath);
   }
 }

@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { exportToBlob } from "@excalidraw/excalidraw";
 import type { RenderedMermaid } from "../lib/mermaid/safe-mermaid";
+import { useModalDialog } from "./useModalDialog";
 
 const MERMAID_EXAMPLE = `flowchart LR
   A[Question] --> B{Ready?}
@@ -12,15 +13,22 @@ interface MermaidDialogProps {
   editing: boolean;
   onCancel: () => void;
   onSubmit: (rendered: RenderedMermaid) => void;
+  returnFocusRef?: RefObject<HTMLElement>;
 }
 
-export function MermaidDialog({ initialSource, editing, onCancel, onSubmit }: MermaidDialogProps) {
+export function MermaidDialog({ initialSource, editing, onCancel, onSubmit, returnFocusRef }: MermaidDialogProps) {
   const [source, setSource] = useState(initialSource || MERMAID_EXAMPLE);
   const [preview, setPreview] = useState<RenderedMermaid | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [rendering, setRendering] = useState(false);
   const requestRef = useRef(0);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const dialogRef = useModalDialog<HTMLElement>({
+    initialFocusRef: textareaRef,
+    onClose: onCancel,
+    returnFocusRef,
+  });
 
   useEffect(() => () => {
     requestRef.current += 1;
@@ -80,10 +88,12 @@ export function MermaidDialog({ initialSource, editing, onCancel, onSubmit }: Me
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onCancel}>
       <section
+        ref={dialogRef}
         className="mermaid-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="mermaid-title"
+        tabIndex={-1}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="dialog-heading">
@@ -97,6 +107,7 @@ export function MermaidDialog({ initialSource, editing, onCancel, onSubmit }: Me
           <div className="mermaid-source-panel">
             <label htmlFor="mermaid-source">Mermaid source</label>
             <textarea
+              ref={textareaRef}
               id="mermaid-source"
               value={source}
               rows={15}
