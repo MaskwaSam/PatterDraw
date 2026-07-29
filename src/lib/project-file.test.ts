@@ -51,7 +51,7 @@ function pdfPageScene(id: string, pageIndex: number): SerializedScene {
 }
 
 describe("classroom project files", () => {
-  it("round-trips project metadata and original PDF bytes", () => {
+  it("round-trips project metadata and original PDF bytes", async () => {
     const project = createBlankProject(new Date("2026-07-12T12:00:00.000Z"));
     const documentId = "pdf-1";
     const bytes = new Uint8Array([37, 80, 68, 70, 45, 49, 46, 55]);
@@ -63,44 +63,45 @@ describe("classroom project files", () => {
       pageCount: 1,
       archivePath: `documents/${documentId}.pdf`,
     };
-    const decoded = decodeProjectFile(encodeProjectFile(project, { [documentId]: bytes }));
-    expect(decoded.project).toEqual(sanitizeProject(project));
+    const decoded = await decodeProjectFile(await encodeProjectFile(project, { [documentId]: bytes }));
+    expect(decoded.project).toMatchObject(sanitizeProject(project));
+    expect(decoded.project.pdfDocuments[documentId].sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(decoded.pdfBytes[documentId]).toEqual(bytes);
   });
 
-  it("round-trips the slide frame visibility preference", () => {
+  it("round-trips the slide frame visibility preference", async () => {
     const project = createBlankProject();
     project.slideFramesVisible = false;
-    const decoded = decodeProjectFile(encodeProjectFile(project, {}));
+    const decoded = await decodeProjectFile(await encodeProjectFile(project, {}));
     expect(decoded.project.slideFramesVisible).toBe(false);
   });
 
-  it("round-trips the slide-frame aspect-ratio preference", () => {
+  it("round-trips the slide-frame aspect-ratio preference", async () => {
     const project = createBlankProject();
     project.slideFrameAspectRatio = "4:3";
-    const decoded = decodeProjectFile(encodeProjectFile(project, {}));
+    const decoded = await decodeProjectFile(await encodeProjectFile(project, {}));
     expect(decoded.project.slideFrameAspectRatio).toBe("4:3");
   });
 
-  it("migrates the legacy widescreen slide-frame preference", () => {
+  it("migrates the legacy widescreen slide-frame preference", async () => {
     const project = createBlankProject();
     delete project.slideFrameAspectRatio;
     project.slideWidescreenFrames = true;
-    const decoded = decodeProjectFile(encodeProjectFile(project, {}));
+    const decoded = await decodeProjectFile(await encodeProjectFile(project, {}));
     expect(decoded.project.slideFrameAspectRatio).toBe("16:9");
     expect(decoded.project.slideWidescreenFrames).toBeUndefined();
   });
 
-  it("round-trips the Morph slide-transition preference", () => {
+  it("round-trips the Morph slide-transition preference", async () => {
     const project = createBlankProject();
     project.slideMorphEnabled = true;
     project.slideMorphDurationMs = 1_250;
-    const decoded = decodeProjectFile(encodeProjectFile(project, {}));
+    const decoded = await decodeProjectFile(await encodeProjectFile(project, {}));
     expect(decoded.project.slideMorphEnabled).toBe(true);
     expect(decoded.project.slideMorphDurationMs).toBe(1_250);
   });
 
-  it("rejects a project whose PDF bytes do not match its manifest", () => {
+  it("rejects a project whose PDF bytes do not match its manifest", async () => {
     const project = createBlankProject();
     project.pdfDocuments.bad = {
       id: "bad",
@@ -110,24 +111,88 @@ describe("classroom project files", () => {
       pageCount: 1,
       archivePath: "documents/bad.pdf",
     };
-    expect(() => encodeProjectFile(project, { bad: new Uint8Array([1]) })).toThrow(/does not match/);
+    await expect(encodeProjectFile(project, { bad: new Uint8Array([1]) })).rejects.toThrow(/does not match/);
   });
 
-  it("rejects archives whose expanded entries exceed the project limit", () => {
+  it("rejects same-length PDF bytes that do not match a manifest content identity", async () => {
+    const project = createBlankProject();
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "source.pdf",
+      mimeType: "application/pdf",
+      byteLength: 4,
+      sha256: "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a",
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+    };
+    await expect(
+      encodeProjectFile(project, { pdf: new Uint8Array([4, 3, 2, 1]) }),
+    ).rejects.toThrow(/does not match/);
+  });
+
+  it("upgrades a legacy archive with a verified PDF content identity", async () => {
+    const project = createBlankProject();
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "legacy.pdf",
+      mimeType: "application/pdf",
+      byteLength: bytes.byteLength,
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+    };
+    const archive = zipSync({
+      "project.json": strToU8(JSON.stringify(project)),
+      "documents/pdf.pdf": bytes,
+    });
+
+    await expect(decodeProjectFile(archive)).resolves.toMatchObject({
+      project: {
+        pdfDocuments: {
+          pdf: {
+            sha256: "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a",
+          },
+        },
+      },
+      pdfBytes: { pdf: bytes },
+    });
+  });
+
+  it("rejects an archive whose same-length PDF has the wrong content identity", async () => {
+    const project = createBlankProject();
+    const staleBytes = new Uint8Array([4, 3, 2, 1]);
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "source.pdf",
+      mimeType: "application/pdf",
+      byteLength: staleBytes.byteLength,
+      sha256: "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a",
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+    };
+    const archive = zipSync({
+      "project.json": strToU8(JSON.stringify(project)),
+      "documents/pdf.pdf": staleBytes,
+    });
+
+    await expect(decodeProjectFile(archive)).rejects.toThrow(/content identity/);
+  });
+
+  it("rejects archives whose expanded entries exceed the project limit", async () => {
     const archive = zipSync({
       "project.json": strToU8("x".repeat(1_024)),
     });
     expect(archive.byteLength).toBeLessThan(1_024);
-    expect(() => decodeProjectFile(archive, 512)).toThrow(/expands beyond/);
+    await expect(decodeProjectFile(archive, 512)).rejects.toThrow(/expands beyond/);
   });
 
-  it("refuses to create a project whose complete uncompressed contents exceed the limit", () => {
+  it("refuses to create a project whose complete uncompressed contents exceed the limit", async () => {
     const project = createBlankProject();
     project.title = "A".repeat(8_192);
-    expect(() => encodeProjectFile(project, {}, 1_024)).toThrow(/too large to save safely/);
+    await expect(encodeProjectFile(project, {}, 1_024)).rejects.toThrow(/too large to save safely/);
   });
 
-  it("round-trips an explicit reordered PDF page list", () => {
+  it("round-trips an explicit reordered PDF page list", async () => {
     const project = createBlankProject();
     const bytes = new Uint8Array([37, 80, 68, 70]);
     project.pdfDocuments.pdf = {
@@ -142,11 +207,11 @@ describe("classroom project files", () => {
       project.scenes[id] = pdfPageScene(id, pageIndex);
     }
     project.pdfPageOrder = ["page-2", "page-1"];
-    const decoded = decodeProjectFile(encodeProjectFile(project, { pdf: bytes }));
+    const decoded = await decodeProjectFile(await encodeProjectFile(project, { pdf: bytes }));
     expect(decoded.project.pdfPageOrder).toEqual(["page-2", "page-1"]);
   });
 
-  it("normalizes a legacy v1 project that has no PDF page-order field", () => {
+  it("normalizes a legacy v1 project that has no PDF page-order field", async () => {
     const project = createBlankProject();
     const bytes = new Uint8Array([37, 80, 68, 70]);
     project.pdfDocuments.pdf = {
@@ -163,10 +228,10 @@ describe("classroom project files", () => {
       "project.json": strToU8(JSON.stringify(project)),
       "documents/pdf.pdf": bytes,
     });
-    expect(decodeProjectFile(archive).project.pdfPageOrder).toEqual(["page"]);
+    expect((await decodeProjectFile(archive)).project.pdfPageOrder).toEqual(["page"]);
   });
 
-  it("round-trips every typed math-tool kind with its local SVG file", () => {
+  it("round-trips every typed math-tool kind with its local SVG file", async () => {
     const project = createBlankProject(new Date("2026-07-15T12:00:00.000Z"));
     const scene = project.scenes[project.activeSceneId];
     const elements: Record<string, unknown>[] = [];
@@ -183,7 +248,7 @@ describe("classroom project files", () => {
     }
     scene.elements = elements;
 
-    const decoded = decodeProjectFile(encodeProjectFile(project, {})).project;
+    const decoded = (await decodeProjectFile(await encodeProjectFile(project, {}))).project;
     const metadata = decoded.scenes[decoded.activeSceneId].elements.map((element) => (element.customData as { classroomMathTool: Record<string, unknown> }).classroomMathTool);
     expect(metadata).toHaveLength(index);
     expect(new Set(metadata.map((item) => item.kind))).toEqual(new Set(MATH_TOOL_CATALOGUE.map((definition) => definition.kind)));

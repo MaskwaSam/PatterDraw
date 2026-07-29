@@ -18,3 +18,19 @@ Python or ReportLab at runtime.
 
 Generated with ReportLab 5.0.0. SHA-256:
 `e1513a389374e3d14a25ae4ec2f09f2668fc1871ef7db6c1be9245e98e4ec5f6`.
+
+`page-transparency-group.pdf` is generated independently with Python's standard
+library. Its page has an indirect `/Group` dictionary configured as an isolated
+transparency group and two overlapping translucent, multiply-blended vector
+rectangles. When embedded over a coloured backdrop, the content renders
+differently if the page group is dropped while converting the page to a Form
+XObject.
+
+Regenerate it with:
+
+```sh
+python3 generate_transparency_group.py
+```
+
+SHA-256:
+`295724b0db2caa526aef9c6b0a4827c178ca7409e379e78f769a976091961c70`.

@@ -1,6 +1,7 @@
 import { delMany, get, keys, setMany } from "idb-keyval";
 import type { ClassroomProject, LoadedClassroomProject, PdfDocumentId } from "../types";
 import { assertSafeProject, sanitizeProject } from "./safety";
+import { sha256Hex } from "./sha256";
 
 const PROJECT_KEY = "patterdraw:autosave:project:v1";
 const PDF_KEY_PREFIX = "patterdraw:autosave:pdf:v1:";
@@ -34,38 +35,67 @@ export async function saveAutosave(
 ): Promise<void> {
   const safe = sanitizeProject(project);
   assertSafeProject(safe);
-  const pdfEntries: Array<[string, Uint8Array]> = [];
-
-  for (const [id, source] of Object.entries(safe.pdfDocuments)) {
-    const bytes = pdfBytes[id];
-    if (!bytes || bytes.byteLength !== source.byteLength) {
-      throw new Error(`PDF data does not match project metadata for ${source.name}.`);
-    }
-    pdfEntries.push([`${PDF_KEY_PREFIX}${id}`, bytes]);
-  }
+  const verifiedDocuments = await Promise.all(
+    Object.entries(safe.pdfDocuments).map(async ([id, source]) => {
+      const bytes = pdfBytes[id];
+      if (!bytes || bytes.byteLength !== source.byteLength) {
+        throw new Error(`PDF data does not match project metadata for ${source.name}.`);
+      }
+      const sha256 = await sha256Hex(bytes);
+      if (source.sha256 && source.sha256 !== sha256) {
+        throw new Error(`PDF data does not match project metadata for ${source.name}.`);
+      }
+      return [id, { ...source, sha256 }] as const;
+    }),
+  );
+  const verifiedProject: ClassroomProject = {
+    ...safe,
+    pdfDocuments: Object.fromEntries(verifiedDocuments),
+  };
+  const pdfEntries = Object.entries(verifiedProject.pdfDocuments).map(
+    ([id, source]) => ({
+      bytes: pdfBytes[id],
+      key: `${PDF_KEY_PREFIX}${id}`,
+      source,
+    }),
+  );
 
   await enqueueMutation(async (hasCrossContextLock) => {
-    const entries: [string, ClassroomProject | Uint8Array][] = [[PROJECT_KEY, safe]];
+    const entries: [string, ClassroomProject | Uint8Array][] = [[PROJECT_KEY, verifiedProject]];
+    let storedKeys: IDBValidKey[] = [];
     if (hasCrossContextLock) {
-      const storedPdfBytes = await Promise.all(
-        pdfEntries.map(([key]) => get<Uint8Array>(key)),
-      );
-      for (const [index, entry] of pdfEntries.entries()) {
-        if (storedPdfBytes[index]?.byteLength !== entry[1].byteLength) entries.push(entry);
+      const [storedProject, existingKeys] = await Promise.all([
+        get<ClassroomProject>(PROJECT_KEY),
+        keys(),
+      ]);
+      storedKeys = existingKeys;
+      const existingKeySet = new Set(existingKeys);
+      for (const { bytes, key, source } of pdfEntries) {
+        const storedSource = storedProject?.pdfDocuments?.[source.id];
+        if (
+          !existingKeySet.has(key)
+          || storedSource?.byteLength !== source.byteLength
+          || storedSource?.sha256 !== source.sha256
+        ) {
+          entries.push([key, bytes]);
+        }
       }
     } else {
-      entries.push(...pdfEntries);
+      entries.push(...pdfEntries.map(
+        ({ bytes, key }): [string, Uint8Array] => [key, bytes],
+      ));
     }
     await setMany(entries);
     if (!hasCrossContextLock) return;
 
     const referencedKeys = new Set(
-      Object.keys(safe.pdfDocuments).map((id) => `${PDF_KEY_PREFIX}${id}`),
+      Object.keys(verifiedProject.pdfDocuments).map((id) => `${PDF_KEY_PREFIX}${id}`),
     );
-    const staleKeys = (await keys()).filter((key): key is string => (
+    const staleKeys = storedKeys.filter((key): key is string => (
       typeof key === "string"
       && (
         (key.startsWith(PDF_KEY_PREFIX) && !referencedKeys.has(key))
+        || key === LEGACY_PROJECT_KEY
         || key.startsWith(LEGACY_PDF_KEY_PREFIX)
       )
     ));
@@ -80,27 +110,61 @@ export async function loadAutosave(): Promise<LoadedClassroomProject | null> {
     if (!project) return null;
     assertSafeProject(project);
     const safeProject = sanitizeProject(project);
+    const pdfKeyPrefix = currentProject ? PDF_KEY_PREFIX : LEGACY_PDF_KEY_PREFIX;
 
-    const pdfEntries = await Promise.all(
+    const loadedPdfEntries = await Promise.all(
       Object.entries(safeProject.pdfDocuments).map(async ([id, source]) => {
-        const currentBytes = await get<Uint8Array>(`${PDF_KEY_PREFIX}${id}`);
-        const bytes = currentBytes?.byteLength === source.byteLength
-          ? currentBytes
-          : await get<Uint8Array>(`${LEGACY_PDF_KEY_PREFIX}${id}`);
+        const bytes = await get<Uint8Array>(`${pdfKeyPrefix}${id}`);
         if (!bytes) {
-          if (currentBytes) {
-            throw new Error(`Autosave PDF data does not match project metadata for ${source.name}.`);
-          }
           throw new Error(`Autosave is missing PDF data for ${id}.`);
         }
         if (bytes.byteLength !== source.byteLength) {
           throw new Error(`Autosave PDF data does not match project metadata for ${source.name}.`);
         }
-        return [id, bytes] as const;
+        const sha256 = await sha256Hex(bytes);
+        if (source.sha256 && source.sha256 !== sha256) {
+          throw new Error(`Autosave PDF data does not match project content identity for ${source.name}.`);
+        }
+        return { bytes, id, source: { ...source, sha256 } };
       }),
     );
+    const verifiedProject = sanitizeProject({
+      ...safeProject,
+      pdfDocuments: Object.fromEntries(
+        loadedPdfEntries.map(({ id, source }) => [id, source]),
+      ),
+    });
+    const pdfEntries = loadedPdfEntries.map(({ bytes, id }) => [id, bytes] as const);
 
-    return { project: safeProject, pdfBytes: Object.fromEntries(pdfEntries) };
+    const needsMigration = !currentProject
+      || Object.values(safeProject.pdfDocuments).some((source) => !source.sha256);
+    if (needsMigration) {
+      try {
+        await setMany([
+          [PROJECT_KEY, verifiedProject],
+          ...pdfEntries.map(
+            ([id, bytes]): [string, Uint8Array] => [`${PDF_KEY_PREFIX}${id}`, bytes],
+          ),
+        ]);
+        if (!currentProject) {
+          try {
+            await delMany([
+              LEGACY_PROJECT_KEY,
+              ...pdfEntries.map(([id]) => `${LEGACY_PDF_KEY_PREFIX}${id}`),
+            ]);
+          } catch {
+            // The verified current copy is complete; stale legacy cleanup can
+            // be retried by a later save or explicit clear.
+          }
+        }
+      } catch {
+        // Opening valid work is more important than an eager schema upgrade.
+        // The returned project carries hashes, so the next autosave retries
+        // the same atomic migration.
+      }
+    }
+
+    return { project: verifiedProject, pdfBytes: Object.fromEntries(pdfEntries) };
   });
 }
 

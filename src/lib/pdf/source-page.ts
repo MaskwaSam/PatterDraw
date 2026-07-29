@@ -4,8 +4,10 @@ import {
   PDFArray,
   PDFBool,
   PDFDict,
+  type PDFEmbeddedPage,
   PDFName,
   PDFNumber,
+  PDFObjectCopier,
   type PDFDocument,
   type PDFPage,
   PDFStream,
@@ -72,6 +74,7 @@ const BBOX = PDFName.of("BBox");
 const FT = PDFName.of("FT");
 const F = PDFName.of("F");
 const FORM_TYPE = PDFName.of("FormType");
+const GROUP = PDFName.of("Group");
 const MATRIX = PDFName.of("Matrix");
 const N = PDFName.of("N");
 const NEED_APPEARANCES = PDFName.of("NeedAppearances");
@@ -81,6 +84,7 @@ const PARENT = PDFName.of("Parent");
 const RECT = PDFName.of("Rect");
 const RESOURCES = PDFName.of("Resources");
 const SUBTYPE = PDFName.of("Subtype");
+const S = PDFName.of("S");
 const USER_UNIT = PDFName.of("UserUnit");
 const V = PDFName.of("V");
 const X_OBJECT = PDFName.of("XObject");
@@ -246,6 +250,14 @@ function flattenAnnotation(
     || rectangle.y + rectangle.height <= sourceBox.bottom
   ) return;
 
+  const appearance = normalAppearance(annotation);
+  if (!appearance && (subtype === "Link" || subtype === "Popup")) {
+    // Link and Popup annotations without an appearance are supplied only by
+    // an interactive annotation layer. Their flags and optional-content
+    // membership cannot affect page-canvas pixels, so there is nothing visible
+    // to preserve or flatten.
+    return;
+  }
   if (annotation.has(OC)) {
     throw new Error(
       `Page ${pageIndex + 1} has a layered ${subtype} annotation that cannot be flattened faithfully.`,
@@ -279,11 +291,7 @@ function flattenAnnotation(
       `Page ${pageIndex + 1} has a NoZoom ${subtype} annotation that cannot be flattened faithfully.`,
     );
   }
-  const appearance = normalAppearance(annotation);
   if (!appearance) {
-    // Link and Popup annotations are supplied by an interactive annotation
-    // layer rather than the page canvas used for PatterDraw's local preview.
-    if (subtype === "Link" || subtype === "Popup") return;
     throw new Error(
       `Page ${pageIndex + 1} has a visible ${subtype} annotation without a reusable appearance.`,
     );
@@ -420,4 +428,37 @@ export function getSourcePageUserUnit(page: PDFPage): number {
     throw new Error("The PDF has an invalid UserUnit value.");
   }
   return userUnit;
+}
+
+export async function copySourcePageTransparencyGroup(
+  sourcePage: PDFPage,
+  embeddedPage: PDFEmbeddedPage,
+): Promise<void> {
+  const rawGroup = sourcePage.node.get(GROUP);
+  if (!rawGroup) return;
+
+  const sourceContext = sourcePage.doc.context;
+  const sourceGroup = sourceContext.lookupMaybe(rawGroup, PDFDict);
+  if (
+    !sourceGroup
+    || sourceGroup.lookupMaybe(S, PDFName)?.decodeText() !== "Transparency"
+  ) {
+    throw new Error("The PDF page has an invalid transparency group.");
+  }
+
+  // pdf-lib converts an embedded page into a Form XObject but does not carry
+  // the page's /Group entry into that Form. Materialize the Form now, then
+  // copy the complete group object graph into the destination context so
+  // indirect colour spaces and other group attributes cannot retain donor
+  // document references.
+  await embeddedPage.embed();
+  const embeddedStream = embeddedPage.doc.context.lookup(
+    embeddedPage.ref,
+    PDFStream,
+  );
+  const copiedGroup = PDFObjectCopier.for(
+    sourceContext,
+    embeddedPage.doc.context,
+  ).copy(rawGroup);
+  embeddedStream.dict.set(GROUP, copiedGroup);
 }

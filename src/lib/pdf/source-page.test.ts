@@ -82,6 +82,60 @@ describe("PDF source-page preparation", () => {
     expect(page.node.Contents()).toBeUndefined();
   });
 
+  it.each(["Link", "Popup"])(
+    "skips a flagged %s annotation that has no reusable appearance",
+    async (subtype) => {
+      const document = await PDFDocument.create();
+      const page = document.addPage([200, 300]);
+      page.setRotation(degrees(90));
+      addAnnotation(document, page, {
+        Subtype: subtype,
+        F: 8 | 16,
+      });
+
+      prepareSourcePdfForEmbedding(document);
+
+      expect(page.node.Annots()).toBeUndefined();
+      expect(page.node.Contents()).toBeUndefined();
+    },
+  );
+
+  it.each(["Link", "Popup"])(
+    "skips a layered %s annotation that has no reusable appearance",
+    async (subtype) => {
+      const document = await PDFDocument.create();
+      const page = document.addPage([200, 300]);
+      addAnnotation(document, page, {
+        Subtype: subtype,
+        OC: { Type: "OCG", Name: "Interactive layer" },
+      });
+
+      prepareSourcePdfForEmbedding(document);
+
+      expect(page.node.Annots()).toBeUndefined();
+      expect(page.node.Contents()).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ["Link", 8, /NoZoom Link annotation/],
+    ["Popup", 16, /NoRotate Popup annotation/],
+  ] as const)(
+    "applies faithful flag checks to a visible %s appearance",
+    async (subtype, flags, message) => {
+      const document = await PDFDocument.create();
+      const page = document.addPage([200, 300]);
+      page.setRotation(degrees(90));
+      addAnnotation(document, page, {
+        Subtype: subtype,
+        F: flags,
+        AP: { N: appearanceReference(document) },
+      });
+
+      expect(() => prepareSourcePdfForEmbedding(document)).toThrow(message);
+    },
+  );
+
   it("ignores zero-area and fully cropped-out annotations", async () => {
     const document = await PDFDocument.create();
     const page = document.addPage([200, 300]);

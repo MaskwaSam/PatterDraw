@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
-import { readFile, readdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { findRemoteSourceFindings } from "./offline-source-scan.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const scanRoots = [
@@ -10,52 +11,7 @@ const scanRoots = [
   path.join(root, "index.html"),
   path.join(root, "vite.config.ts"),
 ];
-const sourceExtensions = new Set([".ts", ".tsx", ".js", ".mjs", ".html"]);
-const rules = [
-  [/<script\b[^>]*\bsrc\s*=\s*["']https?:\/\//gi, "remote script source"],
-  [/<link\b[^>]*\bhref\s*=\s*["']https?:\/\//gi, "remote stylesheet or preload"],
-  [/<img\b[^>]*\bsrc\s*=\s*["']https?:\/\//gi, "remote image source"],
-  [/\bfetch\s*\(\s*["'`]https?:\/\//g, "remote fetch"],
-  [/\bimport\s*\(\s*["'`]https?:\/\//g, "remote dynamic import"],
-  [/\bnew\s+(?:Worker|SharedWorker)\s*\(\s*["'`]https?:\/\//g, "remote worker"],
-  [/\bserviceWorker\.register\s*\(\s*["'`]https?:\/\//g, "remote service worker"],
-  [/\bnew\s+(?:WebSocket|EventSource)\s*\(/g, "live network channel"],
-  [/\bsendBeacon\s*\(/g, "telemetry beacon"],
-  [/\b(?:gtag|plausible|posthog|mixpanel|amplitude)\s*\(/gi, "analytics call"],
-  [/<(?:iframe|object|embed)\b/gi, "embedded web-content markup"],
-  [/\bwindow\.open\s*\(\s*["'`]https?:\/\//g, "external window navigation"],
-  [/\blocation\.(?:assign|replace)\s*\(\s*["'`]https?:\/\//g, "external location navigation"],
-  [/LiveCollaborationTrigger/g, "collaboration UI"],
-  [/onCollabButtonClick/g, "collaboration callback"],
-  [/useHandleLibrary/g, "URL-driven public library installation"],
-  [/libraryReturnUrl\s*=/g, "remote library return URL"],
-];
-
-async function filesUnder(candidate) {
-  const stat = await import("node:fs/promises").then(({ stat }) => stat(candidate));
-  if (stat.isFile()) return [candidate];
-  const files = [];
-  for (const entry of await readdir(candidate, { withFileTypes: true })) {
-    const child = path.join(candidate, entry.name);
-    if (entry.isDirectory()) files.push(...await filesUnder(child));
-    else if (sourceExtensions.has(path.extname(entry.name))) files.push(child);
-  }
-  return files;
-}
-
-const findings = [];
-for (const scanRoot of scanRoots) {
-  for (const file of await filesUnder(scanRoot)) {
-    const source = await readFile(file, "utf8");
-    for (const [pattern, label] of rules) {
-      pattern.lastIndex = 0;
-      for (const match of source.matchAll(pattern)) {
-        const line = source.slice(0, match.index).split("\n").length;
-        findings.push(`${path.relative(root, file)}:${line} ${label}`);
-      }
-    }
-  }
-}
+const findings = await findRemoteSourceFindings(root, scanRoots);
 
 const mainSource = await readFile(path.join(root, "src/main.tsx"), "utf8");
 if (!mainSource.includes("installOfflineNetworkGuard()")) {

@@ -313,6 +313,21 @@ describe("student safety", () => {
     expect(() => assertSafeProject(project)).toThrow(/duplicate archive path/);
   });
 
+  it("accepts legacy PDF metadata without a hash and rejects malformed content identities", () => {
+    const project = createBlankProject();
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "source.pdf",
+      mimeType: "application/pdf",
+      byteLength: 1,
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+    };
+    expect(() => assertSafeProject(project)).not.toThrow();
+    project.pdfDocuments.pdf.sha256 = "not-a-sha256";
+    expect(() => assertSafeProject(project)).toThrow(/content identity is malformed/);
+  });
+
   it("rejects duplicate element identities in imported scenes", () => {
     const project = createBlankProject();
     project.scenes[project.activeSceneId].elements = [

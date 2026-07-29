@@ -344,6 +344,15 @@ export function assertSafeProject(project: ClassroomProject): void {
       throw new Error("PDF byte length is malformed.");
     }
     if (document.byteLength > MAX_PDF_BYTES) throw new Error("An imported PDF is too large.");
+    if (
+      document.sha256 !== undefined
+      && (
+        typeof document.sha256 !== "string"
+        || !/^[a-f0-9]{64}$/.test(document.sha256)
+      )
+    ) {
+      throw new Error("PDF content identity is malformed.");
+    }
     if (!Number.isSafeInteger(document.pageCount) || document.pageCount <= 0) {
       throw new Error("PDF page count is malformed.");
     }

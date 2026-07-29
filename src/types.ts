@@ -30,6 +30,8 @@ export interface PdfDocumentSource {
   name: string;
   mimeType: "application/pdf";
   byteLength: number;
+  /** SHA-256 of the immutable source bytes. Optional only for legacy v1 projects. */
+  sha256?: string;
   pageCount: number;
   archivePath: string;
 }

@@ -16,6 +16,7 @@ import type {
 } from "../../types";
 import { createLocalId } from "../id";
 import { MAX_PDF_BYTES, MAX_PDF_PAGES } from "../safety";
+import { sha256Hex } from "../sha256";
 import { getPdfImportRasterScale, type PdfPageRasterSize } from "./raster-limits";
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -161,6 +162,7 @@ export async function importPdf(file: File): Promise<ImportedPdf> {
         name: file.name,
         mimeType: "application/pdf",
         byteLength: bytes.byteLength,
+        sha256: await sha256Hex(bytes),
         pageCount: document.numPages,
         archivePath: `documents/${documentId}.pdf`,
       },

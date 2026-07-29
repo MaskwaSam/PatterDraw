@@ -17,6 +17,7 @@ import type {
 import { getSlideRenderData } from "../slide-render";
 import { orderedPdfScenes } from "./page-order";
 import {
+  copySourcePageTransparencyGroup,
   getSourcePageUserUnit,
   getVisibleSourcePageBox,
   prepareSourcePdfForEmbedding,
@@ -255,6 +256,7 @@ export async function exportAnnotatedPdf(
     // annotation-only pages now have vector content after source preparation.
     if (sourcePage.node.Contents()) {
       const embeddedPage = await output.embedPage(sourcePage, sourceBox);
+      await copySourcePageTransparencyGroup(sourcePage, embeddedPage);
       drawEmbeddedSourcePage(
         targetPage,
         embeddedPage,

@@ -1,6 +1,7 @@
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import type { ClassroomProject, LoadedClassroomProject, PdfDocumentId } from "../types";
 import { assertSafeProject, MAX_PROJECT_BYTES, sanitizeProject } from "./safety";
+import { sha256Hex } from "./sha256";
 
 const MANIFEST_PATH = "project.json";
 const MAX_ARCHIVE_ENTRIES = 512;
@@ -18,17 +19,34 @@ function assertArchivePath(path: string): void {
   }
 }
 
-export function encodeProjectFile(
+export async function encodeProjectFile(
   project: ClassroomProject,
   pdfBytes: Record<PdfDocumentId, Uint8Array>,
   maxUncompressedBytes = MAX_PROJECT_BYTES,
-): Uint8Array {
+): Promise<Uint8Array> {
   if (!Number.isSafeInteger(maxUncompressedBytes) || maxUncompressedBytes <= 0) {
     throw new Error("The project size limit is invalid.");
   }
   const safe = sanitizeProject(project);
   assertSafeProject(safe);
-  const manifest = strToU8(JSON.stringify(safe, null, 2));
+  const verifiedDocuments = await Promise.all(
+    Object.entries(safe.pdfDocuments).map(async ([id, source]) => {
+      const bytes = pdfBytes[id];
+      if (!bytes || bytes.byteLength !== source.byteLength) {
+        throw new Error(`PDF data does not match project metadata for ${source.name}.`);
+      }
+      const sha256 = await sha256Hex(bytes);
+      if (source.sha256 && source.sha256 !== sha256) {
+        throw new Error(`PDF data does not match project metadata for ${source.name}.`);
+      }
+      return [id, { ...source, sha256 }] as const;
+    }),
+  );
+  const verifiedProject: ClassroomProject = {
+    ...safe,
+    pdfDocuments: Object.fromEntries(verifiedDocuments),
+  };
+  const manifest = strToU8(JSON.stringify(verifiedProject, null, 2));
   if (manifest.byteLength > maxUncompressedBytes) {
     throw new Error("The complete project is too large to save safely.");
   }
@@ -38,7 +56,7 @@ export function encodeProjectFile(
     [MANIFEST_PATH]: manifest,
   };
 
-  for (const [id, source] of Object.entries(safe.pdfDocuments)) {
+  for (const [id, source] of Object.entries(verifiedProject.pdfDocuments)) {
     const bytes = pdfBytes[id];
     if (!bytes || bytes.byteLength !== source.byteLength) {
       throw new Error(`PDF data does not match project metadata for ${source.name}.`);
@@ -57,10 +75,10 @@ export function encodeProjectFile(
   return archive;
 }
 
-export function decodeProjectFile(
+export async function decodeProjectFile(
   bytes: Uint8Array,
   maxUncompressedBytes = MAX_PROJECT_BYTES,
-): LoadedClassroomProject {
+): Promise<LoadedClassroomProject> {
   if (!Number.isSafeInteger(maxUncompressedBytes) || maxUncompressedBytes <= 0) {
     throw new Error("The project size limit is invalid.");
   }
@@ -106,13 +124,24 @@ export function decodeProjectFile(
   assertSafeProject(project);
 
   const pdfBytes: Record<PdfDocumentId, Uint8Array> = {};
-  for (const [id, source] of Object.entries(project.pdfDocuments)) {
-    const data = entries[source.archivePath];
-    if (!data || data.byteLength !== source.byteLength) {
-      throw new Error(`Project is missing PDF data for ${source.name}.`);
-    }
-    pdfBytes[id] = data;
-  }
-
-  return { project: sanitizeProject(project), pdfBytes };
+  const verifiedDocuments = await Promise.all(
+    Object.entries(project.pdfDocuments).map(async ([id, source]) => {
+      const data = entries[source.archivePath];
+      if (!data || data.byteLength !== source.byteLength) {
+        throw new Error(`Project is missing PDF data for ${source.name}.`);
+      }
+      const sha256 = await sha256Hex(data);
+      if (source.sha256 && source.sha256 !== sha256) {
+        throw new Error(`Project PDF data does not match its content identity for ${source.name}.`);
+      }
+      pdfBytes[id] = data;
+      return [id, { ...source, sha256 }] as const;
+    }),
+  );
+  const verifiedProject = sanitizeProject({
+    ...project,
+    pdfDocuments: Object.fromEntries(verifiedDocuments),
+  });
+  assertSafeProject(verifiedProject);
+  return { project: verifiedProject, pdfBytes };
 }

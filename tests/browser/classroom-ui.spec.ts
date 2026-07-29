@@ -1419,6 +1419,79 @@ test("flushes ordinary project-title typing without the trailing autosave delay"
   }).toBe("Immediate autosave");
 });
 
+test("keeps failed autosaves dirty and retries the latest snapshot on a later flush", async ({ page }) => {
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    const state = window as Window & {
+      __autosaveFailureTest?: {
+        attempts: number;
+        failWrites: boolean;
+      };
+    };
+    state.__autosaveFailureTest = { attempts: 0, failWrites: true };
+    const originalPut = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function (
+      value: unknown,
+      key?: IDBValidKey,
+    ): IDBRequest<IDBValidKey> {
+      const testState = state.__autosaveFailureTest;
+      if (key === "patterdraw:autosave:project:v1" && testState) {
+        testState.attempts += 1;
+        if (testState.failWrites) {
+          throw new DOMException("Test autosave failure", "QuotaExceededError");
+        }
+      }
+      return originalPut.call(this, value, key);
+    };
+  });
+
+  const title = page.getByRole("textbox", { name: "Project title" });
+  await title.fill("Failed autosave snapshot");
+  await expect(page.getByText("Save error", { exact: true })).toBeVisible();
+  const attemptsAfterFailure = await page.evaluate(() => (
+    window as Window & { __autosaveFailureTest?: { attempts: number } }
+  ).__autosaveFailureTest?.attempts || 0);
+  expect(attemptsAfterFailure).toBeGreaterThan(0);
+  await page.waitForTimeout(900);
+  expect(await page.evaluate(() => (
+    window as Window & { __autosaveFailureTest?: { attempts: number } }
+  ).__autosaveFailureTest?.attempts || 0)).toBe(attemptsAfterFailure);
+
+  const beforeUnloadResult = await page.evaluate(() => {
+    const event = new Event("beforeunload", { cancelable: true });
+    const dispatchResult = window.dispatchEvent(event);
+    return { defaultPrevented: event.defaultPrevented, dispatchResult };
+  });
+  expect(beforeUnloadResult).toEqual({ defaultPrevented: true, dispatchResult: false });
+  await expect.poll(() => page.evaluate(() => (
+    window as Window & { __autosaveFailureTest?: { attempts: number } }
+  ).__autosaveFailureTest?.attempts || 0)).toBeGreaterThan(attemptsAfterFailure);
+
+  await title.fill("Latest retry snapshot");
+  await expect(page.getByText("Save error", { exact: true })).toBeVisible();
+  const attemptsBeforeRetry = await page.evaluate(() => (
+    window as Window & { __autosaveFailureTest?: { attempts: number } }
+  ).__autosaveFailureTest?.attempts || 0);
+  await page.evaluate(() => {
+    const state = window as Window & {
+      __autosaveFailureTest?: {
+        attempts: number;
+        failWrites: boolean;
+      };
+    };
+    if (state.__autosaveFailureTest) state.__autosaveFailureTest.failWrites = false;
+    window.dispatchEvent(new Event("pagehide"));
+  });
+
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  await expect.poll(async () => (
+    await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
+  )?.title).toBe("Latest retry snapshot");
+  expect(await page.evaluate(() => (
+    window as Window & { __autosaveFailureTest?: { attempts: number } }
+  ).__autosaveFailureTest?.attempts || 0)).toBe(attemptsBeforeRetry + 1);
+});
+
 test("rejects imported relative image sources without issuing a request", async ({ page }) => {
   const probeRequests: string[] = [];
   page.on("request", (request) => {

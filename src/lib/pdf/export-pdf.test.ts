@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { exportToCanvas } from "@excalidraw/excalidraw";
 import {
   degrees,
+  PDFBool,
   PDFDict,
   PDFDocument,
   PDFName,
@@ -13,6 +14,7 @@ import {
 } from "pdf-lib";
 import { getDocument, OPS } from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { ClassroomProject, SerializedScene } from "../../types";
+import transparencyGroupFixtureUrl from "../../../tests/fixtures/pdf/page-transparency-group.pdf?inline";
 import reportLabAcroFormFixtureUrl from "../../../tests/fixtures/pdf/reportlab-acroform.pdf?inline";
 
 vi.mock("@excalidraw/excalidraw", () => ({
@@ -30,6 +32,7 @@ import {
   getPdfAnnotationExportDimensions,
   getPdfPageExportBounds,
 } from "./export-pdf";
+import { copySourcePageTransparencyGroup } from "./source-page";
 
 const baseElement = {
   id: "background",
@@ -319,6 +322,117 @@ describe("PDF export bounds", () => {
     expect(output.getPageCount()).toBe(1);
     expect(output.getPage(0).getSize()).toEqual({ width: 600, height: 800 });
   });
+
+  it("preserves a source page transparency group on the embedded Form XObject", async () => {
+    const sourceBytes = await loadPdfFixture(transparencyGroupFixtureUrl);
+    const sourceDocument = await PDFDocument.load(sourceBytes, { updateMetadata: false });
+    const sourcePage = sourceDocument.getPage(0);
+    const groupName = PDFName.of("Group");
+    const sourceGroup = sourcePage.node.lookupMaybe(groupName, PDFDict);
+    expect(sourceGroup?.lookupMaybe(PDFName.of("S"), PDFName)?.decodeText())
+      .toBe("Transparency");
+    expect(sourceGroup?.lookupMaybe(PDFName.of("I"), PDFBool)?.asBoolean())
+      .toBe(true);
+    expect(sourceGroup?.lookupMaybe(PDFName.of("K"), PDFBool)?.asBoolean())
+      .toBe(false);
+
+    const scene = {
+      id: "transparency-page",
+      name: "Transparency group",
+      elements: [{
+        ...baseElement,
+        id: "transparency-background",
+        width: 180,
+        height: 120,
+      }],
+      appState: {},
+      files: {},
+      pdfPage: {
+        documentId: "pdf",
+        pageIndex: 0,
+        width: 180,
+        height: 120,
+        rotation: 0,
+        backgroundElementId: "transparency-background",
+      },
+    } satisfies SerializedScene;
+    const project = {
+      schemaVersion: 1,
+      id: "transparency-project",
+      title: "Transparency group fixture",
+      createdAt: "2026-07-29T00:00:00.000Z",
+      updatedAt: "2026-07-29T00:00:00.000Z",
+      activeSceneId: scene.id,
+      scenes: { [scene.id]: scene },
+      slideOrder: [],
+      pdfPageOrder: [scene.id],
+      pdfDocuments: {
+        pdf: {
+          id: "pdf",
+          name: "page-transparency-group.pdf",
+          mimeType: "application/pdf",
+          byteLength: sourceBytes.byteLength,
+          pageCount: 1,
+          archivePath: "documents/pdf.pdf",
+        },
+      },
+    } satisfies ClassroomProject;
+
+    const outputBlob = await exportAnnotatedPdf(project, { pdf: sourceBytes });
+    const outputBytes = new Uint8Array(await outputBlob.arrayBuffer());
+    const outputDocument = await PDFDocument.load(outputBytes);
+    const outputPage = outputDocument.getPage(0);
+    const xObjects = outputPage.node.Resources()
+      ?.lookupMaybe(PDFName.of("XObject"), PDFDict);
+    expect(xObjects?.entries()).toHaveLength(1);
+    const embeddedForm = outputDocument.context.lookup(
+      xObjects?.entries()[0][1],
+      PDFStream,
+    );
+    const embeddedGroup = embeddedForm.dict.lookupMaybe(groupName, PDFDict);
+    expect(embeddedGroup?.lookupMaybe(PDFName.of("S"), PDFName)?.decodeText())
+      .toBe("Transparency");
+    expect(embeddedGroup?.lookupMaybe(PDFName.of("I"), PDFBool)?.asBoolean())
+      .toBe(true);
+    expect(embeddedGroup?.lookupMaybe(PDFName.of("K"), PDFBool)?.asBoolean())
+      .toBe(false);
+
+    const [sourceRender, outputRender] = await Promise.all([
+      renderPdfPage(sourceBytes, 1, 2),
+      renderPdfPage(outputBytes, 1, 2),
+    ]);
+    expect(outputRender.rgba).toEqual(sourceRender.rgba);
+    const imageOperators = new Set([
+      OPS.paintImageMaskXObject,
+      OPS.paintImageXObject,
+      OPS.paintInlineImageXObject,
+    ]);
+    expect(outputRender.operators.every((operator) => !imageOperators.has(operator)))
+      .toBe(true);
+
+    const embedOverBackdrop = async (preserveGroup: boolean): Promise<Uint8Array> => {
+      const document = await PDFDocument.create();
+      const page = document.addPage([180, 120]);
+      page.drawRectangle({
+        x: 0,
+        y: 0,
+        width: 180,
+        height: 120,
+        color: rgb(0, 1, 0),
+      });
+      const embeddedPage = await document.embedPage(sourcePage);
+      if (preserveGroup) {
+        await copySourcePageTransparencyGroup(sourcePage, embeddedPage);
+      }
+      page.drawPage(embeddedPage, { x: 0, y: 0, width: 180, height: 120 });
+      return document.save();
+    };
+    const [groupedRender, ungroupedRender] = await Promise.all([
+      embedOverBackdrop(true).then((bytes) => renderPdfPage(bytes, 1, 2)),
+      embedOverBackdrop(false).then((bytes) => renderPdfPage(bytes, 1, 2)),
+    ]);
+    expect(groupedRender.rgba).not.toEqual(ungroupedRender.rgba);
+  }, 20_000);
 
   it("preserves vector form and annotation appearances with CropBox, UserUnit, and rotation", async () => {
     const sourceBytes = await createPdfFidelityFixture();

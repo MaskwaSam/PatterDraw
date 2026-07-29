@@ -424,6 +424,11 @@ export default function App() {
       () => {
         if (autosaveQueueRef.current !== queuedSave) return;
         autosaveSavingRef.current = false;
+        // Keep the newest snapshot eligible for a later interaction/page-exit
+        // flush. Retrying here would create a tight loop while storage remains
+        // unavailable; flushAutosave always reads autosaveSnapshotRef so a
+        // newer edit is retried instead of this captured snapshot.
+        autosaveDirtyRef.current = true;
         setSaveStatus("error");
       },
     );
@@ -884,7 +889,7 @@ export default function App() {
         file.name.toLowerCase().endsWith(".patterdraw")
         || file.name.toLowerCase().endsWith(".canvasclassroom")
       ) {
-        await openLoadedProject(decodeProjectFile(new Uint8Array(await file.arrayBuffer())));
+        await openLoadedProject(await decodeProjectFile(new Uint8Array(await file.arrayBuffer())));
       } else if (file.name.toLowerCase().endsWith(".excalidraw")) {
         await openLoadedProject({ project: nativeExcalidrawProject(await file.text()), pdfBytes: {} });
       } else {
@@ -898,10 +903,10 @@ export default function App() {
     }
   }, [openLoadedProject]);
 
-  const saveProjectFile = useCallback(() => {
+  const saveProjectFile = useCallback(async () => {
     if (!project) return;
     try {
-      const bytes = encodeProjectFile(project, pdfBytes);
+      const bytes = await encodeProjectFile(project, pdfBytes);
       downloadBlob(
         new Blob([Uint8Array.from(bytes).buffer], { type: "application/vnd.patterdraw+zip" }),
         `${safeFileStem(project.title)}.patterdraw`,
