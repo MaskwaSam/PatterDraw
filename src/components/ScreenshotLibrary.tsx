@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { StoredScreenshot } from "../lib/screenshots/persistence";
 import { ScreenshotIcon } from "./Icons";
 
@@ -15,12 +15,48 @@ interface ScreenshotThumbnailProps {
   onInsert: (item: StoredScreenshot) => void;
 }
 
-function ScreenshotThumbnail({ item, onInsert }: ScreenshotThumbnailProps) {
-  const imageUrl = useMemo(() => URL.createObjectURL(item.blob), [item.blob]);
-  useEffect(() => () => URL.revokeObjectURL(imageUrl), [imageUrl]);
+const SCREENSHOT_LOAD_MARGIN = "240px 0px";
+
+const ScreenshotThumbnail = memo(function ScreenshotThumbnail({
+  item,
+  onInsert,
+}: ScreenshotThumbnailProps) {
+  const hostRef = useRef<HTMLButtonElement>(null);
+  const [isNearViewport, setIsNearViewport] = useState(false);
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || typeof IntersectionObserver === "undefined") {
+      setIsNearViewport(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(([entry]) => {
+      setIsNearViewport(entry?.isIntersecting === true);
+    }, {
+      root: host.closest(".screenshot-library"),
+      rootMargin: SCREENSHOT_LOAD_MARGIN,
+    });
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!isNearViewport) {
+      setImageUrl(null);
+      return;
+    }
+
+    const next = URL.createObjectURL(item.blob);
+    setImageUrl(next);
+    return () => URL.revokeObjectURL(next);
+  }, [isNearViewport, item.blob]);
+
   const captured = captureTimeFormatter.format(new Date(item.createdAt));
   return (
     <button
+      ref={hostRef}
       type="button"
       className="screenshot-card-thumbnail"
       aria-label={`Insert screenshot captured ${captured}`}
@@ -33,11 +69,23 @@ function ScreenshotThumbnail({ item, onInsert }: ScreenshotThumbnailProps) {
         event.dataTransfer.setData("text/plain", item.id);
       }}
     >
-      <img src={imageUrl} alt="" draggable={false} />
-      <span>{item.width} × {item.height} px</span>
+      {imageUrl ? (
+        <img
+          src={imageUrl}
+          alt=""
+          draggable={false}
+          loading="lazy"
+          decoding="async"
+        />
+      ) : (
+        <span className="screenshot-card-image-placeholder" aria-hidden="true">
+          <ScreenshotIcon />
+        </span>
+      )}
+      <span className="screenshot-card-dimensions">{item.width} × {item.height} px</span>
     </button>
   );
-}
+});
 
 interface ScreenshotLibraryProps {
   busy: boolean;

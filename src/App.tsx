@@ -74,9 +74,15 @@ import type {
   SlideFrameAspectRatio,
 } from "./types";
 import { createBlankProject } from "./types";
-import { clearAutosave, loadAutosave, saveAutosave } from "./lib/persistence";
+import { loadAutosave, saveAutosave } from "./lib/persistence";
+import {
+  AUTOSAVE_BASE_INTERVAL_MS,
+  getAutosaveCooldownMs,
+  getAutosaveFollowupDelayMs,
+} from "./lib/autosave-policy";
 import { loadLibraryItems, saveLibraryItems } from "./lib/library-persistence";
-import { decodeProjectFile, encodeProjectFile } from "./lib/project-file";
+import { decodeProjectFile, encodePreparedProjectFile } from "./lib/project-file";
+import { bytesForBlob } from "./lib/blob-bytes";
 import { downloadBlob, safeFileStem } from "./lib/download";
 import { exportFullBoardPng } from "./lib/export-board";
 import { createLocalId } from "./lib/id";
@@ -226,6 +232,20 @@ const renderNoEmbeddable: NonNullable<ExcalidrawProps["renderEmbeddable"]> = () 
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function afterNextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    let complete = false;
+    const finish = () => {
+      if (complete) return;
+      complete = true;
+      window.clearTimeout(fallback);
+      resolve();
+    };
+    const fallback = window.setTimeout(finish, 100);
+    window.requestAnimationFrame(() => window.requestAnimationFrame(finish));
+  });
 }
 
 function screenshotDownloadName(createdAt: number): string {
@@ -427,6 +447,11 @@ export default function App() {
   const autosaveSnapshotRef = useRef<LoadedClassroomProject | null>(null);
   const autosaveDirtyRef = useRef(false);
   const autosaveSavingRef = useRef(false);
+  const autosaveSuspendedRef = useRef(false);
+  const autosaveUrgentRef = useRef(false);
+  const autosaveContentBytesRef = useRef(0);
+  const autosaveLastDurationMsRef = useRef(0);
+  const skipNextAutosaveEffectRef = useRef(false);
   const autosaveTimerRef = useRef<number | null>(null);
   const autosaveLastQueuedAtRef = useRef(0);
   const autosaveQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -477,7 +502,7 @@ export default function App() {
   }, []);
   const queueScenePersistence = useCallback((pending: PendingScenePersistence) => {
     pendingScenePersistenceRef.current = pending;
-    setSaveStatus("saving");
+    if (!autosaveSuspendedRef.current) setSaveStatus("saving");
     if (scenePersistenceTimerRef.current !== null) {
       window.clearTimeout(scenePersistenceTimerRef.current);
     }
@@ -486,31 +511,79 @@ export default function App() {
       SCENE_PERSISTENCE_DELAY_MS,
     );
   }, [commitPendingScenePersistence]);
-  const flushAutosave = useCallback(() => {
+  const flushAutosave = useCallback((urgent = false) => {
+    if (autosaveSuspendedRef.current) return;
+    if (urgent) autosaveUrgentRef.current = true;
     const snapshot = autosaveSnapshotRef.current;
     if (!snapshot || !autosaveDirtyRef.current) return;
     if (autosaveTimerRef.current !== null) {
       window.clearTimeout(autosaveTimerRef.current);
       autosaveTimerRef.current = null;
     }
+    // Keep at most one write in flight. Edits made while it runs remain in
+    // autosaveSnapshotRef and replace one another, so a slow device never
+    // accumulates an ordinary queue of complete project snapshots. A page-exit
+    // flush is the one exception: enqueue the newest snapshot immediately
+    // behind the active IndexedDB transaction instead of relying on a timer
+    // that may never run after the document is torn down.
+    if (autosaveSavingRef.current && !urgent) return;
+    const elapsed = Date.now() - autosaveLastQueuedAtRef.current;
+    const cooldown = getAutosaveCooldownMs(
+      autosaveContentBytesRef.current,
+      autosaveLastDurationMsRef.current,
+    );
+    if (
+      !autosaveSavingRef.current
+      && !urgent
+      && autosaveLastQueuedAtRef.current > 0
+      && elapsed < cooldown
+    ) {
+      autosaveTimerRef.current = window.setTimeout(
+        () => flushAutosave(),
+        cooldown - elapsed,
+      );
+      return;
+    }
 
     autosaveDirtyRef.current = false;
     autosaveSavingRef.current = true;
+    autosaveUrgentRef.current = false;
     autosaveLastQueuedAtRef.current = Date.now();
     setSaveStatus("saving");
-    const queuedSave = autosaveQueueRef.current
-      .catch(() => undefined)
-      .then(() => saveAutosave(snapshot.project, snapshot.pdfBytes));
+    const saveStartedAt = performance.now();
+    const queuedSave = saveAutosave(
+      snapshot.project,
+      snapshot.pdfBytes,
+      { prepared: true },
+    ).then((contentSize) => {
+      autosaveContentBytesRef.current = contentSize.totalBytes;
+    }).finally(() => {
+      autosaveLastDurationMsRef.current = Math.max(
+        0,
+        performance.now() - saveStartedAt,
+      );
+    });
     autosaveQueueRef.current = queuedSave;
     queuedSave.then(
       () => {
         if (autosaveQueueRef.current !== queuedSave) return;
         autosaveSavingRef.current = false;
-        if (!autosaveDirtyRef.current) setSaveStatus("saved");
+        if (!autosaveDirtyRef.current) {
+          setSaveStatus("saved");
+          return;
+        }
+        const elapsed = Date.now() - autosaveLastQueuedAtRef.current;
+        const delay = autosaveUrgentRef.current ? 0 : getAutosaveFollowupDelayMs(
+          autosaveContentBytesRef.current,
+          elapsed,
+          autosaveLastDurationMsRef.current,
+        );
+        autosaveTimerRef.current = window.setTimeout(() => flushAutosave(), delay);
       },
       (error) => {
         if (autosaveQueueRef.current !== queuedSave) return;
         autosaveSavingRef.current = false;
+        autosaveUrgentRef.current = false;
         // Keep the newest snapshot eligible for a later interaction/page-exit
         // flush. Retrying here would create a tight loop while storage remains
         // unavailable; flushAutosave always reads autosaveSnapshotRef so a
@@ -553,9 +626,18 @@ export default function App() {
         if (cancelled) return;
         if (loaded) {
           const framesVisible = loaded.project.slideFramesVisible !== false;
+          const startupProject = projectForBoardStartup(loaded.project);
           slideFramesVisibleRef.current = framesVisible;
+          projectRef.current = startupProject;
+          pdfBytesRef.current = loaded.pdfBytes;
+          autosaveSnapshotRef.current = {
+            project: startupProject,
+            pdfBytes: loaded.pdfBytes,
+          };
+          autosaveDirtyRef.current = false;
+          skipNextAutosaveEffectRef.current = true;
           setAreSlideFramesVisible(framesVisible);
-          setProject(projectForBoardStartup(loaded.project));
+          setProject(startupProject);
           setPdfBytes(loaded.pdfBytes);
         } else {
           setProject(createBlankProject());
@@ -564,7 +646,21 @@ export default function App() {
       .catch((error) => {
         if (!cancelled) {
           setErrorMessage(`Autosave could not be opened: ${error instanceof Error ? error.message : String(error)}`);
-          setProject(createBlankProject());
+          // Keep the unread autosave untouched. Showing a temporary blank
+          // board must not turn a transient IndexedDB/PDF-integrity failure
+          // into permanent data loss before the teacher can recover storage.
+          const fallbackProject = createBlankProject();
+          projectRef.current = fallbackProject;
+          pdfBytesRef.current = {};
+          autosaveSnapshotRef.current = {
+            project: fallbackProject,
+            pdfBytes: {},
+          };
+          autosaveDirtyRef.current = false;
+          autosaveSuspendedRef.current = true;
+          skipNextAutosaveEffectRef.current = true;
+          setSaveStatus("error");
+          setProject(fallbackProject);
         }
       });
     return () => { cancelled = true; };
@@ -640,16 +736,32 @@ export default function App() {
   useLayoutEffect(() => {
     if (!project) return;
     autosaveSnapshotRef.current = { project, pdfBytes };
+    if (skipNextAutosaveEffectRef.current) {
+      skipNextAutosaveEffectRef.current = false;
+      return;
+    }
+    if (autosaveSuspendedRef.current) return;
     autosaveDirtyRef.current = true;
     setSaveStatus("saving");
     if (autosaveTimerRef.current !== null) window.clearTimeout(autosaveTimerRef.current);
 
     const elapsed = Date.now() - autosaveLastQueuedAtRef.current;
-    if (!autosaveSavingRef.current && elapsed >= 700) {
+    const interval = Math.max(
+      AUTOSAVE_BASE_INTERVAL_MS,
+      getAutosaveCooldownMs(
+        autosaveContentBytesRef.current,
+        autosaveLastDurationMsRef.current,
+      ),
+    );
+    if (!autosaveSavingRef.current && elapsed >= interval) {
       flushAutosave();
       return;
     }
-    autosaveTimerRef.current = window.setTimeout(flushAutosave, Math.max(0, 700 - elapsed));
+    if (autosaveSavingRef.current) return;
+    autosaveTimerRef.current = window.setTimeout(
+      () => flushAutosave(),
+      Math.max(0, interval - elapsed),
+    );
     return () => {
       if (autosaveTimerRef.current !== null) {
         window.clearTimeout(autosaveTimerRef.current);
@@ -662,7 +774,7 @@ export default function App() {
     const flushAfterInteraction = () => {
       commitPendingScenePersistence();
       if (autosaveTimerRef.current !== null) window.clearTimeout(autosaveTimerRef.current);
-      autosaveTimerRef.current = window.setTimeout(flushAutosave, 0);
+      autosaveTimerRef.current = window.setTimeout(() => flushAutosave(), 0);
     };
     const flushAfterMutationKey = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
@@ -687,7 +799,7 @@ export default function App() {
     const flushWhenHidden = () => {
       if (document.visibilityState === "hidden") {
         commitPendingScenePersistence();
-        window.setTimeout(flushAutosave, 0);
+        flushAutosave(true);
       }
     };
     const flushBeforePageExit = (event: BeforeUnloadEvent) => {
@@ -697,13 +809,13 @@ export default function App() {
         && !autosaveSavingRef.current
       ) return;
       commitPendingScenePersistence();
-      window.setTimeout(flushAutosave, 0);
+      flushAutosave(true);
       event.preventDefault();
       event.returnValue = "";
     };
     const flushOnPageHide = () => {
       commitPendingScenePersistence();
-      window.setTimeout(flushAutosave, 0);
+      flushAutosave(true);
     };
     window.addEventListener("pointerup", flushAfterInteraction);
     window.addEventListener("click", flushAfterInteraction);
@@ -932,22 +1044,54 @@ export default function App() {
   }, []);
 
   const openLoadedProject = useCallback(async (loaded: LoadedClassroomProject) => {
+    autosaveSuspendedRef.current = true;
     pendingScenePersistenceRef.current = null;
     if (scenePersistenceTimerRef.current !== null) {
       window.clearTimeout(scenePersistenceTimerRef.current);
       scenePersistenceTimerRef.current = null;
     }
     autosaveDirtyRef.current = false;
+    autosaveUrgentRef.current = false;
+    autosaveContentBytesRef.current = 0;
+    autosaveLastDurationMsRef.current = 0;
     if (autosaveTimerRef.current !== null) {
       window.clearTimeout(autosaveTimerRef.current);
       autosaveTimerRef.current = null;
     }
     await autosaveQueueRef.current.catch(() => undefined);
     autosaveSavingRef.current = false;
-    await clearAutosave(projectRef.current || undefined);
     const startupProject = projectForBoardStartup(loaded.project);
+    let replacementSaved = false;
+    autosaveSavingRef.current = true;
+    const replacementSave = saveAutosave(
+      startupProject,
+      loaded.pdfBytes,
+      { prepared: true },
+    ).then((contentSize) => {
+      autosaveContentBytesRef.current = contentSize.totalBytes;
+    });
+    autosaveQueueRef.current = replacementSave;
+    try {
+      await replacementSave;
+      replacementSaved = true;
+    } catch (error) {
+      setErrorMessage(autosaveFailureMessage(error));
+    }
+    autosaveSavingRef.current = false;
+    pendingScenePersistenceRef.current = null;
+    if (scenePersistenceTimerRef.current !== null) {
+      window.clearTimeout(scenePersistenceTimerRef.current);
+      scenePersistenceTimerRef.current = null;
+    }
     pdfBytesRef.current = loaded.pdfBytes;
     projectRef.current = startupProject;
+    autosaveSnapshotRef.current = {
+      project: startupProject,
+      pdfBytes: loaded.pdfBytes,
+    };
+    autosaveDirtyRef.current = !replacementSaved;
+    autosaveLastQueuedAtRef.current = replacementSaved ? Date.now() : 0;
+    skipNextAutosaveEffectRef.current = true;
     setPdfBytes(loaded.pdfBytes);
     const framesVisible = loaded.project.slideFramesVisible !== false;
     slideFramesVisibleRef.current = framesVisible;
@@ -961,6 +1105,8 @@ export default function App() {
     setMermaidEditor(null);
     setMathToolEdit(null);
     setIsMathToolsOpen(false);
+    setSaveStatus(replacementSaved ? "saved" : "error");
+    autosaveSuspendedRef.current = false;
   }, []);
 
   const handleFile = useCallback(async (file: File) => {
@@ -996,6 +1142,7 @@ export default function App() {
           pdfDocuments: { ...base.pdfDocuments, [imported.source.id]: imported.source },
         };
         assertProjectFitsContentBudget(nextProject, nextPdfBytes);
+        autosaveSuspendedRef.current = false;
         pdfBytesRef.current = nextPdfBytes;
         projectRef.current = nextProject;
         setPdfBytes(nextPdfBytes);
@@ -1007,9 +1154,16 @@ export default function App() {
         file.name.toLowerCase().endsWith(".patterdraw")
         || file.name.toLowerCase().endsWith(".canvasclassroom")
       ) {
-        await openLoadedProject(await decodeProjectFile(new Uint8Array(await file.arrayBuffer())));
+        const loaded = await decodeProjectFile(new Uint8Array(await file.arrayBuffer()));
+        setBusyMessage(`Saving ${file.name} locally…`);
+        await openLoadedProject(loaded);
       } else if (file.name.toLowerCase().endsWith(".excalidraw")) {
-        await openLoadedProject({ project: nativeExcalidrawProject(await file.text()), pdfBytes: {} });
+        const loaded = {
+          project: nativeExcalidrawProject(await file.text()),
+          pdfBytes: {},
+        };
+        setBusyMessage(`Saving ${file.name} locally…`);
+        await openLoadedProject(loaded);
       } else {
         throw new Error("Open a .patterdraw, legacy .canvasclassroom, .excalidraw, or PDF file.");
       }
@@ -1024,14 +1178,18 @@ export default function App() {
   const saveProjectFile = useCallback(async () => {
     const currentProject = commitPendingScenePersistence();
     if (!currentProject) return;
+    setBusyMessage("Preparing project backup…");
     try {
-      const bytes = await encodeProjectFile(currentProject, pdfBytesRef.current);
+      await afterNextPaint();
+      const bytes = await encodePreparedProjectFile(currentProject, pdfBytesRef.current);
       downloadBlob(
-        new Blob([Uint8Array.from(bytes).buffer], { type: "application/vnd.patterdraw+zip" }),
+        new Blob([bytesForBlob(bytes)], { type: "application/vnd.patterdraw+zip" }),
         `${safeFileStem(currentProject.title)}.patterdraw`,
       );
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyMessage(null);
     }
   }, [commitPendingScenePersistence]);
 
@@ -1041,6 +1199,7 @@ export default function App() {
     setExportOpen(false);
     setBusyMessage(kind === "slides" ? "Exporting slides…" : "Exporting annotated PDF…");
     try {
+      await afterNextPaint();
       const { exportAnnotatedPdf, exportSlidesPdf } = await import("./lib/pdf/export-pdf");
       const blob = kind === "slides"
         ? await exportSlidesPdf(currentProject)
@@ -1059,6 +1218,7 @@ export default function App() {
     setExportOpen(false);
     setBusyMessage("Exporting the full board…");
     try {
+      await afterNextPaint();
       const { blob, scale } = await exportFullBoardPng(api);
       downloadBlob(blob, `${safeFileStem(project.title)}-full-board.png`);
       api.setToast({

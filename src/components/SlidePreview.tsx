@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SerializedScene } from "../types";
 import { renderSlideThumbnail } from "../lib/slide-thumbnail";
 import { slidePreviewRevision } from "../lib/slide-render";
@@ -10,16 +10,62 @@ interface SlidePreviewProps {
 }
 
 const PREVIEW_DEBOUNCE_MS = 180;
+const PREVIEW_LOAD_MARGIN = "180px 0px";
 
-export function SlidePreview({ scene, frameId }: SlidePreviewProps) {
+interface RevisionCache {
+  elements: SerializedScene["elements"];
+  files: SerializedScene["files"];
+  frameId: string;
+  revision: string | null;
+  scene: SerializedScene;
+}
+
+export const SlidePreview = memo(function SlidePreview({ scene, frameId }: SlidePreviewProps) {
   const hostRef = useRef<HTMLSpanElement>(null);
   const objectUrlRef = useRef<string | null>(null);
   const requestRef = useRef(0);
-  const [isVisible, setIsVisible] = useState(false);
+  const revisionCacheRef = useRef<RevisionCache | null>(null);
+  const [isNearViewport, setIsNearViewport] = useState(false);
   const [source, setSource] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  const revision = scene ? slidePreviewRevision(scene, frameId) : null;
+  const revision = useMemo(() => {
+    if (!isNearViewport || !scene) return null;
+    const cached = revisionCacheRef.current;
+    if (
+      cached
+      && cached.scene === scene
+      && cached.elements === scene.elements
+      && cached.files === scene.files
+      && cached.frameId === frameId
+    ) {
+      return cached.revision;
+    }
+    const next = slidePreviewRevision(scene, frameId);
+    revisionCacheRef.current = {
+      elements: scene.elements,
+      files: scene.files,
+      frameId,
+      revision: next,
+      scene,
+    };
+    return next;
+  }, [frameId, isNearViewport, scene]);
+
+  useEffect(() => {
+    const cached = revisionCacheRef.current;
+    if (
+      cached
+      && (
+        cached.scene !== scene
+        || cached.elements !== scene?.elements
+        || cached.files !== scene?.files
+        || cached.frameId !== frameId
+      )
+    ) {
+      revisionCacheRef.current = null;
+    }
+  }, [frameId, scene]);
 
   const replaceObjectUrl = useCallback((next: string | null) => {
     const previous = objectUrlRef.current;
@@ -31,23 +77,25 @@ export function SlidePreview({ scene, frameId }: SlidePreviewProps) {
   useEffect(() => {
     const host = hostRef.current;
     if (!host || typeof IntersectionObserver === "undefined") {
-      setIsVisible(true);
+      setIsNearViewport(true);
       return;
     }
 
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) {
-        setIsVisible(true);
-        observer.disconnect();
-      }
-    }, { rootMargin: "180px 0px" });
+    const observer = new IntersectionObserver(([entry]) => {
+      setIsNearViewport(entry?.isIntersecting === true);
+    }, {
+      root: host.closest(".rail-scroll"),
+      rootMargin: PREVIEW_LOAD_MARGIN,
+    });
     observer.observe(host);
     return () => observer.disconnect();
   }, []);
 
   useEffect(() => {
-    if (!isVisible || !scene || !revision) {
-      if (isVisible && (!scene || !revision)) replaceObjectUrl(null);
+    if (!isNearViewport || !scene || !revision) {
+      requestRef.current += 1;
+      setIsLoading(false);
+      replaceObjectUrl(null);
       return;
     }
 
@@ -85,7 +133,7 @@ export function SlidePreview({ scene, frameId }: SlidePreviewProps) {
     };
   // `revision` already captures every frame-local element/file change. Avoid
   // regenerating all previews when unrelated project or viewport state changes.
-  }, [frameId, isVisible, replaceObjectUrl, revision, scene?.id]);
+  }, [frameId, isNearViewport, replaceObjectUrl, revision, scene?.id]);
 
   useEffect(() => () => {
     requestRef.current += 1;
@@ -108,4 +156,4 @@ export function SlidePreview({ scene, frameId }: SlidePreviewProps) {
       )}
     </span>
   );
-}
+});

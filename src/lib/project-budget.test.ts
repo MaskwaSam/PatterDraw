@@ -3,10 +3,27 @@ import { createBlankProject } from "../types";
 import {
   assertProjectCanAcceptAdditionalBytes,
   assertProjectFitsContentBudget,
+  getJsonUtf8ByteLength,
   getProjectContentSize,
 } from "./project-budget";
 
 describe("project content budget", () => {
+  it("measures formatted JSON exactly without building a complete encoded copy", () => {
+    const samples: unknown[] = [
+      createBlankProject(),
+      { text: "plain", escaped: "\"\\\n\t", emoji: "🐺", loneSurrogate: "\ud800" },
+      { nested: [{ value: 1 }, undefined, Number.POSITIVE_INFINITY], omitted: undefined },
+      [],
+      {},
+    ];
+    const encoder = new TextEncoder();
+    for (const sample of samples) {
+      expect(getJsonUtf8ByteLength(sample)).toBe(
+        encoder.encode(JSON.stringify(sample, null, 2)).byteLength,
+      );
+    }
+  });
+
   it("counts the UTF-8 manifest and original PDF bytes", () => {
     const project = createBlankProject();
     const bytes = new Uint8Array([1, 2, 3, 4]);

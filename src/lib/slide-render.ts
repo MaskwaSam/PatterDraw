@@ -62,14 +62,14 @@ function spatialBounds(element: ExcalidrawElement): readonly [number, number, nu
   return rotatedBoxBounds(element);
 }
 
-function overlapsFrame(
+function overlapsBounds(
   element: ExcalidrawElement,
-  frame: ExcalidrawFrameElement,
+  bounds: readonly [number, number, number, number],
 ): boolean {
-  if (![element.x, element.y, element.width, element.height, frame.x, frame.y, frame.width, frame.height]
+  if (![element.x, element.y, element.width, element.height, ...bounds]
     .every(Number.isFinite)) return false;
   const [elementLeft, elementTop, elementRight, elementBottom] = spatialBounds(element);
-  const [frameLeft, frameTop, frameRight, frameBottom] = spatialBounds(frame);
+  const [frameLeft, frameTop, frameRight, frameBottom] = bounds;
   return elementRight >= frameLeft &&
     elementLeft <= frameRight &&
     elementBottom >= frameTop &&
@@ -91,6 +91,7 @@ export function getSlideRenderData(
       element.id === frameId && isSlideFrame(element),
   );
   if (!frame) return null;
+  const frameBounds = spatialBounds(frame);
 
   const ordinaryFrameIds = new Set(
     elements
@@ -98,7 +99,7 @@ export function getSlideRenderData(
         isSafeSlideElement(element)
         && element.type === "frame"
         && !isSlideFrame(element)
-        && overlapsFrame(element, frame)
+        && overlapsBounds(element, frameBounds)
       ))
       .map((element) => element.id),
   );
@@ -110,7 +111,7 @@ export function getSlideRenderData(
       continue;
     }
     if (element.type === "frame" && isSlideFrame(element)) continue;
-    if (!overlapsFrame(element, frame)) continue;
+    if (!overlapsBounds(element, frameBounds)) continue;
     // Excalidraw's exporter honors frameId. Attach independent overlapping
     // elements and ordinary frame outlines to this render-only slide copy, but
     // preserve real native-frame ownership when its frame is also rendered.

@@ -433,6 +433,10 @@ export function getSourcePageUserUnit(page: PDFPage): number {
 export async function copySourcePageTransparencyGroup(
   sourcePage: PDFPage,
   embeddedPage: PDFEmbeddedPage,
+  objectCopier = PDFObjectCopier.for(
+    sourcePage.doc.context,
+    embeddedPage.doc.context,
+  ),
 ): Promise<void> {
   const rawGroup = sourcePage.node.get(GROUP);
   if (!rawGroup) return;
@@ -456,9 +460,6 @@ export async function copySourcePageTransparencyGroup(
     embeddedPage.ref,
     PDFStream,
   );
-  const copiedGroup = PDFObjectCopier.for(
-    sourceContext,
-    embeddedPage.doc.context,
-  ).copy(rawGroup);
+  const copiedGroup = objectCopier.copy(rawGroup);
   embeddedStream.dict.set(GROUP, copiedGroup);
 }

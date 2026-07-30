@@ -346,7 +346,7 @@ function exportTestRectangle(
     strokeStyle: "solid",
     roughness: 0,
     opacity: 100,
-    groupIds: [],
+    groupIds: [] as string[],
     frameId,
     roundness: { type: 3 },
     seed: 1,
@@ -386,6 +386,7 @@ async function openClassroomFixture(
   elements: Array<Record<string, unknown>>,
   slideOrder: Array<{ id: string; frameId: string; title: string; titleMode?: "automatic" | "custom" }>,
   fileName = "detached-slides.patterdraw",
+  whileOpening?: () => Promise<void>,
 ) {
   const sceneId = "scene";
   const project = {
@@ -418,7 +419,13 @@ async function openClassroomFixture(
     mimeType: "application/vnd.patterdraw+zip",
     buffer: Buffer.from(bytes),
   });
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible();
+  await whileOpening?.();
+  await expect(page.getByRole("textbox", { name: "Project title" }))
+    .toHaveValue(project.title);
+  await expect.poll(async () => (
+    await keyvalValue<{ id: string }>(page, "patterdraw:autosave:project:v1")
+  )?.id).toBe(project.id);
+  await expect(page.locator(".busy-overlay")).toHaveCount(0);
 }
 
 type AutosavedElementState = {
@@ -499,6 +506,28 @@ async function keyvalValue<T>(page: import("@playwright/test").Page, key: string
     database.close();
     return value;
   }, key) as Promise<T | undefined>;
+}
+
+async function setKeyvalValue(
+  page: import("@playwright/test").Page,
+  key: string,
+  value: unknown,
+): Promise<void> {
+  await page.evaluate(async ({ storedKey, storedValue }) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("keyval", "readwrite");
+      transaction.objectStore("keyval").put(storedValue, storedKey);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+  }, { storedKey: key, storedValue: value });
 }
 
 async function deleteKeyvalValues(page: import("@playwright/test").Page, keys: string[]): Promise<void> {
@@ -1417,6 +1446,357 @@ test("flushes ordinary project-title typing without the trailing autosave delay"
     intervals: [20, 50, 100],
     timeout: 500,
   }).toBe("Immediate autosave");
+});
+
+test("retries the latest dirty title during a real page reload", async ({ page }) => {
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    const state = window as Window & {
+      __reloadAutosaveFailure?: {
+        attempts: number;
+        failWrites: boolean;
+      };
+    };
+    state.__reloadAutosaveFailure = { attempts: 0, failWrites: true };
+    const originalPut = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function (
+      value: unknown,
+      key?: IDBValidKey,
+    ): IDBRequest<IDBValidKey> {
+      const testState = state.__reloadAutosaveFailure;
+      if (key === "patterdraw:autosave:project:v1" && testState) {
+        testState.attempts += 1;
+        if (testState.failWrites) {
+          throw new DOMException("Reload autosave test failure", "QuotaExceededError");
+        }
+      }
+      return originalPut.call(this, value, key);
+    };
+  });
+  const title = page.getByRole("textbox", { name: "Project title" });
+  await title.fill("Real page teardown autosav");
+  await title.focus();
+  await page.keyboard.type("e");
+  await expect(page.getByText("Save error", { exact: true })).toBeVisible();
+  expect((await keyvalValue<{ title: string }>(
+    page,
+    "patterdraw:autosave:project:v1",
+  ))?.title).not.toBe("Real page teardown autosave");
+  await page.evaluate(() => {
+    window.addEventListener("beforeunload", () => {
+      const state = (window as Window & {
+        __reloadAutosaveFailure?: { failWrites: boolean };
+      }).__reloadAutosaveFailure;
+      if (state) state.failWrites = false;
+    });
+  });
+
+  page.once("dialog", (dialog) => void dialog.accept());
+  await page.reload();
+
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("textbox", { name: "Project title" }))
+    .toHaveValue("Real page teardown autosave");
+});
+
+test("does not replace an unreadable autosave with a blank project", async ({ page }) => {
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  const stored = await keyvalValue<Record<string, unknown>>(
+    page,
+    "patterdraw:autosave:project:v1",
+  );
+  if (!stored) throw new Error("The startup autosave was not created.");
+  const recoverable = {
+    ...stored,
+    id: "recoverable-autosave",
+    title: "Recoverable classroom work",
+    pdfDocuments: {
+      missing: {
+        id: "missing",
+        name: "recoverable.pdf",
+        mimeType: "application/pdf",
+        byteLength: 4,
+        pageCount: 1,
+        archivePath: "documents/missing.pdf",
+      },
+    },
+  };
+  await setKeyvalValue(page, "patterdraw:autosave:project:v1", recoverable);
+  await deleteKeyvalValues(page, ["patterdraw:autosave:pdf:v1:missing"]);
+
+  await page.reload();
+
+  await expect(page.getByText(/Autosave could not be opened/)).toBeVisible();
+  await page.locator('.statusbar button[aria-label="Zoom in"]').click();
+  await page.waitForTimeout(1_200);
+  await expect.poll(async () => (
+    await keyvalValue<{ id: string; title: string }>(
+      page,
+      "patterdraw:autosave:project:v1",
+    )
+  )).toMatchObject({
+    id: "recoverable-autosave",
+    title: "Recoverable classroom work",
+  });
+});
+
+test("coalesces edits made during a slow autosave into one latest follow-up write", async ({ page }) => {
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    const state = window as Window & {
+      __slowAutosaveTest?: {
+        release: () => void;
+        requests: number;
+      };
+    };
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    state.__slowAutosaveTest = { release, requests: 0 };
+    Object.defineProperty(navigator, "locks", {
+      configurable: true,
+      value: {
+        request: async (_name: string, operation: () => Promise<unknown>) => {
+          const testState = state.__slowAutosaveTest;
+          if (!testState) return operation();
+          testState.requests += 1;
+          if (testState.requests === 1) await gate;
+          return operation();
+        },
+      },
+    });
+  });
+
+  const title = page.getByRole("textbox", { name: "Project title" });
+  await title.fill("Slow save started");
+  await expect.poll(() => page.evaluate(() => (
+    window as Window & { __slowAutosaveTest?: { requests: number } }
+  ).__slowAutosaveTest?.requests || 0)).toBe(1);
+
+  await title.fill("Superseded edit one");
+  await title.fill("Superseded edit two");
+  await title.fill("Newest coalesced edit");
+  await page.waitForTimeout(900);
+  expect(await page.evaluate(() => (
+    window as Window & { __slowAutosaveTest?: { requests: number } }
+  ).__slowAutosaveTest?.requests || 0)).toBe(1);
+
+  await page.evaluate(() => (
+    window as Window & { __slowAutosaveTest?: { release: () => void } }
+  ).__slowAutosaveTest?.release());
+  await expect.poll(async () => (
+    await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
+  )?.title).toBe("Newest coalesced edit");
+  await expect.poll(() => page.evaluate(() => (
+    window as Window & { __slowAutosaveTest?: { requests: number } }
+  ).__slowAutosaveTest?.requests || 0)).toBe(2);
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  await page.waitForTimeout(900);
+  expect(await page.evaluate(() => (
+    window as Window & { __slowAutosaveTest?: { requests: number } }
+  ).__slowAutosaveTest?.requests || 0)).toBe(2);
+});
+
+test("queues an urgent page-exit snapshot behind an in-flight save without a timer", async ({ page }) => {
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    const state = window as Window & {
+      __exitAutosaveTest?: {
+        release: () => void;
+        requests: number;
+        restoreTimers?: () => void;
+        zeroDelayTimers?: number;
+      };
+    };
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    state.__exitAutosaveTest = { release, requests: 0 };
+    Object.defineProperty(navigator, "locks", {
+      configurable: true,
+      value: {
+        request: async (_name: string, operation: () => Promise<unknown>) => {
+          const testState = state.__exitAutosaveTest;
+          if (!testState) return operation();
+          testState.requests += 1;
+          if (testState.requests === 1) await gate;
+          return operation();
+        },
+      },
+    });
+  });
+
+  const title = page.getByRole("textbox", { name: "Project title" });
+  await title.fill("Exit save still running");
+  await expect.poll(() => page.evaluate(() => (
+    window as Window & { __exitAutosaveTest?: { requests: number } }
+  ).__exitAutosaveTest?.requests || 0)).toBe(1);
+  await title.fill("Newest page-exit snapshot");
+
+  await page.evaluate(() => {
+    const state = (window as Window & {
+      __exitAutosaveTest?: {
+        restoreTimers?: () => void;
+        zeroDelayTimers?: number;
+      };
+    }).__exitAutosaveTest;
+    if (!state) throw new Error("Exit autosave test state is missing.");
+    const originalSetTimeout = window.setTimeout;
+    state.zeroDelayTimers = 0;
+    state.restoreTimers = () => {
+      window.setTimeout = originalSetTimeout;
+    };
+    window.setTimeout = ((handler: TimerHandler, timeout?: number) => {
+      if ((timeout || 0) === 0) state.zeroDelayTimers = (state.zeroDelayTimers || 0) + 1;
+      return originalSetTimeout(handler, timeout);
+    }) as typeof window.setTimeout;
+    window.dispatchEvent(new Event("pagehide"));
+  });
+  await page.evaluate(() => (
+    window as Window & { __exitAutosaveTest?: { release: () => void } }
+  ).__exitAutosaveTest?.release());
+
+  await expect.poll(async () => (
+    await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
+  )?.title).toBe("Newest page-exit snapshot");
+  await expect.poll(() => page.evaluate(() => (
+    window as Window & { __exitAutosaveTest?: { requests: number } }
+  ).__exitAutosaveTest?.requests || 0)).toBe(2);
+  const zeroDelayTimers = await page.evaluate(() => {
+    const state = (window as Window & {
+      __exitAutosaveTest?: {
+        restoreTimers?: () => void;
+        zeroDelayTimers?: number;
+      };
+    }).__exitAutosaveTest;
+    state?.restoreTimers?.();
+    return state?.zeroDelayTimers || 0;
+  });
+  expect(zeroDelayTimers).toBe(0);
+});
+
+test("keeps a newly opened project ahead of an older slow autosave", async ({ page }) => {
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    const state = window as Window & {
+      __openAutosaveRace?: {
+        release: () => void;
+        requests: number;
+      };
+    };
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    state.__openAutosaveRace = { release, requests: 0 };
+    Object.defineProperty(navigator, "locks", {
+      configurable: true,
+      value: {
+        request: async (_name: string, operation: () => Promise<unknown>) => {
+          const testState = state.__openAutosaveRace;
+          if (!testState) return operation();
+          testState.requests += 1;
+          if (testState.requests === 1) await gate;
+          return operation();
+        },
+      },
+    });
+  });
+
+  await page.getByRole("textbox", { name: "Project title" })
+    .fill("Old project save still running");
+  await expect.poll(() => page.evaluate(() => (
+    window as Window & { __openAutosaveRace?: { requests: number } }
+  ).__openAutosaveRace?.requests || 0)).toBe(1);
+  await openClassroomFixture(
+    page,
+    [],
+    [],
+    "replacement-after-slow-save.patterdraw",
+    async () => {
+      await expect(page.locator(".busy-overlay")).toContainText(
+        "Saving replacement-after-slow-save.patterdraw locally",
+      );
+      await page.evaluate(() => (
+        window as Window & {
+          __openAutosaveRace?: { release: () => void };
+        }
+      ).__openAutosaveRace?.release());
+    },
+  );
+  await expect.poll(() => page.evaluate(() => (
+    window as Window & { __openAutosaveRace?: { requests: number } }
+  ).__openAutosaveRace?.requests || 0)).toBe(2);
+
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "Project title" }))
+    .toHaveValue("Detached slides fixture");
+  await expect.poll(async () => (
+    await keyvalValue<{ id: string }>(page, "patterdraw:autosave:project:v1")
+  )?.id).toBe("browser-fixture");
+});
+
+test("retries a failed replacement autosave without restoring the old project", async ({ page }) => {
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  await page.getByRole("textbox", { name: "Project title" }).fill("Old project");
+  await expect.poll(async () => (
+    await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
+  )?.title).toBe("Old project");
+  await page.evaluate(() => {
+    const state = window as Window & {
+      __replacementFailure?: { failures: number };
+    };
+    state.__replacementFailure = { failures: 0 };
+    const originalPut = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function (
+      value: unknown,
+      key?: IDBValidKey,
+    ): IDBRequest<IDBValidKey> {
+      const replacement = value as { title?: string };
+      if (
+        key === "patterdraw:autosave:project:v1"
+        && replacement?.title === "Replacement retry"
+        && state.__replacementFailure?.failures === 0
+      ) {
+        state.__replacementFailure.failures += 1;
+        throw new DOMException("Replacement test failure", "QuotaExceededError");
+      }
+      return originalPut.call(this, value, key);
+    };
+  });
+
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "replacement.excalidraw",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({
+      type: "excalidraw",
+      version: 2,
+      source: "local",
+      name: "Replacement retry",
+      elements: [],
+      appState: {},
+      files: {},
+    })),
+  });
+
+  await expect(page.getByRole("textbox", { name: "Project title" }))
+    .toHaveValue("Replacement retry");
+  await expect(page.getByText("Save error", { exact: true })).toBeVisible();
+  expect((await keyvalValue<{ title: string }>(
+    page,
+    "patterdraw:autosave:project:v1",
+  ))?.title).toBe("Old project");
+
+  await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+  await expect.poll(async () => (
+    await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
+  )?.title).toBe("Replacement retry");
+
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "Project title" }))
+    .toHaveValue("Replacement retry");
 });
 
 test("keeps failed autosaves dirty and retries the latest snapshot on a later flush", async ({ page }) => {
@@ -4372,7 +4752,7 @@ test("animates a selected spinner and persists its numbered result", async ({ pa
     const snapshot = await autosavedMathToolSetSnapshot(page, "probability-piece");
     return snapshot?.fileIds[0] !== beforeSpin?.fileIds[0]
       && /^[1-8]$/.test(String(snapshot?.metadata[0]?.faceOrValue))
-      && snapshot.localSafe;
+      && snapshot?.localSafe === true;
   }).toBe(true);
   const afterSpin = await autosavedMathToolSetSnapshot(page, "probability-piece");
   expect(afterSpin?.angles).toEqual(beforeSpin?.angles);
@@ -5048,6 +5428,47 @@ test("adds a blank PDF page, reopens the project on Board, and exports it", asyn
   for await (const chunk of exportedPdf) pdfChunks.push(Buffer.from(chunk));
   const exported = await PDFDocument.load(Buffer.concat(pdfChunks));
   expect(exported.getPageCount()).toBe(2);
+});
+
+test("cleans deleted PDF bytes atomically when Web Locks are unavailable", async ({ page }) => {
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "locks", {
+      configurable: true,
+      value: undefined,
+    });
+  });
+  await openTestPdf(page);
+  await expect.poll(async () => Object.keys((
+    await keyvalValue<{ pdfDocuments: Record<string, unknown> }>(
+      page,
+      "patterdraw:autosave:project:v1",
+    )
+  )?.pdfDocuments || {})).toHaveLength(1);
+  const documentId = Object.keys((
+    await keyvalValue<{ pdfDocuments: Record<string, unknown> }>(
+      page,
+      "patterdraw:autosave:project:v1",
+    )
+  )?.pdfDocuments || {})[0];
+  if (!documentId) throw new Error("The imported PDF document was not saved.");
+  const pdfKey = `patterdraw:autosave:pdf:v1:${documentId}`;
+  await expect.poll(async () => (
+    await keyvalValue<Uint8Array>(page, pdfKey)
+  )?.byteLength || 0).toBeGreaterThan(0);
+
+  page.once("dialog", (dialog) => void dialog.accept());
+  await page.locator("#pdf-page-rail .pdf-page-item")
+    .first()
+    .getByRole("button", { name: "Delete selected page", exact: true })
+    .click();
+
+  await expect.poll(async () => Object.keys((
+    await keyvalValue<{ pdfDocuments: Record<string, unknown> }>(
+      page,
+      "patterdraw:autosave:project:v1",
+    )
+  )?.pdfDocuments || {})).toHaveLength(0);
+  await expect.poll(() => keyvalValue(page, pdfKey)).toBeUndefined();
 });
 
 test("deletes the selected PDF page without renumbering its source page", async ({ page }) => {

@@ -164,7 +164,10 @@ export function syncSlideFrameNames(
 export function detachElementsFromSlideFrames(
   elements: readonly ExcalidrawElement[],
 ): readonly ExcalidrawElement[] {
-  const slideFrameIds = new Set(elements.filter(isSlideFrame).map((frame) => frame.id));
+  const slideFrameIds = new Set<string>();
+  for (const element of elements) {
+    if (isSlideFrame(element)) slideFrameIds.add(element.id);
+  }
   if (!slideFrameIds.size) return elements;
   let changed = false;
   const next = elements.map((element) => {

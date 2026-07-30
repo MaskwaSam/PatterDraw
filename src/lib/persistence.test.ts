@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createBlankProject, type ClassroomProject } from "../types";
 
-const { delManyMock, getMock, keysMock, setManyMock } = vi.hoisted(() => ({
+const { createStoreMock, delManyMock, getMock, keysMock, setManyMock } = vi.hoisted(() => ({
+  createStoreMock: vi.fn(),
   delManyMock: vi.fn(),
   getMock: vi.fn(),
   keysMock: vi.fn(),
@@ -9,16 +10,96 @@ const { delManyMock, getMock, keysMock, setManyMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("idb-keyval", () => ({
+  createStore: createStoreMock,
   delMany: delManyMock,
   get: getMock,
   keys: keysMock,
   setMany: setManyMock,
 }));
 
-import { clearAutosave, loadAutosave, saveAutosave } from "./persistence";
+import {
+  clearAutosave,
+  commitAutosaveTransaction,
+  getAutosaveWriteEntries,
+  getStaleAutosaveKeys,
+  loadAutosave,
+  saveAutosave,
+} from "./persistence";
 
 const PDF_SHA256 = "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a";
 const REVERSED_PDF_SHA256 = "ee10da4aefe61a37df1dee937ca3221afa3b2351f9ea34edbbb769573c6785f7";
+
+function fakeTransactionStore(
+  initialEntries: readonly [string, unknown][],
+  putFailure?: Error,
+) {
+  const committed = new Map<string, unknown>(initialEntries);
+  const staged = new Map(committed);
+  const puts: string[] = [];
+  const deletes: string[] = [];
+  let pendingReads = 0;
+  let completeScheduled = false;
+  let aborted = false;
+  const transaction = {
+    error: null as Error | null,
+    onabort: null as (() => void) | null,
+    oncomplete: null as (() => void) | null,
+    onerror: null as (() => void) | null,
+    abort: vi.fn(() => {
+      aborted = true;
+      transaction.error = putFailure || new Error("Transaction aborted");
+      transaction.onabort?.();
+    }),
+  };
+  const request = <T>(result: T) => {
+    pendingReads += 1;
+    const value = {
+      error: null as Error | null,
+      onsuccess: null as (() => void) | null,
+      onerror: null as (() => void) | null,
+      result: undefined as T | undefined,
+    };
+    queueMicrotask(() => {
+      if (aborted) return;
+      value.result = result;
+      value.onsuccess?.();
+      pendingReads -= 1;
+      if (pendingReads === 0 && !completeScheduled) {
+        completeScheduled = true;
+        queueMicrotask(() => {
+          if (aborted) return;
+          committed.clear();
+          for (const [key, entry] of staged) committed.set(key, entry);
+          transaction.oncomplete?.();
+        });
+      }
+    });
+    return value;
+  };
+  const store = {
+    transaction,
+    get: (key: string) => request(committed.get(key)),
+    getAllKeys: () => request([...committed.keys()]),
+    put: (value: unknown, key: string) => {
+      puts.push(key);
+      if (putFailure) throw putFailure;
+      staged.set(key, value);
+      return {};
+    },
+    delete: (key: string) => {
+      deletes.push(key);
+      staged.delete(key);
+      return {};
+    },
+  };
+  return {
+    committed,
+    deletes,
+    puts,
+    store: store as unknown as IDBObjectStore,
+    transaction,
+  };
+}
 
 describe("PatterDraw autosave persistence", () => {
   beforeEach(() => {
@@ -27,6 +108,20 @@ describe("PatterDraw autosave persistence", () => {
     keysMock.mockReset();
     keysMock.mockResolvedValue([]);
     setManyMock.mockReset();
+  });
+
+  it("identifies stale current and legacy PDF keys without touching unrelated storage", () => {
+    expect(getStaleAutosaveKeys([
+      "patterdraw:autosave:pdf:v1:keep",
+      "patterdraw:autosave:pdf:v1:delete",
+      "excalidraw-classroom:autosave:project:v1",
+      "excalidraw-classroom:autosave:pdf:v1:legacy",
+      "patterdraw:screenshot-library:v1",
+    ], new Set(["patterdraw:autosave:pdf:v1:keep"]))).toEqual([
+      "patterdraw:autosave:pdf:v1:delete",
+      "excalidraw-classroom:autosave:project:v1",
+      "excalidraw-classroom:autosave:pdf:v1:legacy",
+    ]);
   });
 
   it("writes the manifest and every referenced PDF in one atomic transaction", async () => {
@@ -69,6 +164,169 @@ describe("PatterDraw autosave persistence", () => {
     await expect(saveAutosave(project, {})).rejects.toThrow(
       "PDF data does not match project metadata for worksheet.pdf.",
     );
+    expect(setManyMock).not.toHaveBeenCalled();
+  });
+
+  it("omits unchanged PDF bytes from an atomic autosave transaction", () => {
+    const project = createBlankProject();
+    const pdfBytes = new Uint8Array([1, 2, 3, 4]);
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "worksheet.pdf",
+      mimeType: "application/pdf",
+      byteLength: pdfBytes.byteLength,
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+      sha256: PDF_SHA256,
+    };
+    const storedProject = structuredClone(project);
+
+    expect(getAutosaveWriteEntries(
+      project,
+      { pdf: pdfBytes },
+      storedProject,
+      ["patterdraw:autosave:pdf:v1:pdf"],
+    )).toEqual([
+      ["patterdraw:autosave:project:v1", expect.objectContaining({ id: project.id })],
+    ]);
+  });
+
+  it("includes changed or missing PDF bytes in an atomic autosave transaction", () => {
+    const project = createBlankProject();
+    const pdfBytes = new Uint8Array([1, 2, 3, 4]);
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "worksheet.pdf",
+      mimeType: "application/pdf",
+      byteLength: pdfBytes.byteLength,
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+      sha256: PDF_SHA256,
+    };
+    const storedProject = structuredClone(project);
+    storedProject.pdfDocuments.pdf.sha256 = REVERSED_PDF_SHA256;
+
+    expect(getAutosaveWriteEntries(
+      project,
+      { pdf: pdfBytes },
+      storedProject,
+      ["patterdraw:autosave:pdf:v1:pdf"],
+    )).toEqual([
+      ["patterdraw:autosave:project:v1", project],
+      ["patterdraw:autosave:pdf:v1:pdf", pdfBytes],
+    ]);
+    expect(getAutosaveWriteEntries(
+      project,
+      { pdf: pdfBytes },
+      project,
+      [],
+    )).toEqual([
+      ["patterdraw:autosave:project:v1", project],
+      ["patterdraw:autosave:pdf:v1:pdf", pdfBytes],
+    ]);
+  });
+
+  it("commits the production no-lock transaction without rewriting an unchanged PDF", async () => {
+    const project = createBlankProject();
+    const pdfBytes = new Uint8Array([1, 2, 3, 4]);
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "worksheet.pdf",
+      mimeType: "application/pdf",
+      byteLength: pdfBytes.byteLength,
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+      sha256: PDF_SHA256,
+    };
+    const pdfKey = "patterdraw:autosave:pdf:v1:pdf";
+    const staleKey = "patterdraw:autosave:pdf:v1:stale";
+    const legacyKey = "excalidraw-classroom:autosave:project:v1";
+    const unrelatedKey = "patterdraw:library:v1";
+    const transaction = fakeTransactionStore([
+      ["patterdraw:autosave:project:v1", structuredClone(project)],
+      [pdfKey, pdfBytes],
+      [staleKey, new Uint8Array([9])],
+      [legacyKey, structuredClone(project)],
+      [unrelatedKey, "keep"],
+    ]);
+
+    await commitAutosaveTransaction(
+      transaction.store,
+      project,
+      { pdf: pdfBytes },
+      new Set([pdfKey]),
+    );
+
+    expect(transaction.puts).toEqual(["patterdraw:autosave:project:v1"]);
+    expect(transaction.deletes).toEqual([staleKey, legacyKey]);
+    expect(transaction.committed.get(pdfKey)).toBe(pdfBytes);
+    expect(transaction.committed.get(staleKey)).toBeUndefined();
+    expect(transaction.committed.get(unrelatedKey)).toBe("keep");
+    expect(transaction.transaction.abort).not.toHaveBeenCalled();
+  });
+
+  it("aborts the production no-lock transaction when a write throws", async () => {
+    const project = createBlankProject();
+    const original = structuredClone(project);
+    const failure = new Error("IndexedDB put failed");
+    const transaction = fakeTransactionStore([
+      ["patterdraw:autosave:project:v1", original],
+    ], failure);
+
+    await expect(commitAutosaveTransaction(
+      transaction.store,
+      { ...project, title: "Replacement" },
+      {},
+      new Set(),
+    )).rejects.toBe(failure);
+
+    expect(transaction.transaction.abort).toHaveBeenCalledOnce();
+    expect(transaction.committed.get("patterdraw:autosave:project:v1")).toBe(original);
+  });
+
+  it.each([
+    {
+      name: "external links",
+      element: { id: "unsafe", type: "rectangle", link: "https://example.invalid" },
+      files: {},
+      message: /External links/,
+    },
+    {
+      name: "custom-data URLs",
+      element: { id: "unsafe", type: "rectangle", customData: { url: "https://example.invalid" } },
+      files: {},
+      message: /External links/,
+    },
+    {
+      name: "web embeds",
+      element: { id: "unsafe", type: "embeddable" },
+      files: {},
+      message: /Web embeds/,
+    },
+    {
+      name: "missing image data",
+      element: { id: "unsafe", type: "image", fileId: "missing" },
+      files: {},
+      message: /missing its local data/,
+    },
+    {
+      name: "unsafe image sources",
+      element: { id: "unsafe", type: "image", fileId: "file" },
+      files: {
+        file: {
+          id: "file",
+          mimeType: "image/png",
+          dataURL: "https://example.invalid/image.png",
+        },
+      },
+      message: /unsafe local data/,
+    },
+  ])("rejects $name on the prepared low-memory save path", async ({ element, files, message }) => {
+    const project = createBlankProject();
+    project.scenes[project.activeSceneId].elements = [element];
+    project.scenes[project.activeSceneId].files = files as Record<string, Record<string, unknown>>;
+
+    await expect(saveAutosave(project, {}, { prepared: true })).rejects.toThrow(message);
     expect(setManyMock).not.toHaveBeenCalled();
   });
 
@@ -316,6 +574,35 @@ describe("PatterDraw autosave persistence", () => {
       "patterdraw:autosave:pdf:v1:deleted",
       "excalidraw-classroom:autosave:pdf:v1:legacy",
     ]);
+  });
+
+  it("keeps a completed autosave successful when stale-key cleanup fails", async () => {
+    const project = createBlankProject();
+    keysMock.mockResolvedValue([
+      "patterdraw:autosave:project:v1",
+      "patterdraw:autosave:pdf:v1:stale",
+    ]);
+    delManyMock.mockRejectedValueOnce(new Error("Cleanup failed"));
+    const request = vi.fn(async (_name: string, operation: () => Promise<void>) => operation());
+    const originalLocks = navigator.locks;
+    Object.defineProperty(navigator, "locks", {
+      configurable: true,
+      value: { request },
+    });
+
+    try {
+      await expect(saveAutosave(project, {})).resolves.toMatchObject({
+        totalBytes: expect.any(Number),
+      });
+    } finally {
+      Object.defineProperty(navigator, "locks", {
+        configurable: true,
+        value: originalLocks,
+      });
+    }
+
+    expect(setManyMock).toHaveBeenCalledOnce();
+    expect(delManyMock).toHaveBeenCalledWith(["patterdraw:autosave:pdf:v1:stale"]);
   });
 
   it("loads a legacy Canvas Classroom autosave", async () => {

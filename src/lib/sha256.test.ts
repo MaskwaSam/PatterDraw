@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sha256Hex } from "./sha256";
+import { cachedSha256Hex, sha256Hex } from "./sha256";
 
 describe("local SHA-256", () => {
   it("matches the standard empty and abc vectors", async () => {
@@ -14,6 +14,13 @@ describe("local SHA-256", () => {
   it("caches the digest promise for immutable byte-array identities", () => {
     const bytes = new Uint8Array([1, 2, 3, 4]);
     expect(sha256Hex(bytes)).toBe(sha256Hex(bytes));
+  });
+
+  it("exposes a resolved digest without another asynchronous hash pass", async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    expect(cachedSha256Hex(bytes)).toBeUndefined();
+    const digest = await sha256Hex(bytes);
+    expect(cachedSha256Hex(bytes)).toBe(digest);
   });
 
   it("pads fallback blocks correctly around the SHA-256 boundary", async () => {

@@ -30,9 +30,11 @@ vi.mock("@excalidraw/excalidraw", () => ({
 import {
   exportAnnotatedPdf,
   getPdfAnnotationExportDimensions,
+  getPdfAnnotationRasterBudget,
   getPdfPageExportBounds,
   getSlidePdfExportDimensions,
 } from "./export-pdf";
+import { getPdfRasterBudget } from "./raster-limits";
 import { copySourcePageTransparencyGroup } from "./source-page";
 
 const baseElement = {
@@ -281,6 +283,60 @@ describe("PDF export bounds", () => {
     expect(dimensions.scale).toBeLessThan(0.01);
   });
 
+  it("uses the active low-memory budget for annotation and slide rasters", () => {
+    const budget = getPdfRasterBudget({ deviceMemory: 2, hardwareConcurrency: 2 });
+    const annotations = getPdfAnnotationExportDimensions(10_000, 10_000, 1, budget);
+    const slide = getSlidePdfExportDimensions(10_000, 10_000, budget);
+    expect(annotations.width * annotations.height).toBeLessThanOrEqual(4_000_000);
+    expect(slide.width * slide.height).toBeLessThanOrEqual(4_000_000);
+    expect(annotations.width).toBeLessThanOrEqual(4_096);
+    expect(slide.height).toBeLessThanOrEqual(4_096);
+  });
+
+  it("shares raster memory across annotated pages rather than blank source pages", () => {
+    const blankScene = {
+      id: "blank",
+      name: "Blank",
+      elements: [baseElement],
+      appState: {},
+      files: {},
+      pdfPage: {
+        documentId: "pdf",
+        pageIndex: 0,
+        width: 600,
+        height: 800,
+        rotation: 0,
+        backgroundElementId: "background",
+      },
+    } satisfies SerializedScene;
+    const annotation = {
+      ...baseElement,
+      id: "annotation",
+      type: "rectangle",
+      x: 20,
+      y: 30,
+      width: 100,
+      height: 80,
+    };
+    const scenes = Array.from({ length: 250 }, (_, pageIndex) => ({
+      ...blankScene,
+      id: `page-${pageIndex}`,
+      elements: pageIndex === 249 ? [baseElement, annotation] : [baseElement],
+      pdfPage: {
+        ...blankScene.pdfPage,
+        pageIndex,
+      },
+    }));
+    const lowMemoryBudget = getPdfRasterBudget({
+      deviceMemory: 2,
+      hardwareConcurrency: 2,
+    });
+
+    expect(
+      getPdfAnnotationRasterBudget(scenes, lowMemoryBudget).maxPixelsPerPage,
+    ).toBe(4_000_000);
+  });
+
   it("renders OpenBoard-fit annotations only at the resolution needed by the fitted page", () => {
     expect(getPdfAnnotationExportDimensions(6_000, 8_000, 0.1)).toEqual({
       width: 1_200,
@@ -333,6 +389,94 @@ describe("PDF export bounds", () => {
     const output = await PDFDocument.load(await outputBlob.arrayBuffer());
     expect(output.getPageCount()).toBe(1);
     expect(output.getPage(0).getSize()).toEqual({ width: 600, height: 800 });
+  });
+
+  it("batches pages from one donor so shared PDF resources are copied once", async () => {
+    const source = await PDFDocument.create();
+    const sourcePageOne = source.addPage([600, 800]);
+    sourcePageOne.drawRectangle({
+      x: 40,
+      y: 40,
+      width: 120,
+      height: 80,
+    });
+    const sourcePageTwo = source.addPage([600, 800]);
+    sourcePageTwo.drawRectangle({
+      x: 80,
+      y: 80,
+      width: 120,
+      height: 80,
+    });
+    const sharedGroup = source.context.register(source.context.obj({
+      S: PDFName.of("Transparency"),
+      CS: PDFName.of("DeviceRGB"),
+    }));
+    sourcePageOne.node.set(PDFName.of("Group"), sharedGroup);
+    sourcePageTwo.node.set(PDFName.of("Group"), sharedGroup);
+    const sourceBytes = await source.save();
+    const scenes = Object.fromEntries([0, 1].map((pageIndex) => {
+      const id = `page-${pageIndex}`;
+      return [id, {
+        id,
+        name: `Page ${pageIndex + 1}`,
+        elements: [{ ...baseElement, id: `${id}-background` }],
+        appState: {},
+        files: {},
+        pdfPage: {
+          documentId: "pdf",
+          pageIndex,
+          width: 600,
+          height: 800,
+          rotation: 0 as const,
+          backgroundElementId: `${id}-background`,
+        },
+      } satisfies SerializedScene];
+    }));
+    const project = {
+      schemaVersion: 1,
+      id: "batched-donor",
+      title: "Batched donor",
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+      activeSceneId: "page-0",
+      scenes,
+      slideOrder: [],
+      pdfPageOrder: ["page-0", "page-1"],
+      pdfDocuments: {
+        pdf: {
+          id: "pdf",
+          name: "source.pdf",
+          mimeType: "application/pdf",
+          byteLength: sourceBytes.byteLength,
+          pageCount: 2,
+          archivePath: "documents/pdf.pdf",
+        },
+      },
+    } satisfies ClassroomProject;
+    const embedPages = vi.spyOn(PDFDocument.prototype, "embedPages");
+
+    try {
+      const outputBlob = await exportAnnotatedPdf(project, { pdf: sourceBytes });
+      expect(embedPages).toHaveBeenCalledOnce();
+      expect(embedPages.mock.calls[0][0]).toHaveLength(2);
+
+      const output = await PDFDocument.load(await outputBlob.arrayBuffer());
+      const groupReferences = output.getPages().map((page) => {
+        const xObjects = page.node.Resources()?.lookupMaybe(
+          PDFName.of("XObject"),
+          PDFDict,
+        );
+        const firstXObject = xObjects?.entries()[0]?.[1];
+        if (!firstXObject) throw new Error("Expected an embedded source page.");
+        const embeddedForm = output.context.lookup(firstXObject, PDFStream);
+        const group = embeddedForm.dict.get(PDFName.of("Group"));
+        if (!group) throw new Error("Expected a copied transparency group.");
+        return group.toString();
+      });
+      expect(groupReferences[0]).toBe(groupReferences[1]);
+    } finally {
+      embedPages.mockRestore();
+    }
   });
 
   it("preserves a source page transparency group on the embedded Form XObject", async () => {

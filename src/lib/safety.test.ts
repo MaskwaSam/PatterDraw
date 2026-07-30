@@ -197,6 +197,29 @@ describe("student safety", () => {
     } as unknown as ClassroomProject)).toThrow(/title mode must be automatic or custom/);
   });
 
+  it("does not confuse scene and frame identities containing separator characters", () => {
+    const project = createBlankProject();
+    project.activeSceneId = "a";
+    project.scenes = {
+      a: {
+        ...scene([]),
+        id: "a",
+      },
+      ["a\u0000b"]: {
+        ...scene([{ id: "c", type: "frame" }]),
+        id: "a\u0000b",
+      },
+    };
+    project.slideOrder = [{
+      id: "slide",
+      sceneId: "a",
+      frameId: "b\u0000c",
+      title: "Dangling",
+    }];
+
+    expect(() => assertSafeProject(project)).toThrow(/missing frame/);
+  });
+
   it("strips invalid slide tags while sanitizing imports and rejects them during strict validation", () => {
     const invalid = scene([{
       id: "frame",

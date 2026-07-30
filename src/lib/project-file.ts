@@ -1,5 +1,10 @@
 import type { ClassroomProject, LoadedClassroomProject, PdfDocumentId } from "../types";
-import { assertSafeProject, MAX_PROJECT_BYTES, sanitizeProject } from "./safety";
+import {
+  assertSafeProject,
+  assertSanitizedProject,
+  MAX_PROJECT_BYTES,
+  sanitizeProject,
+} from "./safety";
 import { sha256Hex } from "./sha256";
 import { assertProjectFitsContentBudget } from "./project-budget";
 import { createProjectArchive, extractProjectArchive } from "./project-archive-client";
@@ -8,16 +13,17 @@ const MANIFEST_PATH = "project.json";
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
-export async function encodeProjectFile(
+async function encodeProject(
   project: ClassroomProject,
   pdfBytes: Record<PdfDocumentId, Uint8Array>,
-  maxUncompressedBytes = MAX_PROJECT_BYTES,
+  maxUncompressedBytes: number,
+  prepared: boolean,
 ): Promise<Uint8Array> {
   if (!Number.isSafeInteger(maxUncompressedBytes) || maxUncompressedBytes <= 0) {
     throw new Error("The project size limit is invalid.");
   }
-  const safe = sanitizeProject(project);
-  assertSafeProject(safe);
+  const safe = prepared ? project : sanitizeProject(project);
+  assertSanitizedProject(safe);
   const verifiedDocuments = await Promise.all(
     Object.entries(safe.pdfDocuments).map(async ([id, source]) => {
       const bytes = pdfBytes[id];
@@ -49,6 +55,22 @@ export async function encodeProjectFile(
     entries[source.archivePath] = bytes;
   }
   return createProjectArchive(entries, maxUncompressedBytes);
+}
+
+export function encodeProjectFile(
+  project: ClassroomProject,
+  pdfBytes: Record<PdfDocumentId, Uint8Array>,
+  maxUncompressedBytes = MAX_PROJECT_BYTES,
+): Promise<Uint8Array> {
+  return encodeProject(project, pdfBytes, maxUncompressedBytes, false);
+}
+
+export function encodePreparedProjectFile(
+  project: ClassroomProject,
+  pdfBytes: Record<PdfDocumentId, Uint8Array>,
+  maxUncompressedBytes = MAX_PROJECT_BYTES,
+): Promise<Uint8Array> {
+  return encodeProject(project, pdfBytes, maxUncompressedBytes, true);
 }
 
 export async function decodeProjectFile(

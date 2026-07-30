@@ -17,7 +17,13 @@ import type {
 import { createLocalId } from "../id";
 import { MAX_PDF_BYTES, MAX_PDF_PAGES } from "../safety";
 import { sha256Hex } from "../sha256";
-import { getPdfImportRasterScale, type PdfPageRasterSize } from "./raster-limits";
+import {
+  getBrowserPdfRasterBudget,
+  getPdfImportRasterScale,
+  pdfRasterCanvasToPngDataUrl,
+  releasePdfRasterCanvas,
+  type PdfPageRasterSize,
+} from "./raster-limits";
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -27,18 +33,16 @@ export interface ImportedPdf {
   scenes: SerializedScene[];
 }
 
+interface ParsedPdfPages {
+  documentId: string;
+  pageCount: number;
+  scenes: SerializedScene[];
+}
+
 function normalizedRotation(value: number): 0 | 90 | 180 | 270 {
   const rotation = ((value % 360) + 360) % 360;
   if (rotation === 0 || rotation === 90 || rotation === 180 || rotation === 270) return rotation;
   return 0;
-}
-
-function canvasToPngDataUrl(canvas: HTMLCanvasElement): DataURL {
-  const dataURL = canvas.toDataURL("image/png");
-  if (!dataURL.startsWith("data:image/png")) {
-    throw new Error("This PDF page is too large for the browser to render safely.");
-  }
-  return dataURL as DataURL;
 }
 
 async function renderPageScene(
@@ -55,88 +59,91 @@ async function renderPageScene(
     const canvas = window.document.createElement("canvas");
     canvas.width = Math.ceil(renderViewport.width);
     canvas.height = Math.ceil(renderViewport.height);
-    const context = canvas.getContext("2d", { alpha: false });
-    if (!context) throw new Error("This browser cannot render PDF pages.");
+    try {
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) throw new Error("This browser cannot render PDF pages.");
 
-    await page.render({ canvas, canvasContext: context, viewport: renderViewport }).promise;
-    const sceneId = createLocalId();
-    const backgroundElementId = createLocalId();
-    const fileId = createLocalId() as FileId;
-    const workspace: PdfPageWorkspace = {
-      documentId,
-      pageIndex,
-      width: viewport.width,
-      height: viewport.height,
-      rotation: normalizedRotation(viewport.rotation),
-      backgroundElementId,
-    };
-    const dataURL = canvasToPngDataUrl(canvas);
-    canvas.width = 1;
-    canvas.height = 1;
-    const file: BinaryFileData = {
-      id: fileId,
-      mimeType: "image/png",
-      dataURL,
-      created: Date.now(),
-    };
-    const elements = convertToExcalidrawElements(
-      [
-        {
-          id: backgroundElementId,
-          type: "image",
-          x: 0,
-          y: 0,
-          width: viewport.width,
-          height: viewport.height,
-          fileId,
-          status: "saved",
-          locked: true,
-          strokeColor: "transparent",
-          backgroundColor: "transparent",
-          customData: {
-            classroomRole: "pdf-background",
-            pdfDocumentId: documentId,
-            pdfPageIndex: pageIndex,
+      await page.render({ canvas, canvasContext: context, viewport: renderViewport }).promise;
+      const sceneId = createLocalId();
+      const backgroundElementId = createLocalId();
+      const fileId = createLocalId() as FileId;
+      const workspace: PdfPageWorkspace = {
+        documentId,
+        pageIndex,
+        width: viewport.width,
+        height: viewport.height,
+        rotation: normalizedRotation(viewport.rotation),
+        backgroundElementId,
+      };
+      const dataURL = pdfRasterCanvasToPngDataUrl(canvas) as DataURL;
+      const file: BinaryFileData = {
+        id: fileId,
+        mimeType: "image/png",
+        dataURL,
+        created: Date.now(),
+      };
+      const elements = convertToExcalidrawElements(
+        [
+          {
+            id: backgroundElementId,
+            type: "image",
+            x: 0,
+            y: 0,
+            width: viewport.width,
+            height: viewport.height,
+            fileId,
+            status: "saved",
+            locked: true,
+            strokeColor: "transparent",
+            backgroundColor: "transparent",
+            customData: {
+              classroomRole: "pdf-background",
+              pdfDocumentId: documentId,
+              pdfPageIndex: pageIndex,
+            },
           },
-        },
-      ],
-      { regenerateIds: false },
-    );
+        ],
+        { regenerateIds: false },
+      );
 
-    return {
-      id: sceneId,
-      name: `${name} — page ${pageIndex + 1}`,
-      elements: elements as unknown as readonly Record<string, unknown>[],
-      appState: {
-        viewBackgroundColor: "#f2f4f7",
-        scrollX: 80,
-        scrollY: 60,
-        zoom: { value: 0.9 },
-      },
-      files: {
-        [fileId]: file as unknown as Record<string, unknown>,
-      },
-      pdfPage: workspace,
-    };
+      return {
+        id: sceneId,
+        name: `${name} — page ${pageIndex + 1}`,
+        elements: elements as unknown as readonly Record<string, unknown>[],
+        appState: {
+          viewBackgroundColor: "#f2f4f7",
+          scrollX: 80,
+          scrollY: 60,
+          zoom: { value: 0.9 },
+        },
+        files: {
+          [fileId]: file as unknown as Record<string, unknown>,
+        },
+        pdfPage: workspace,
+      };
+    } finally {
+      // Also covers failures before PNG conversion (for example, a missing 2D
+      // context or a rejected PDF.js render).
+      releasePdfRasterCanvas(canvas);
+    }
   } finally {
     page.cleanup();
   }
 }
 
-export async function importPdf(file: File): Promise<ImportedPdf> {
-  if (file.type && file.type !== "application/pdf") throw new Error("Choose a PDF file.");
-  if (file.size > MAX_PDF_BYTES) throw new Error("The PDF is larger than the classroom limit.");
-  const bytes = new Uint8Array(await file.arrayBuffer());
+async function parsePdfPages(file: File): Promise<ParsedPdfPages> {
   const loadingTask = getDocument({
-    data: bytes.slice(),
+    // PDF.js may transfer this buffer to its worker. Do not keep a second
+    // full-size copy alive just to preserve the immutable source; reread the
+    // local File only after the parser and its canvases have been released.
+    data: new Uint8Array(await file.arrayBuffer()),
     useSystemFonts: false,
     useWorkerFetch: false,
     useWasm: false,
   });
 
-  let document: PDFDocumentProxy | null = null;
   try {
-    document = await loadingTask.promise;
+    const document = await loadingTask.promise;
     if (document.numPages > MAX_PDF_PAGES) {
       throw new Error(`The PDF has more than ${MAX_PDF_PAGES} pages.`);
     }
@@ -151,24 +158,16 @@ export async function importPdf(file: File): Promise<ImportedPdf> {
         page.cleanup();
       }
     }
-    const rasterScale = getPdfImportRasterScale(pageSizes, window.devicePixelRatio || 1);
+    const rasterScale = getPdfImportRasterScale(
+      pageSizes,
+      window.devicePixelRatio || 1,
+      getBrowserPdfRasterBudget(),
+    );
     const scenes: SerializedScene[] = [];
     for (let pageIndex = 0; pageIndex < document.numPages; pageIndex += 1) {
       scenes.push(await renderPageScene(document, documentId, pageIndex, file.name, rasterScale));
     }
-    return {
-      source: {
-        id: documentId,
-        name: file.name,
-        mimeType: "application/pdf",
-        byteLength: bytes.byteLength,
-        sha256: await sha256Hex(bytes),
-        pageCount: document.numPages,
-        archivePath: `documents/${documentId}.pdf`,
-      },
-      bytes,
-      scenes,
-    };
+    return { documentId, pageCount: document.numPages, scenes };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (/password/i.test(message)) throw new Error("Password-protected PDFs are not supported.");
@@ -176,4 +175,28 @@ export async function importPdf(file: File): Promise<ImportedPdf> {
   } finally {
     await loadingTask.destroy();
   }
+}
+
+export async function importPdf(file: File): Promise<ImportedPdf> {
+  if (file.type && file.type !== "application/pdf") throw new Error("Choose a PDF file.");
+  if (file.size > MAX_PDF_BYTES) throw new Error("The PDF is larger than the classroom limit.");
+
+  const parsed = await parsePdfPages(file);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (bytes.byteLength !== file.size) {
+    throw new Error("The local PDF changed while it was being imported.");
+  }
+  return {
+    source: {
+      id: parsed.documentId,
+      name: file.name,
+      mimeType: "application/pdf",
+      byteLength: bytes.byteLength,
+      sha256: await sha256Hex(bytes),
+      pageCount: parsed.pageCount,
+      archivePath: `documents/${parsed.documentId}.pdf`,
+    },
+    bytes,
+    scenes: parsed.scenes,
+  };
 }

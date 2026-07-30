@@ -1,14 +1,67 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_PDF_RASTER_BUDGET,
   MAX_PDF_RASTER_EDGE,
   MAX_PDF_RASTER_PIXELS_PER_DOCUMENT,
   MAX_PDF_RASTER_PIXELS_PER_PAGE,
   getPdfImportRasterScale,
+  getPdfExportRasterBudget,
+  getPdfRasterBudget,
+  pdfRasterCanvasToPngBytes,
+  pdfRasterCanvasToPngDataUrl,
+  releasePdfRasterCanvas,
 } from "./raster-limits";
 
 describe("PDF import raster limits", () => {
   it("keeps the preferred high-resolution scale for an ordinary worksheet", () => {
     expect(getPdfImportRasterScale([{ width: 612, height: 792 }], 2)).toBe(3);
+  });
+
+  it("keeps ordinary one-page worksheets sharp on a 4 GB device", () => {
+    const budget = getPdfRasterBudget({ deviceMemory: 4, hardwareConcurrency: 4 });
+    expect(getPdfImportRasterScale([{ width: 612, height: 792 }], 2, budget)).toBe(3);
+  });
+
+  it("uses progressively smaller aggregate budgets on low-memory devices", () => {
+    const normal = getPdfRasterBudget({ deviceMemory: 8, hardwareConcurrency: 8 });
+    const low = getPdfRasterBudget({ deviceMemory: 4, hardwareConcurrency: 4 });
+    const veryLow = getPdfRasterBudget({ deviceMemory: 2, hardwareConcurrency: 2 });
+    expect(normal).toEqual(DEFAULT_PDF_RASTER_BUDGET);
+    expect(low).toEqual({
+      maxEdge: 6_144,
+      maxPixelsPerPage: 8_000_000,
+      maxPixelsPerDocument: 32_000_000,
+    });
+    expect(veryLow).toEqual({
+      maxEdge: 4_096,
+      maxPixelsPerPage: 4_000_000,
+      maxPixelsPerDocument: 16_000_000,
+    });
+
+    const pages = Array.from({ length: 20 }, () => ({ width: 612, height: 792 }));
+    expect(getPdfImportRasterScale(pages, 2, low))
+      .toBeLessThan(getPdfImportRasterScale(pages, 2, normal));
+    expect(getPdfImportRasterScale(pages, 2, veryLow))
+      .toBeLessThan(getPdfImportRasterScale(pages, 2, low));
+  });
+
+  it("shares the document raster budget across multi-page exports", () => {
+    expect(getPdfExportRasterBudget(DEFAULT_PDF_RASTER_BUDGET, 1).maxPixelsPerPage)
+      .toBe(MAX_PDF_RASTER_PIXELS_PER_PAGE);
+    expect(getPdfExportRasterBudget(DEFAULT_PDF_RASTER_BUDGET, 20).maxPixelsPerPage)
+      .toBe(3_200_000);
+    expect(() => getPdfExportRasterBudget(DEFAULT_PDF_RASTER_BUDGET, 0))
+      .toThrow(/at least one page/);
+  });
+
+  it("uses core count only when the browser does not report memory", () => {
+    expect(getPdfRasterBudget({ deviceMemory: 8, hardwareConcurrency: 2 }))
+      .toEqual(DEFAULT_PDF_RASTER_BUDGET);
+    expect(getPdfRasterBudget({ hardwareConcurrency: 2 })).toEqual({
+      maxEdge: 4_096,
+      maxPixelsPerPage: 4_000_000,
+      maxPixelsPerDocument: 16_000_000,
+    });
   });
 
   it("caps every edge, page bitmap, and aggregate document bitmap", () => {
@@ -30,5 +83,44 @@ describe("PDF import raster limits", () => {
       .toThrow(/unsupported dimensions/);
     expect(() => getPdfImportRasterScale([{ width: 14_401, height: 792 }]))
       .toThrow(/unsupported dimensions/);
+  });
+});
+
+describe("PDF raster canvas lifecycle", () => {
+  it("discards a canvas backing store after data URL encoding", () => {
+    const canvas = {
+      width: 2_000,
+      height: 3_000,
+      toDataURL: () => "data:image/png;base64,AA==",
+    } as unknown as HTMLCanvasElement;
+    expect(pdfRasterCanvasToPngDataUrl(canvas)).toBe("data:image/png;base64,AA==");
+    expect({ width: canvas.width, height: canvas.height }).toEqual({ width: 0, height: 0 });
+  });
+
+  it("discards a canvas backing store before converting the PNG blob to bytes", async () => {
+    const canvas = {
+      width: 2_000,
+      height: 3_000,
+      toBlob: (callback: BlobCallback) => callback(new Blob([new Uint8Array([1, 2, 3])])),
+    } as unknown as HTMLCanvasElement;
+    const bytes = await pdfRasterCanvasToPngBytes(canvas);
+    expect(bytes).toEqual(new Uint8Array([1, 2, 3]));
+    expect({ width: canvas.width, height: canvas.height }).toEqual({ width: 0, height: 0 });
+  });
+
+  it("discards a canvas backing store when PNG encoding fails", async () => {
+    const canvas = {
+      width: 2_000,
+      height: 3_000,
+      toBlob: (callback: BlobCallback) => callback(null),
+    } as unknown as HTMLCanvasElement;
+    await expect(pdfRasterCanvasToPngBytes(canvas)).rejects.toThrow(/PNG export failed/);
+    expect({ width: canvas.width, height: canvas.height }).toEqual({ width: 0, height: 0 });
+  });
+
+  it("can explicitly release an abandoned PDF raster canvas", () => {
+    const canvas = { width: 8_192, height: 4_096 };
+    releasePdfRasterCanvas(canvas);
+    expect(canvas).toEqual({ width: 0, height: 0 });
   });
 });

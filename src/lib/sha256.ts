@@ -29,6 +29,7 @@ const ROUND_CONSTANTS = new Uint32Array([
 ]);
 
 const digestCache = new WeakMap<Uint8Array, Promise<string>>();
+const resolvedDigestCache = new WeakMap<Uint8Array, string>();
 
 function rotateRight(value: number, amount: number): number {
   return (value >>> amount) | (value << (32 - amount));
@@ -153,10 +154,17 @@ async function calculateSha256(bytes: Uint8Array): Promise<string> {
 export function sha256Hex(bytes: Uint8Array): Promise<string> {
   const cached = digestCache.get(bytes);
   if (cached) return cached;
-  const digest = calculateSha256(bytes);
+  const digest = calculateSha256(bytes).then((value) => {
+    resolvedDigestCache.set(bytes, value);
+    return value;
+  });
   digestCache.set(bytes, digest);
   void digest.catch(() => {
     if (digestCache.get(bytes) === digest) digestCache.delete(bytes);
   });
   return digest;
+}
+
+export function cachedSha256Hex(bytes: Uint8Array): string | undefined {
+  return resolvedDigestCache.get(bytes);
 }

@@ -45,38 +45,6 @@ function clone<T>(value: T): T {
 
 export function sanitizeScene(scene: SerializedScene): SerializedScene {
   const safe = clone(scene);
-  safe.elements = safe.elements
-    .filter((element) => element.type !== "embeddable" && element.type !== "iframe" && element.type !== "magicframe")
-    .map((element) => {
-      const next = { ...element };
-      if ("link" in next) next.link = null;
-      if ("customData" in next && next.customData && typeof next.customData === "object") {
-        const customData = { ...(next.customData as Record<string, unknown>) };
-        delete customData.url;
-        delete customData.href;
-        if ("classroomMathTool" in customData) {
-          const mathTool = sanitizeClassroomMathToolMetadata(customData.classroomMathTool);
-          if (mathTool) customData.classroomMathTool = mathTool;
-          else delete customData.classroomMathTool;
-        }
-        if (CLASSROOM_SLIDE_CUSTOM_DATA_KEY in customData) {
-          const slide = next.type === "frame"
-            ? sanitizeClassroomSlideMetadata(customData[CLASSROOM_SLIDE_CUSTOM_DATA_KEY])
-            : null;
-          if (slide) customData[CLASSROOM_SLIDE_CUSTOM_DATA_KEY] = slide;
-          else delete customData[CLASSROOM_SLIDE_CUSTOM_DATA_KEY];
-        }
-        next.customData = customData;
-      }
-      return next;
-    });
-
-  safe.appState = {
-    ...safe.appState,
-    openMenu: null,
-    openSidebar: null,
-  };
-
   safe.files = Object.fromEntries(
     Object.entries(safe.files).filter(([, file]) => (
       !!file
@@ -84,21 +52,69 @@ export function sanitizeScene(scene: SerializedScene): SerializedScene {
       && isSafeLocalImageSource(file.dataURL)
     )),
   );
-  safe.elements = safe.elements.filter((element) => (
-    element.type !== "image"
-    || (
-      typeof element.fileId === "string"
-      && Object.hasOwn(safe.files, element.fileId)
-    )
-  ));
+  const elements: Record<string, unknown>[] = [];
+  for (const element of safe.elements) {
+    if (
+      element.type === "embeddable"
+      || element.type === "iframe"
+      || element.type === "magicframe"
+      || (
+        element.type === "image"
+        && (
+          typeof element.fileId !== "string"
+          || !Object.hasOwn(safe.files, element.fileId)
+        )
+      )
+    ) {
+      continue;
+    }
+    const next = { ...element };
+    if ("link" in next) next.link = null;
+    if ("customData" in next && next.customData && typeof next.customData === "object") {
+      const customData = { ...(next.customData as Record<string, unknown>) };
+      delete customData.url;
+      delete customData.href;
+      if ("classroomMathTool" in customData) {
+        const mathTool = sanitizeClassroomMathToolMetadata(customData.classroomMathTool);
+        if (mathTool) customData.classroomMathTool = mathTool;
+        else delete customData.classroomMathTool;
+      }
+      if (CLASSROOM_SLIDE_CUSTOM_DATA_KEY in customData) {
+        const slide = next.type === "frame"
+          ? sanitizeClassroomSlideMetadata(customData[CLASSROOM_SLIDE_CUSTOM_DATA_KEY])
+          : null;
+        if (slide) customData[CLASSROOM_SLIDE_CUSTOM_DATA_KEY] = slide;
+        else delete customData[CLASSROOM_SLIDE_CUSTOM_DATA_KEY];
+      }
+      next.customData = customData;
+    }
+    elements.push(next);
+  }
+  safe.elements = elements;
+  safe.appState = {
+    ...safe.appState,
+    openMenu: null,
+    openSidebar: null,
+  };
   return safe;
 }
 
 export function sanitizeProject(project: ClassroomProject): ClassroomProject {
-  const safe = clone(project);
-  safe.slideOrder = reconcileSlideTitleModes(safe.slideOrder);
+  // Clone project metadata independently from the large scene collection.
+  // sanitizeScene already performs a defensive deep clone, so cloning the
+  // complete project first would temporarily duplicate every scene twice.
+  const safe = clone({
+    ...project,
+    scenes: {},
+    slideOrder: [],
+    pdfDocuments: {},
+    pdfPageOrder: project.pdfPageOrder ? [] : undefined,
+  }) as ClassroomProject;
+  safe.slideOrder = reconcileSlideTitleModes(clone(project.slideOrder));
+  safe.pdfDocuments = clone(project.pdfDocuments);
+  safe.pdfPageOrder = project.pdfPageOrder ? clone(project.pdfPageOrder) : undefined;
   safe.scenes = Object.fromEntries(
-    Object.entries(safe.scenes).map(([id, scene]) => [id, sanitizeScene(scene)]),
+    Object.entries(project.scenes).map(([id, scene]) => [id, sanitizeScene(scene)]),
   );
   for (const scene of Object.values(safe.scenes)) {
     scene.elements = canonicalizePdfBackground(scene, scene.elements);
@@ -154,7 +170,7 @@ export function sanitizeProject(project: ClassroomProject): ClassroomProject {
   return safe;
 }
 
-export function assertSafeProject(project: ClassroomProject): void {
+function assertProject(project: ClassroomProject, requireSanitized: boolean): void {
   if (!project || typeof project !== "object") throw new Error("Project must be an object.");
   if (project.schemaVersion !== 1) throw new Error("Unsupported classroom project version.");
   if (!project.id || !project.activeSceneId) throw new Error("Project identity is missing.");
@@ -166,13 +182,6 @@ export function assertSafeProject(project: ClassroomProject): void {
   }
   if (!project.scenes[project.activeSceneId]) throw new Error("The active scene is missing.");
   if (!Array.isArray(project.slideOrder)) throw new Error("Slide order must be a list.");
-  if (project.slideOrder.some((slide) => (
-    slide.titleMode !== undefined
-    && slide.titleMode !== "automatic"
-    && slide.titleMode !== "custom"
-  ))) {
-    throw new Error("Slide title mode must be automatic or custom.");
-  }
   if (project.slideFramesVisible !== undefined && typeof project.slideFramesVisible !== "boolean") {
     throw new Error("Slide frame visibility must be a boolean.");
   }
@@ -216,32 +225,7 @@ export function assertSafeProject(project: ClassroomProject): void {
     }
   }
 
-  const slideIds = new Set<string>();
-  const slideFrames = new Set<string>();
-  for (const slide of project.slideOrder) {
-    if (
-      !slide
-      || typeof slide !== "object"
-      || typeof slide.id !== "string"
-      || !slide.id
-      || typeof slide.sceneId !== "string"
-      || typeof slide.frameId !== "string"
-      || typeof slide.title !== "string"
-    ) {
-      throw new Error("A slide record is malformed.");
-    }
-    const scene = project.scenes[slide.sceneId];
-    if (!scene) throw new Error("A slide references a missing scene.");
-    if (slideIds.has(slide.id)) throw new Error("Slide order contains a duplicate slide identity.");
-    const frameKey = `${slide.sceneId}\u0000${slide.frameId}`;
-    if (slideFrames.has(frameKey)) throw new Error("Slide order contains a duplicate frame.");
-    if (!scene.elements.some((element) => element?.id === slide.frameId && element.type === "frame")) {
-      throw new Error("A slide references a missing frame.");
-    }
-    slideIds.add(slide.id);
-    slideFrames.add(frameKey);
-  }
-
+  const frameElements = new Map<string, Set<string>>();
   for (const [sceneKey, scene] of Object.entries(project.scenes)) {
     if (
       !scene
@@ -258,14 +242,20 @@ export function assertSafeProject(project: ClassroomProject): void {
     ) {
       throw new Error("A scene is malformed.");
     }
-    if (scene.elements.some((element) => !element || typeof element !== "object" || Array.isArray(element))) {
-      throw new Error("A scene element is malformed.");
-    }
-    if (scene.elements.some((element) => element.type === "embeddable" || element.type === "iframe" || element.type === "magicframe")) {
-      throw new Error("Web embeds and generated frames are not supported in classroom projects.");
+    if (requireSanitized) {
+      for (const file of Object.values(scene.files)) {
+        if (!file || typeof file !== "object" || !isSafeLocalImageSource(file.dataURL)) {
+          throw new Error("A project image has missing or unsafe local data.");
+        }
+      }
     }
     const elementIds = new Set<string>();
+    let pdfBackground: SerializedScene["elements"][number] | undefined;
+    let pdfBackgroundCount = 0;
     for (const element of scene.elements) {
+      if (!element || typeof element !== "object" || Array.isArray(element)) {
+        throw new Error("A scene element is malformed.");
+      }
       if (
         typeof element.id !== "string"
         || !element.id
@@ -276,6 +266,18 @@ export function assertSafeProject(project: ClassroomProject): void {
       }
       if (elementIds.has(element.id)) throw new Error("A scene contains a duplicate element identity.");
       elementIds.add(element.id);
+      if (
+        element.type === "embeddable"
+        || element.type === "iframe"
+        || element.type === "magicframe"
+      ) {
+        throw new Error("Web embeds and generated frames are not supported in classroom projects.");
+      }
+      if (element.type === "frame") {
+        const sceneFrames = frameElements.get(sceneKey) || new Set<string>();
+        sceneFrames.add(element.id);
+        frameElements.set(sceneKey, sceneFrames);
+      }
       const customData = element.customData;
       if (customData && typeof customData === "object" && "classroomMathTool" in customData) {
         if (!sanitizeClassroomMathToolMetadata((customData as Record<string, unknown>).classroomMathTool)) {
@@ -291,6 +293,31 @@ export function assertSafeProject(project: ClassroomProject): void {
         ) {
           throw new Error("A slide frame has invalid classroom metadata.");
         }
+      }
+      if (requireSanitized) {
+        if (element.link) {
+          throw new Error("External links are not supported in classroom projects.");
+        }
+        if (
+          customData
+          && typeof customData === "object"
+          && ("url" in customData || "href" in customData)
+        ) {
+          throw new Error("External links are not supported in classroom projects.");
+        }
+        if (
+          element.type === "image"
+          && (
+            typeof element.fileId !== "string"
+            || !Object.hasOwn(scene.files, element.fileId)
+          )
+        ) {
+          throw new Error("A project image is missing its local data.");
+        }
+      }
+      if (scene.pdfPage && element.id === scene.pdfPage.backgroundElementId) {
+        pdfBackground = element;
+        pdfBackgroundCount += 1;
       }
     }
     if (scene.pdfPage) {
@@ -311,21 +338,53 @@ export function assertSafeProject(project: ClassroomProject): void {
       if (![0, 90, 180, 270].includes(scene.pdfPage.rotation) || !scene.pdfPage.backgroundElementId) {
         throw new Error("A PDF page has malformed workspace metadata.");
       }
-      const backgrounds = scene.elements.filter(
-        (element) => element.id === scene.pdfPage?.backgroundElementId,
-      );
       if (
-        backgrounds.length !== 1
-        || backgrounds[0].type !== "image"
-        || typeof backgrounds[0].fileId !== "string"
+        pdfBackgroundCount !== 1
+        || pdfBackground?.type !== "image"
+        || typeof pdfBackground.fileId !== "string"
       ) {
         throw new Error("A PDF page is missing its local background image.");
       }
-      const backgroundFile = scene.files[backgrounds[0].fileId];
+      const backgroundFile = scene.files[pdfBackground.fileId];
       if (!backgroundFile || !isSafeLocalImageSource(backgroundFile.dataURL)) {
         throw new Error("A PDF page background has missing or unsafe local image data.");
       }
     }
+  }
+
+  const slideIds = new Set<string>();
+  const slideFrames = new Map<string, Set<string>>();
+  for (const slide of project.slideOrder) {
+    if (
+      !slide
+      || typeof slide !== "object"
+      || typeof slide.id !== "string"
+      || !slide.id
+      || typeof slide.sceneId !== "string"
+      || typeof slide.frameId !== "string"
+      || typeof slide.title !== "string"
+    ) {
+      throw new Error("A slide record is malformed.");
+    }
+    if (
+      slide.titleMode !== undefined
+      && slide.titleMode !== "automatic"
+      && slide.titleMode !== "custom"
+    ) {
+      throw new Error("Slide title mode must be automatic or custom.");
+    }
+    if (!project.scenes[slide.sceneId]) throw new Error("A slide references a missing scene.");
+    if (slideIds.has(slide.id)) throw new Error("Slide order contains a duplicate slide identity.");
+    const orderedSceneFrames = slideFrames.get(slide.sceneId) || new Set<string>();
+    if (orderedSceneFrames.has(slide.frameId)) {
+      throw new Error("Slide order contains a duplicate frame.");
+    }
+    if (!frameElements.get(slide.sceneId)?.has(slide.frameId)) {
+      throw new Error("A slide references a missing frame.");
+    }
+    slideIds.add(slide.id);
+    orderedSceneFrames.add(slide.frameId);
+    slideFrames.set(slide.sceneId, orderedSceneFrames);
   }
 
   const archivePaths = new Set<string>();
@@ -365,4 +424,17 @@ export function assertSafeProject(project: ClassroomProject): void {
     }
     archivePaths.add(document.archivePath);
   }
+}
+
+export function assertSafeProject(project: ClassroomProject): void {
+  assertProject(project, false);
+}
+
+/**
+ * Strict validation for state that has already passed through the wrapper's
+ * sanitizer. This supports low-memory persistence paths without silently
+ * weakening the offline-only boundary.
+ */
+export function assertSanitizedProject(project: ClassroomProject): void {
+  assertProject(project, true);
 }

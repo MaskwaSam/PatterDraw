@@ -77,6 +77,7 @@ export function summarizeSelectedProbabilityPieces(
   elements: readonly ExcalidrawElement[],
   selectedElementIds: Readonly<Record<string, boolean>>,
 ): ProbabilitySelectionSummary | null {
+  if (!Object.values(selectedElementIds).some(Boolean)) return null;
   let coins = 0;
   let dice = 0;
   let spinners = 0;

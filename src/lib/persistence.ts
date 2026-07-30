@@ -1,17 +1,168 @@
-import { delMany, get, keys, setMany } from "idb-keyval";
+import { createStore, delMany, get, keys, setMany } from "idb-keyval";
 import type { ClassroomProject, LoadedClassroomProject, PdfDocumentId } from "../types";
-import { assertSafeProject, sanitizeProject } from "./safety";
-import { sha256Hex } from "./sha256";
-import { assertProjectFitsContentBudget } from "./project-budget";
+import {
+  assertSafeProject,
+  assertSanitizedProject,
+  sanitizeProject,
+} from "./safety";
+import { cachedSha256Hex, sha256Hex } from "./sha256";
+import {
+  assertProjectFitsContentBudget,
+  type ProjectContentSize,
+} from "./project-budget";
 
 const PROJECT_KEY = "patterdraw:autosave:project:v1";
 const PDF_KEY_PREFIX = "patterdraw:autosave:pdf:v1:";
 const LEGACY_PROJECT_KEY = "excalidraw-classroom:autosave:project:v1";
 const LEGACY_PDF_KEY_PREFIX = "excalidraw-classroom:autosave:pdf:v1:";
 const MUTATION_LOCK = "patterdraw:autosave:mutation:v1";
+const autosaveStore = createStore("keyval-store", "keyval");
 let mutationQueue: Promise<void> = Promise.resolve();
 
 type MutationOperation = (hasCrossContextLock: boolean) => Promise<void>;
+interface SaveAutosaveOptions {
+  prepared?: boolean;
+}
+
+export function getStaleAutosaveKeys(
+  storedKeys: readonly IDBValidKey[],
+  referencedPdfKeys: ReadonlySet<string>,
+): string[] {
+  return storedKeys.filter((key): key is string => (
+    typeof key === "string"
+    && (
+      (key.startsWith(PDF_KEY_PREFIX) && !referencedPdfKeys.has(key))
+      || key === LEGACY_PROJECT_KEY
+      || key.startsWith(LEGACY_PDF_KEY_PREFIX)
+    )
+  ));
+}
+
+export function getAutosaveWriteEntries(
+  verifiedProject: ClassroomProject,
+  pdfBytes: Record<PdfDocumentId, Uint8Array>,
+  storedProject: ClassroomProject | undefined,
+  storedKeys: readonly IDBValidKey[],
+): [string, ClassroomProject | Uint8Array][] {
+  const entries: [string, ClassroomProject | Uint8Array][] = [
+    [PROJECT_KEY, verifiedProject],
+  ];
+  const existingKeySet = new Set(storedKeys);
+  for (const [id, source] of Object.entries(verifiedProject.pdfDocuments)) {
+    const bytes = pdfBytes[id];
+    if (!bytes || bytes.byteLength !== source.byteLength) {
+      throw new Error(`PDF data does not match project metadata for ${source.name}.`);
+    }
+    const key = `${PDF_KEY_PREFIX}${id}`;
+    const storedSource = storedProject?.pdfDocuments?.[id];
+    if (
+      !existingKeySet.has(key)
+      || storedSource?.byteLength !== source.byteLength
+      || storedSource?.sha256 !== source.sha256
+    ) {
+      entries.push([key, bytes]);
+    }
+  }
+  return entries;
+}
+
+export function commitAutosaveTransaction(
+  store: IDBObjectStore,
+  verifiedProject: ClassroomProject,
+  pdfBytes: Record<PdfDocumentId, Uint8Array>,
+  referencedPdfKeys: ReadonlySet<string>,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const transaction = store.transaction;
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+    let storedProject: ClassroomProject | undefined;
+    let storedKeys: IDBValidKey[] = [];
+    let projectReady = false;
+    let keysReady = false;
+    let writesQueued = false;
+
+    const abort = (error: unknown) => {
+      try {
+        transaction.abort();
+      } catch {
+        // The transaction may already have aborted because of the request.
+      }
+      reject(error);
+    };
+    const queueWrites = () => {
+      if (!projectReady || !keysReady || writesQueued) return;
+      writesQueued = true;
+      try {
+        for (const [key, value] of getAutosaveWriteEntries(
+          verifiedProject,
+          pdfBytes,
+          storedProject,
+          storedKeys,
+        )) {
+          store.put(value, key);
+        }
+        for (const key of getStaleAutosaveKeys(storedKeys, referencedPdfKeys)) {
+          store.delete(key);
+        }
+      } catch (error) {
+        abort(error);
+      }
+    };
+
+    try {
+      // Read and conditionally write inside the same readwrite transaction.
+      // IndexedDB serializes that transaction across tabs even when the Web
+      // Locks API is unavailable, so unchanged large PDF blobs stay untouched
+      // without reopening the manifest/blob race this fallback prevents.
+      const projectRequest = store.get(PROJECT_KEY);
+      const keyRequest = store.getAllKeys();
+      projectRequest.onsuccess = () => {
+        storedProject = projectRequest.result as ClassroomProject | undefined;
+        projectReady = true;
+        queueWrites();
+      };
+      projectRequest.onerror = () => abort(projectRequest.error);
+      keyRequest.onsuccess = () => {
+        storedKeys = keyRequest.result;
+        keysReady = true;
+        queueWrites();
+      };
+      keyRequest.onerror = () => abort(keyRequest.error);
+    } catch (error) {
+      abort(error);
+    }
+  });
+}
+
+async function setManyAndDeleteStaleAtomically(
+  verifiedProject: ClassroomProject,
+  pdfBytes: Record<PdfDocumentId, Uint8Array>,
+  referencedPdfKeys: ReadonlySet<string>,
+): Promise<void> {
+  // Unit environments can replace createStore with an unavailable test
+  // double. Production browsers always use this single readwrite transaction,
+  // whose object-store serialization is the no-Web-Locks cross-tab mutex.
+  if (!autosaveStore) {
+    await setMany(getAutosaveWriteEntries(
+      verifiedProject,
+      pdfBytes,
+      undefined,
+      [],
+    ));
+    return;
+  }
+  await autosaveStore(
+    "readwrite",
+    (store) => commitAutosaveTransaction(
+      store,
+      verifiedProject,
+      pdfBytes,
+      referencedPdfKeys,
+    ),
+  );
+}
 
 async function withCrossContextLock<T>(
   operation: (hasCrossContextLock: boolean) => Promise<T>,
@@ -33,76 +184,79 @@ function enqueueMutation(operation: MutationOperation): Promise<void> {
 export async function saveAutosave(
   project: ClassroomProject,
   pdfBytes: Record<PdfDocumentId, Uint8Array>,
-): Promise<void> {
-  const safe = sanitizeProject(project);
-  assertSafeProject(safe);
-  const verifiedDocuments = await Promise.all(
-    Object.entries(safe.pdfDocuments).map(async ([id, source]) => {
+  options: SaveAutosaveOptions = {},
+): Promise<ProjectContentSize> {
+  const safe = options.prepared ? project : sanitizeProject(project);
+  assertSanitizedProject(safe);
+  const documentVerifications = Object.entries(safe.pdfDocuments).map(([id, source]) => {
       const bytes = pdfBytes[id];
       if (!bytes || bytes.byteLength !== source.byteLength) {
         throw new Error(`PDF data does not match project metadata for ${source.name}.`);
       }
-      const sha256 = await sha256Hex(bytes);
-      if (source.sha256 && source.sha256 !== sha256) {
-        throw new Error(`PDF data does not match project metadata for ${source.name}.`);
+      const cachedSha256 = cachedSha256Hex(bytes);
+      if (cachedSha256) {
+        if (source.sha256 && source.sha256 !== cachedSha256) {
+          throw new Error(`PDF data does not match project metadata for ${source.name}.`);
+        }
+        return [id, { ...source, sha256: cachedSha256 }] as const;
       }
-      return [id, { ...source, sha256 }] as const;
-    }),
+      return sha256Hex(bytes).then((sha256) => {
+        if (source.sha256 && source.sha256 !== sha256) {
+          throw new Error(`PDF data does not match project metadata for ${source.name}.`);
+        }
+        return [id, { ...source, sha256 }] as const;
+      });
+    });
+  const requiresAsyncVerification = documentVerifications.some(
+    (entry) => entry instanceof Promise,
   );
+  const verifiedDocuments = requiresAsyncVerification
+    ? await Promise.all(documentVerifications)
+    : documentVerifications as Array<readonly [
+      string,
+      ClassroomProject["pdfDocuments"][string],
+    ]>;
   const verifiedProject: ClassroomProject = {
     ...safe,
     pdfDocuments: Object.fromEntries(verifiedDocuments),
   };
-  assertProjectFitsContentBudget(verifiedProject, pdfBytes);
-  const pdfEntries = Object.entries(verifiedProject.pdfDocuments).map(
-    ([id, source]) => ({
-      bytes: pdfBytes[id],
-      key: `${PDF_KEY_PREFIX}${id}`,
-      source,
-    }),
-  );
+  const contentSize = assertProjectFitsContentBudget(verifiedProject, pdfBytes);
 
   await enqueueMutation(async (hasCrossContextLock) => {
-    const entries: [string, ClassroomProject | Uint8Array][] = [[PROJECT_KEY, verifiedProject]];
-    let storedKeys: IDBValidKey[] = [];
-    if (hasCrossContextLock) {
-      const [storedProject, existingKeys] = await Promise.all([
-        get<ClassroomProject>(PROJECT_KEY),
-        keys(),
-      ]);
-      storedKeys = existingKeys;
-      const existingKeySet = new Set(existingKeys);
-      for (const { bytes, key, source } of pdfEntries) {
-        const storedSource = storedProject?.pdfDocuments?.[source.id];
-        if (
-          !existingKeySet.has(key)
-          || storedSource?.byteLength !== source.byteLength
-          || storedSource?.sha256 !== source.sha256
-        ) {
-          entries.push([key, bytes]);
-        }
-      }
-    } else {
-      entries.push(...pdfEntries.map(
-        ({ bytes, key }): [string, Uint8Array] => [key, bytes],
-      ));
-    }
-    await setMany(entries);
-    if (!hasCrossContextLock) return;
-
     const referencedKeys = new Set(
       Object.keys(verifiedProject.pdfDocuments).map((id) => `${PDF_KEY_PREFIX}${id}`),
     );
-    const staleKeys = storedKeys.filter((key): key is string => (
-      typeof key === "string"
-      && (
-        (key.startsWith(PDF_KEY_PREFIX) && !referencedKeys.has(key))
-        || key === LEGACY_PROJECT_KEY
-        || key.startsWith(LEGACY_PDF_KEY_PREFIX)
-      )
+    if (!hasCrossContextLock) {
+      await setManyAndDeleteStaleAtomically(
+        verifiedProject,
+        pdfBytes,
+        referencedKeys,
+      );
+      return;
+    }
+
+    const [storedProject, existingKeys] = await Promise.all([
+      get<ClassroomProject>(PROJECT_KEY),
+      keys(),
+    ]);
+    await setMany(getAutosaveWriteEntries(
+      verifiedProject,
+      pdfBytes,
+      storedProject,
+      existingKeys,
     ));
-    if (staleKeys.length) await delMany(staleKeys);
+
+    const staleKeys = getStaleAutosaveKeys(existingKeys, referencedKeys);
+    if (staleKeys.length) {
+      try {
+        await delMany(staleKeys);
+      } catch {
+        // The manifest and every referenced PDF were committed atomically.
+        // Orphan cleanup is optional and can be retried by the next save.
+      }
+    }
   });
+  return contentSize;
 }
 
 export async function loadAutosave(): Promise<LoadedClassroomProject | null> {
@@ -130,12 +284,13 @@ export async function loadAutosave(): Promise<LoadedClassroomProject | null> {
         return { bytes, id, source: { ...source, sha256 } };
       }),
     );
-    const verifiedProject = sanitizeProject({
+    const verifiedProject: ClassroomProject = {
       ...safeProject,
       pdfDocuments: Object.fromEntries(
         loadedPdfEntries.map(({ id, source }) => [id, source]),
       ),
-    });
+    };
+    assertSafeProject(verifiedProject);
     const pdfEntries = loadedPdfEntries.map(({ bytes, id }) => [id, bytes] as const);
 
     const needsMigration = !currentProject
@@ -165,7 +320,6 @@ export async function loadAutosave(): Promise<LoadedClassroomProject | null> {
         // the same atomic migration.
       }
     }
-
     return { project: verifiedProject, pdfBytes: Object.fromEntries(pdfEntries) };
   });
 }

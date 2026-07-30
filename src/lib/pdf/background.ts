@@ -69,10 +69,15 @@ export function canonicalizePdfBackground(
     return liveElements;
   }
 
-  const matches = liveElements.filter((element) => element.id === workspace.backgroundElementId);
-  const live = matches[0];
+  let live: Record<string, unknown> | undefined;
+  let matchCount = 0;
+  for (const element of liveElements) {
+    if (element.id !== workspace.backgroundElementId) continue;
+    matchCount += 1;
+    if (!live) live = element;
+  }
   if (
-    matches.length === 1
+    matchCount === 1
     && liveElements[0] === live
     && live.fileId === persisted.fileId
     && hasCanonicalBackgroundGeometry(live, scene, persisted)
@@ -117,8 +122,9 @@ export function canonicalizePdfBackground(
     },
   };
 
-  return [
-    repaired,
-    ...liveElements.filter((element) => element.id !== workspace.backgroundElementId),
-  ];
+  const result: Record<string, unknown>[] = [repaired];
+  for (const element of liveElements) {
+    if (element.id !== workspace.backgroundElementId) result.push(element);
+  }
+  return result;
 }

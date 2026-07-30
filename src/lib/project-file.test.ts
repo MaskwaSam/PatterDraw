@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { strToU8, zipSync } from "fflate";
 import { createBlankProject, type SerializedScene } from "../types";
-import { decodeProjectFile, encodeProjectFile } from "./project-file";
+import {
+  decodeProjectFile,
+  encodePreparedProjectFile,
+  encodeProjectFile,
+} from "./project-file";
 import { sanitizeProject } from "./safety";
 import { MATH_TOOL_CATALOGUE } from "./math-tools/catalogue";
 
@@ -67,6 +71,62 @@ describe("classroom project files", () => {
     expect(decoded.project).toMatchObject(sanitizeProject(project));
     expect(decoded.project.pdfDocuments[documentId].sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(decoded.pdfBytes[documentId]).toEqual(bytes);
+  });
+
+  it("round-trips already-sanitized state through the low-memory archive path", async () => {
+    const project = createBlankProject();
+    project.title = "Prepared classroom backup";
+
+    const decoded = await decodeProjectFile(await encodePreparedProjectFile(project, {}));
+
+    expect(decoded.project).toMatchObject({
+      id: project.id,
+      title: "Prepared classroom backup",
+    });
+  });
+
+  it.each([
+    {
+      name: "external links",
+      element: { id: "unsafe", type: "rectangle", link: "https://example.invalid" },
+      files: {},
+      message: /External links/,
+    },
+    {
+      name: "web embeds",
+      element: { id: "unsafe", type: "embeddable" },
+      files: {},
+      message: /Web embeds/,
+    },
+    {
+      name: "missing image data",
+      element: { id: "unsafe", type: "image", fileId: "missing" },
+      files: {},
+      message: /missing its local data/,
+    },
+    {
+      name: "unsafe image data",
+      element: { id: "unsafe", type: "image", fileId: "unsafe-file" },
+      files: {
+        "unsafe-file": {
+          id: "unsafe-file",
+          mimeType: "image/png",
+          dataURL: "https://example.invalid/image.png",
+        },
+      },
+      message: /unsafe local data/,
+    },
+  ])("rejects $name through the prepared archive path", async ({
+    element,
+    files,
+    message,
+  }) => {
+    const project = createBlankProject();
+    const scene = project.scenes[project.activeSceneId];
+    scene.elements = [element];
+    scene.files = files as Record<string, Record<string, unknown>>;
+
+    await expect(encodePreparedProjectFile(project, {})).rejects.toThrow(message);
   });
 
   it("round-trips the slide frame visibility preference", async () => {
