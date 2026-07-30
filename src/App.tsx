@@ -97,8 +97,6 @@ import {
 import type { RenderedLatex } from "./lib/latex/render-latex";
 import type { RenderedMermaid } from "./lib/mermaid/safe-mermaid";
 import { canonicalizePdfBackground } from "./lib/pdf/background";
-import { importPdf } from "./lib/pdf/import-pdf";
-import { createBlankPdfFile } from "./lib/pdf/create-blank-page";
 import {
   movePdfPage,
   orderedPdfScenes,
@@ -106,11 +104,7 @@ import {
   shiftPdfPage,
   type PdfPageDropEdge,
 } from "./lib/pdf/page-order";
-import {
-  exportAnnotatedPdf,
-  exportSlidesPdf,
-  type PdfExportMode,
-} from "./lib/pdf/export-pdf";
+import type { PdfExportMode } from "./lib/pdf/export-pdf";
 import {
   deleteSlideBoundary,
   detachElementsFromSlideFrames,
@@ -125,6 +119,10 @@ import {
   normalizeSlideMorphDurationMs,
 } from "./lib/slide-transition";
 import { MAX_PROJECT_BYTES, sanitizeProject, sanitizeScene } from "./lib/safety";
+import {
+  assertProjectCanAcceptAdditionalBytes,
+  assertProjectFitsContentBudget,
+} from "./lib/project-budget";
 import {
   activateSlideFrameTool,
   addBlankSlideFrame,
@@ -201,6 +199,12 @@ type SlideFrameGesture = {
   pointerId: number;
 };
 type PendingPresentationTransition = { frameId: string; animate: boolean; durationMs: number };
+type PendingScenePersistence = {
+  sceneId: string;
+  elements: readonly ExcalidrawElement[];
+  appState: AppState;
+  files: BinaryFiles;
+};
 const CLASSROOM_UI_OPTIONS: ExcalidrawProps["UIOptions"] = {
   canvasActions: {
     changeViewBackgroundColor: false,
@@ -214,6 +218,7 @@ const CLASSROOM_UI_OPTIONS: ExcalidrawProps["UIOptions"] = {
   tools: { image: true },
 };
 const SPINNER_ANIMATION_DURATION_MS = 1_100;
+const SCENE_PERSISTENCE_DELAY_MS = 150;
 const PERSONAL_LIBRARY_SIDEBAR_TAB = "library";
 type LibrarySidebarTab = typeof PERSONAL_LIBRARY_SIDEBAR_TAB | typeof SCREENSHOT_SIDEBAR_TAB;
 
@@ -233,6 +238,14 @@ function clipboardCaptureToast(result: ClipboardWriteResult): string {
   if (result === "denied") return "Screenshot saved. Clipboard permission was denied; use Copy in the Screenshot Library to retry.";
   if (result === "unsupported") return "Screenshot saved. Image clipboard access is unavailable in this browser.";
   return "Screenshot saved, but it could not be copied. Use Copy in the Screenshot Library to retry.";
+}
+
+function autosaveFailureMessage(error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  const storageFull = error instanceof DOMException && error.name === "QuotaExceededError";
+  return storageFull
+    ? "Autosave failed because browser storage is full. Download a .patterdraw backup now, then remove Personal Library items or Screenshot Library captures."
+    : `Autosave failed: ${detail} Download a .patterdraw backup before closing this page.`;
 }
 
 function latexSourceForElement(element: ExcalidrawElement | undefined): string | null {
@@ -273,6 +286,33 @@ function serializedSceneFromChange(
     appState: exported.appState,
     files: exported.files || {},
   });
+}
+
+function projectWithPendingScene(
+  current: ClassroomProject | null,
+  pending: PendingScenePersistence,
+): ClassroomProject | null {
+  const previousScene = current?.scenes[pending.sceneId];
+  if (!current || !previousScene) return null;
+  const backgroundSafeElements = canonicalizePdfBackground(
+    previousScene,
+    pending.elements as unknown as readonly Record<string, unknown>[],
+  ) as unknown as readonly ExcalidrawElement[];
+  const detachedElements = detachElementsFromSlideFrames(backgroundSafeElements);
+  const slideOrder = reconcileSlides(pending.sceneId, detachedElements, current.slideOrder);
+  const namedElements = syncSlideFrameNames(detachedElements, slideOrder);
+  const scene = serializedSceneFromChange(
+    previousScene,
+    namedElements,
+    pending.appState,
+    pending.files,
+  );
+  return {
+    ...current,
+    updatedAt: nowIso(),
+    scenes: { ...current.scenes, [pending.sceneId]: scene },
+    slideOrder,
+  };
 }
 
 function nativeExcalidrawProject(text: string): ClassroomProject {
@@ -357,6 +397,8 @@ export default function App() {
   const exportOptionsTriggerRef = useRef<HTMLButtonElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
   const editorHostRef = useRef<HTMLDivElement>(null);
+  const projectRef = useRef<ClassroomProject | null>(project);
+  const pdfBytesRef = useRef<Record<PdfDocumentId, Uint8Array>>(pdfBytes);
   const currentSceneRef = useRef<SerializedScene | null>(null);
   const activeSceneIdRef = useRef<string | null>(null);
   const switchingSceneRef = useRef(false);
@@ -388,6 +430,10 @@ export default function App() {
   const autosaveTimerRef = useRef<number | null>(null);
   const autosaveLastQueuedAtRef = useRef(0);
   const autosaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingScenePersistenceRef = useRef<PendingScenePersistence | null>(null);
+  const scenePersistenceTimerRef = useRef<number | null>(null);
+  projectRef.current = project;
+  pdfBytesRef.current = pdfBytes;
   const closeExportDialog = useCallback(() => setExportOpen(false), []);
   const shouldRestoreExportDialogFocus = useCallback(
     () => !nativeImageExportOpenRef.current,
@@ -399,6 +445,47 @@ export default function App() {
     restoreFocus: shouldRestoreExportDialogFocus,
     returnFocusRef: exportOptionsTriggerRef,
   });
+  const commitPendingScenePersistence = useCallback(() => {
+    if (scenePersistenceTimerRef.current !== null) {
+      window.clearTimeout(scenePersistenceTimerRef.current);
+      scenePersistenceTimerRef.current = null;
+    }
+    const pending = pendingScenePersistenceRef.current;
+    if (!pending) return projectRef.current;
+    pendingScenePersistenceRef.current = null;
+    const baseProject = projectRef.current;
+    const nextProject = projectWithPendingScene(baseProject, pending);
+    if (!nextProject) return baseProject;
+    projectRef.current = nextProject;
+    autosaveSnapshotRef.current = {
+      project: nextProject,
+      pdfBytes: pdfBytesRef.current,
+    };
+    autosaveDirtyRef.current = true;
+    setProject((current) => {
+      if (current === baseProject) return nextProject;
+      const mergedProject = projectWithPendingScene(current, pending);
+      if (!mergedProject) return current;
+      projectRef.current = mergedProject;
+      autosaveSnapshotRef.current = {
+        project: mergedProject,
+        pdfBytes: pdfBytesRef.current,
+      };
+      return mergedProject;
+    });
+    return nextProject;
+  }, []);
+  const queueScenePersistence = useCallback((pending: PendingScenePersistence) => {
+    pendingScenePersistenceRef.current = pending;
+    setSaveStatus("saving");
+    if (scenePersistenceTimerRef.current !== null) {
+      window.clearTimeout(scenePersistenceTimerRef.current);
+    }
+    scenePersistenceTimerRef.current = window.setTimeout(
+      commitPendingScenePersistence,
+      SCENE_PERSISTENCE_DELAY_MS,
+    );
+  }, [commitPendingScenePersistence]);
   const flushAutosave = useCallback(() => {
     const snapshot = autosaveSnapshotRef.current;
     if (!snapshot || !autosaveDirtyRef.current) return;
@@ -421,7 +508,7 @@ export default function App() {
         autosaveSavingRef.current = false;
         if (!autosaveDirtyRef.current) setSaveStatus("saved");
       },
-      () => {
+      (error) => {
         if (autosaveQueueRef.current !== queuedSave) return;
         autosaveSavingRef.current = false;
         // Keep the newest snapshot eligible for a later interaction/page-exit
@@ -430,6 +517,7 @@ export default function App() {
         // newer edit is retried instead of this captured snapshot.
         autosaveDirtyRef.current = true;
         setSaveStatus("error");
+        setErrorMessage(autosaveFailureMessage(error));
       },
     );
   }, []);
@@ -572,6 +660,7 @@ export default function App() {
 
   useEffect(() => {
     const flushAfterInteraction = () => {
+      commitPendingScenePersistence();
       if (autosaveTimerRef.current !== null) window.clearTimeout(autosaveTimerRef.current);
       autosaveTimerRef.current = window.setTimeout(flushAutosave, 0);
     };
@@ -596,15 +685,26 @@ export default function App() {
       }
     };
     const flushWhenHidden = () => {
-      if (document.visibilityState === "hidden") flushAutosave();
+      if (document.visibilityState === "hidden") {
+        commitPendingScenePersistence();
+        window.setTimeout(flushAutosave, 0);
+      }
     };
     const flushBeforePageExit = (event: BeforeUnloadEvent) => {
-      if (!autosaveDirtyRef.current && !autosaveSavingRef.current) return;
-      flushAutosave();
+      if (
+        !pendingScenePersistenceRef.current
+        && !autosaveDirtyRef.current
+        && !autosaveSavingRef.current
+      ) return;
+      commitPendingScenePersistence();
+      window.setTimeout(flushAutosave, 0);
       event.preventDefault();
       event.returnValue = "";
     };
-    const flushOnPageHide = () => flushAutosave();
+    const flushOnPageHide = () => {
+      commitPendingScenePersistence();
+      window.setTimeout(flushAutosave, 0);
+    };
     window.addEventListener("pointerup", flushAfterInteraction);
     window.addEventListener("click", flushAfterInteraction);
     window.addEventListener("keyup", flushAfterMutationKey);
@@ -619,8 +719,11 @@ export default function App() {
       window.removeEventListener("beforeunload", flushBeforePageExit);
       window.removeEventListener("pagehide", flushOnPageHide);
       if (autosaveTimerRef.current !== null) window.clearTimeout(autosaveTimerRef.current);
+      if (scenePersistenceTimerRef.current !== null) {
+        window.clearTimeout(scenePersistenceTimerRef.current);
+      }
     };
-  }, [flushAutosave]);
+  }, [commitPendingScenePersistence, flushAutosave]);
 
   const runSlideFrameAction = useCallback((action: SlideFrameAction) => {
     if (!api) return;
@@ -778,17 +881,11 @@ export default function App() {
       ) as unknown as readonly ExcalidrawElement[]
       : elements;
     const detachedElements = detachElementsFromSlideFrames(backgroundSafeElements);
-    setProject((current) => {
-      if (!current || !current.scenes[sceneId]) return current;
-      const slideOrder = reconcileSlides(sceneId, detachedElements, current.slideOrder);
-      const namedElements = syncSlideFrameNames(detachedElements, slideOrder);
-      const scene = serializedSceneFromChange(current.scenes[sceneId], namedElements, appState, files);
-      return {
-        ...current,
-        updatedAt: nowIso(),
-        scenes: { ...current.scenes, [sceneId]: scene },
-        slideOrder,
-      };
+    queueScenePersistence({
+      sceneId,
+      elements: detachedElements,
+      appState,
+      files,
     });
     const elementGestureInProgress = !!(
       appState.newElement
@@ -819,7 +916,7 @@ export default function App() {
         });
       });
     }
-  }, [api]);
+  }, [api, queueScenePersistence]);
 
   const toggleLibrary = useCallback(() => {
     if (!api) return;
@@ -835,6 +932,11 @@ export default function App() {
   }, []);
 
   const openLoadedProject = useCallback(async (loaded: LoadedClassroomProject) => {
+    pendingScenePersistenceRef.current = null;
+    if (scenePersistenceTimerRef.current !== null) {
+      window.clearTimeout(scenePersistenceTimerRef.current);
+      scenePersistenceTimerRef.current = null;
+    }
     autosaveDirtyRef.current = false;
     if (autosaveTimerRef.current !== null) {
       window.clearTimeout(autosaveTimerRef.current);
@@ -842,12 +944,15 @@ export default function App() {
     }
     await autosaveQueueRef.current.catch(() => undefined);
     autosaveSavingRef.current = false;
-    await clearAutosave(project || undefined);
+    await clearAutosave(projectRef.current || undefined);
+    const startupProject = projectForBoardStartup(loaded.project);
+    pdfBytesRef.current = loaded.pdfBytes;
+    projectRef.current = startupProject;
     setPdfBytes(loaded.pdfBytes);
     const framesVisible = loaded.project.slideFramesVisible !== false;
     slideFramesVisibleRef.current = framesVisible;
     setAreSlideFramesVisible(framesVisible);
-    setProject(projectForBoardStartup(loaded.project));
+    setProject(startupProject);
     setActiveSlideId(null);
     setWorkspaceMode("board");
     pendingCreatedFrameIdRef.current = null;
@@ -856,7 +961,7 @@ export default function App() {
     setMermaidEditor(null);
     setMathToolEdit(null);
     setIsMathToolsOpen(false);
-  }, [project]);
+  }, []);
 
   const handleFile = useCallback(async (file: File) => {
     setErrorMessage(null);
@@ -867,24 +972,37 @@ export default function App() {
         throw new Error("The selected project is too large to open safely.");
       }
       if (isPdfFile) {
+        const preflightProject = commitPendingScenePersistence() || createBlankProject();
+        assertProjectCanAcceptAdditionalBytes(
+          preflightProject,
+          pdfBytesRef.current,
+          file.size,
+        );
+        const { importPdf } = await import("./lib/pdf/import-pdf");
         const imported = await importPdf(file);
         const scenes = Object.fromEntries(imported.scenes.map((scene) => [scene.id, scene]));
         const importedPageIds = imported.scenes.map((scene) => scene.id);
-        setPdfBytes((current) => ({ ...current, [imported.source.id]: imported.bytes }));
+        const base = commitPendingScenePersistence() || createBlankProject();
+        const nextPdfBytes = {
+          ...pdfBytesRef.current,
+          [imported.source.id]: imported.bytes,
+        };
+        const nextProject: ClassroomProject = {
+          ...base,
+          updatedAt: nowIso(),
+          activeSceneId: imported.scenes[0].id,
+          scenes: { ...base.scenes, ...scenes },
+          pdfPageOrder: [...reconcilePdfPageOrder(base), ...importedPageIds],
+          pdfDocuments: { ...base.pdfDocuments, [imported.source.id]: imported.source },
+        };
+        assertProjectFitsContentBudget(nextProject, nextPdfBytes);
+        pdfBytesRef.current = nextPdfBytes;
+        projectRef.current = nextProject;
+        setPdfBytes(nextPdfBytes);
+        setProject(nextProject);
         setWorkspaceMode("pdf");
         setEquationEditor(null);
         setMermaidEditor(null);
-        setProject((current) => {
-          const base = current || createBlankProject();
-          return {
-            ...base,
-            updatedAt: nowIso(),
-            activeSceneId: imported.scenes[0].id,
-            scenes: { ...base.scenes, ...scenes },
-            pdfPageOrder: [...reconcilePdfPageOrder(base), ...importedPageIds],
-            pdfDocuments: { ...base.pdfDocuments, [imported.source.id]: imported.source },
-          };
-        });
       } else if (
         file.name.toLowerCase().endsWith(".patterdraw")
         || file.name.toLowerCase().endsWith(".canvasclassroom")
@@ -901,37 +1019,40 @@ export default function App() {
       setBusyMessage(null);
       if (inputRef.current) inputRef.current.value = "";
     }
-  }, [openLoadedProject]);
+  }, [commitPendingScenePersistence, openLoadedProject]);
 
   const saveProjectFile = useCallback(async () => {
-    if (!project) return;
+    const currentProject = commitPendingScenePersistence();
+    if (!currentProject) return;
     try {
-      const bytes = await encodeProjectFile(project, pdfBytes);
+      const bytes = await encodeProjectFile(currentProject, pdfBytesRef.current);
       downloadBlob(
         new Blob([Uint8Array.from(bytes).buffer], { type: "application/vnd.patterdraw+zip" }),
-        `${safeFileStem(project.title)}.patterdraw`,
+        `${safeFileStem(currentProject.title)}.patterdraw`,
       );
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
     }
-  }, [pdfBytes, project]);
+  }, [commitPendingScenePersistence]);
 
   const runPdfExport = useCallback(async (kind: "slides" | PdfExportMode) => {
-    if (!project) return;
+    const currentProject = commitPendingScenePersistence();
+    if (!currentProject) return;
     setExportOpen(false);
     setBusyMessage(kind === "slides" ? "Exporting slides…" : "Exporting annotated PDF…");
     try {
+      const { exportAnnotatedPdf, exportSlidesPdf } = await import("./lib/pdf/export-pdf");
       const blob = kind === "slides"
-        ? await exportSlidesPdf(project)
-        : await exportAnnotatedPdf(project, pdfBytes, kind);
+        ? await exportSlidesPdf(currentProject)
+        : await exportAnnotatedPdf(currentProject, pdfBytesRef.current, kind);
       const suffix = kind === "slides" ? "slides" : kind === "expand" ? "annotated-expanded" : "annotated-openboard-fit";
-      downloadBlob(blob, `${safeFileStem(project.title)}-${suffix}.pdf`);
+      downloadBlob(blob, `${safeFileStem(currentProject.title)}-${suffix}.pdf`);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setBusyMessage(null);
     }
-  }, [pdfBytes, project]);
+  }, [commitPendingScenePersistence]);
 
   const runFullBoardExport = useCallback(async () => {
     if (!api || !project) return;
@@ -1569,6 +1690,7 @@ export default function App() {
   }, [api, mermaidEditor]);
 
   const openScene = useCallback((sceneId: string, frameId?: string) => {
+    commitPendingScenePersistence();
     if (frameId) pendingFrameIdRef.current = frameId;
     if (sceneId !== activeSceneIdRef.current) switchingSceneRef.current = true;
     setProject((current) => current ? { ...current, activeSceneId: sceneId } : current);
@@ -1576,7 +1698,7 @@ export default function App() {
       focusSlide(api, frameId);
       pendingFrameIdRef.current = null;
     }
-  }, [api]);
+  }, [api, commitPendingScenePersistence]);
 
   const openSlide = useCallback((slide: ClassroomSlide) => {
     setActiveSlideId(slide.id);
@@ -2276,31 +2398,39 @@ export default function App() {
     setErrorMessage(null);
     setBusyMessage("Adding a blank PDF page…");
     try {
+      const [{ importPdf }, { createBlankPdfFile }] = await Promise.all([
+        import("./lib/pdf/import-pdf"),
+        import("./lib/pdf/create-blank-page"),
+      ]);
       const imported = await importPdf(await createBlankPdfFile(workspace.width, workspace.height));
       const importedScene = imported.scenes[0];
       const scene = { ...importedScene, name: "Blank page" };
       const source = { ...imported.source, name: "Blank page" };
-      setPdfBytes((current) => ({ ...current, [source.id]: imported.bytes }));
-      setProject((current) => {
-        if (!current) return current;
-        const order = reconcilePdfPageOrder(current);
-        const currentIndex = order.indexOf(insertAfterId);
-        const insertAt = currentIndex < 0 ? order.length : currentIndex + 1;
-        return {
-          ...current,
-          updatedAt: nowIso(),
-          activeSceneId: scene.id,
-          scenes: { ...current.scenes, [scene.id]: scene },
-          pdfPageOrder: [...order.slice(0, insertAt), scene.id, ...order.slice(insertAt)],
-          pdfDocuments: { ...current.pdfDocuments, [source.id]: source },
-        };
-      });
+      const current = commitPendingScenePersistence();
+      if (!current) return;
+      const order = reconcilePdfPageOrder(current);
+      const currentIndex = order.indexOf(insertAfterId);
+      const insertAt = currentIndex < 0 ? order.length : currentIndex + 1;
+      const nextPdfBytes = { ...pdfBytesRef.current, [source.id]: imported.bytes };
+      const nextProject: ClassroomProject = {
+        ...current,
+        updatedAt: nowIso(),
+        activeSceneId: scene.id,
+        scenes: { ...current.scenes, [scene.id]: scene },
+        pdfPageOrder: [...order.slice(0, insertAt), scene.id, ...order.slice(insertAt)],
+        pdfDocuments: { ...current.pdfDocuments, [source.id]: source },
+      };
+      assertProjectFitsContentBudget(nextProject, nextPdfBytes);
+      pdfBytesRef.current = nextPdfBytes;
+      projectRef.current = nextProject;
+      setPdfBytes(nextPdfBytes);
+      setProject(nextProject);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setBusyMessage(null);
     }
-  }, [currentScene?.pdfPage, project]);
+  }, [commitPendingScenePersistence, currentScene?.pdfPage, project]);
 
   const handlePaste = useCallback<NonNullable<ExcalidrawProps["onPaste"]>>((_data, event) => {
     const html = event?.clipboardData?.getData("text/html");

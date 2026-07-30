@@ -4,9 +4,13 @@ import {
   MAX_SCREENSHOT_EDGE,
   MAX_SCREENSHOT_PIXELS,
 } from "./limits";
+import {
+  assertAuxiliaryStorageBudget,
+  LEGACY_SCREENSHOT_LIBRARY_KEY,
+  SCREENSHOT_LIBRARY_KEY,
+} from "../storage-budget";
 
-export const SCREENSHOT_LIBRARY_KEY = "patterdraw:screenshot-library:v1";
-const LEGACY_SCREENSHOT_LIBRARY_KEY = "excalidraw-classroom:screenshot-library:v1";
+export { SCREENSHOT_LIBRARY_KEY };
 export const SCREENSHOT_LIBRARY_LIMIT = 50;
 
 export interface StoredScreenshot {
@@ -96,5 +100,6 @@ export async function saveScreenshotLibrary(items: readonly StoredScreenshot[]):
     throw new Error("The Screenshot Library contains duplicate images.");
   }
   const record: ScreenshotLibraryRecord = { version: 1, items: normalized };
+  await assertAuxiliaryStorageBudget({ screenshots: record });
   await set(SCREENSHOT_LIBRARY_KEY, record);
 }

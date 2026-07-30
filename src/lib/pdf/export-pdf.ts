@@ -23,14 +23,16 @@ import {
   prepareSourcePdfForEmbedding,
   type PdfSourcePageBox,
 } from "./source-page";
+import {
+  MAX_PDF_PAGE_EDGE_POINTS,
+  MAX_PDF_RASTER_EDGE,
+  MAX_PDF_RASTER_PIXELS_PER_PAGE,
+} from "./raster-limits";
 
 export type PdfExportMode = "expand" | "openboard-fit";
 
 const EXPORT_PADDING = 24;
 const ANNOTATION_SCALE = 2;
-const MAX_ANNOTATION_EDGE = 8_192;
-const MAX_ANNOTATION_PIXELS = 16_000_000;
-const MAX_PDF_PAGE_EDGE_POINTS = 14_400;
 
 function asElements(scene: SerializedScene): ExcalidrawElement[] {
   return scene.elements as unknown as ExcalidrawElement[];
@@ -88,15 +90,32 @@ export function getPdfAnnotationExportDimensions(
   }
   const scale = Math.min(
     ANNOTATION_SCALE * pageScale,
-    MAX_ANNOTATION_EDGE / width,
-    MAX_ANNOTATION_EDGE / height,
-    Math.sqrt(MAX_ANNOTATION_PIXELS) / Math.sqrt(width) / Math.sqrt(height),
+    MAX_PDF_RASTER_EDGE / width,
+    MAX_PDF_RASTER_EDGE / height,
+    Math.sqrt(MAX_PDF_RASTER_PIXELS_PER_PAGE) / Math.sqrt(width) / Math.sqrt(height),
   );
   return {
     width: Math.max(1, Math.floor(width * scale)),
     height: Math.max(1, Math.floor(height * scale)),
     scale,
   };
+}
+
+export function getSlidePdfExportDimensions(
+  width: number,
+  height: number,
+): { width: number; height: number; scale: number } {
+  if (
+    !Number.isFinite(width)
+    || !Number.isFinite(height)
+    || width <= 0
+    || height <= 0
+    || width > MAX_PDF_PAGE_EDGE_POINTS
+    || height > MAX_PDF_PAGE_EDGE_POINTS
+  ) {
+    throw new Error("Presentation slide frames must have valid dimensions no larger than 200 inches.");
+  }
+  return getPdfAnnotationExportDimensions(width, height);
 }
 
 async function renderAnnotations(scene: SerializedScene, pageScale: number): Promise<{
@@ -298,17 +317,17 @@ export async function exportSlidesPdf(project: ClassroomProject): Promise<Blob> 
     if (!scene) continue;
     const renderData = getSlideRenderData(scene, slide.frameId);
     if (!renderData) continue;
+    const dimensions = getSlidePdfExportDimensions(
+      renderData.frame.width,
+      renderData.frame.height,
+    );
     const canvas = await exportToCanvas({
       elements: renderData.elements,
       files: renderData.files,
       exportingFrame: renderData.frame,
       appState: { exportBackground: true, viewBackgroundColor: "#ffffff" },
       exportPadding: 0,
-      getDimensions: (width: number, height: number) => ({
-        width: Math.max(1, Math.ceil(width * ANNOTATION_SCALE)),
-        height: Math.max(1, Math.ceil(height * ANNOTATION_SCALE)),
-        scale: ANNOTATION_SCALE,
-      }),
+      getDimensions: () => dimensions,
     });
     const image = await output.embedPng(await canvasPngBytes(canvas));
     const page = output.addPage([

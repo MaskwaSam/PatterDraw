@@ -85,6 +85,15 @@ if (!appSource.includes("aiEnabled={false}") || !appSource.includes("MermaidDial
 if (appSource.includes("openExternalWebLink") || !appSource.includes("External links are disabled")) {
   findings.push("src/App.tsx:1 external canvas links must remain blocked");
 }
+if (
+  appSource.includes('import { importPdf } from "./lib/pdf/import-pdf"')
+  || appSource.includes('import { exportAnnotatedPdf')
+  || appSource.includes('import { createBlankPdfFile')
+  || !appSource.includes('import("./lib/pdf/import-pdf")')
+  || !appSource.includes('import("./lib/pdf/export-pdf")')
+) {
+  findings.push("src/App.tsx:1 heavy PDF runtime modules must remain conditionally loaded");
+}
 const safetySource = await readFile(path.join(root, "src/lib/safety.ts"), "utf8");
 if (
   !safetySource.includes("embeddedImageDataUrl")
@@ -111,6 +120,14 @@ for (const safeguard of ["MAX_SOURCE_LENGTH", "SUPPORTED_DIAGRAM", "securityLeve
 }
 if (!viteSource.includes("/^@excalidraw\\/mermaid-to-excalidraw$/")) {
   findings.push("vite.config.ts:1 Excalidraw's built-in live Mermaid dialog must remain stubbed");
+}
+const archiveClientSource = await readFile(path.join(root, "src/lib/project-archive-client.ts"), "utf8");
+if (
+  !archiveClientSource.includes('new URL("./project-archive.worker.ts", import.meta.url)')
+  || archiveClientSource.includes("http://")
+  || archiveClientSource.includes("https://")
+) {
+  findings.push("src/lib/project-archive-client.ts:1 project archive worker must remain locally bundled");
 }
 
 if (findings.length) {

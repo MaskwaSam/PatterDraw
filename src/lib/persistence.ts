@@ -2,6 +2,7 @@ import { delMany, get, keys, setMany } from "idb-keyval";
 import type { ClassroomProject, LoadedClassroomProject, PdfDocumentId } from "../types";
 import { assertSafeProject, sanitizeProject } from "./safety";
 import { sha256Hex } from "./sha256";
+import { assertProjectFitsContentBudget } from "./project-budget";
 
 const PROJECT_KEY = "patterdraw:autosave:project:v1";
 const PDF_KEY_PREFIX = "patterdraw:autosave:pdf:v1:";
@@ -52,6 +53,7 @@ export async function saveAutosave(
     ...safe,
     pdfDocuments: Object.fromEntries(verifiedDocuments),
   };
+  assertProjectFitsContentBudget(verifiedProject, pdfBytes);
   const pdfEntries = Object.entries(verifiedProject.pdfDocuments).map(
     ([id, source]) => ({
       bytes: pdfBytes[id],

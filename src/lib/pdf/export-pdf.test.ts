@@ -31,6 +31,7 @@ import {
   exportAnnotatedPdf,
   getPdfAnnotationExportDimensions,
   getPdfPageExportBounds,
+  getSlidePdfExportDimensions,
 } from "./export-pdf";
 import { copySourcePageTransparencyGroup } from "./source-page";
 
@@ -290,6 +291,17 @@ describe("PDF export bounds", () => {
 
   it("rejects non-finite annotation bounds", () => {
     expect(() => getPdfAnnotationExportDimensions(Number.POSITIVE_INFINITY, 800)).toThrow(/positive finite/);
+  });
+
+  it("caps presentation slide raster allocation", () => {
+    const dimensions = getSlidePdfExportDimensions(10_000, 10_000);
+    expect(dimensions.width).toBeLessThanOrEqual(8_192);
+    expect(dimensions.height).toBeLessThanOrEqual(8_192);
+    expect(dimensions.width * dimensions.height).toBeLessThanOrEqual(16_000_000);
+  });
+
+  it("rejects presentation slide pages beyond the safe PDF edge", () => {
+    expect(() => getSlidePdfExportDimensions(14_401, 800)).toThrow(/no larger than 200 inches/);
   });
 
   it("composes a fresh PDF while preserving page count and dimensions", async () => {
