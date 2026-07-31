@@ -3070,7 +3070,7 @@ test("uses native grouping, movement, undo redo, ungroup, and whole-group deleti
   await page.keyboard.down("Shift");
   await page.mouse.click(contentCenter.x, contentCenter.y);
   await page.keyboard.up("Shift");
-  await page.keyboard.press("Meta+g");
+  await page.keyboard.press("ControlOrMeta+g");
   await expect.poll(async () => {
     const state = await autosavedElementsById(page, ["slide", "content"]);
     return {
@@ -3151,7 +3151,7 @@ test("groups a slide with an ordinary frame while preserving the frame's child o
   await page.keyboard.down("Shift");
   await page.mouse.click(nativeBorder.x, nativeBorder.y);
   await page.keyboard.up("Shift");
-  await page.keyboard.press("Meta+g");
+  await page.keyboard.press("ControlOrMeta+g");
   await expect.poll(async () => {
     const state = await autosavedElementsById(page, ["slide", "native-frame", "native-child"]);
     return {
@@ -4549,9 +4549,9 @@ test("batch-inserts independent fraction, algebra, integer, and probability mani
   expect((await autosavedMathToolSetSnapshot(page, "fraction-piece"))?.setIds).toHaveLength(1);
 
   await page.locator(".editor-host .excalidraw").focus();
-  await page.keyboard.press("Meta+z");
+  await page.keyboard.press("ControlOrMeta+z");
   await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "fraction-piece"))?.count || 0).toBe(0);
-  await page.keyboard.press("Meta+Shift+z");
+  await page.keyboard.press("ControlOrMeta+Shift+z");
   await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "fraction-piece"))?.count || 0).toBe(10);
 
   const beforeIndividualEdit = await autosavedMathToolSetSnapshot(page, "fraction-piece");
@@ -4568,9 +4568,9 @@ test("batch-inserts independent fraction, algebra, integer, and probability mani
     const after = await autosavedMathToolSetSnapshot(page, "fraction-piece");
     return after?.positions.filter((position, index) => position.x !== beforeIndividualEdit?.positions[index]?.x || position.y !== beforeIndividualEdit?.positions[index]?.y).length || 0;
   }).toBe(1);
-  await page.keyboard.press("Meta+Shift+l");
+  await page.keyboard.press("ControlOrMeta+Shift+l");
   await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "fraction-piece"))?.lockedCount || 0).toBe(1);
-  await page.keyboard.press("Meta+Shift+l");
+  await page.keyboard.press("ControlOrMeta+Shift+l");
   await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "fraction-piece"))?.lockedCount || 0).toBe(0);
 
   await openManipulatives();
@@ -4682,9 +4682,9 @@ test("rolls selected dice and flips selected coins locally in one undoable updat
   const afterRoll = await autosavedMathToolSetSnapshot(page, "probability-piece");
 
   await page.locator(".editor-host .excalidraw").focus();
-  await page.keyboard.press("Meta+z");
+  await page.keyboard.press("ControlOrMeta+z");
   await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.fileIds).toEqual(beforeRoll?.fileIds);
-  await page.keyboard.press("Meta+Shift+z");
+  await page.keyboard.press("ControlOrMeta+Shift+z");
   await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.fileIds).toEqual(afterRoll?.fileIds);
 
   form = await openProbabilityKit();
@@ -4701,7 +4701,7 @@ test("rolls selected dice and flips selected coins locally in one undoable updat
   }).toBe(true);
 
   await page.locator(".editor-host .excalidraw").focus();
-  await page.keyboard.press("Meta+a");
+  await page.keyboard.press("ControlOrMeta+a");
   await expect(randomize).toHaveText(/Randomize selected/);
   await expect(page.getByRole("toolbar", { name: "Selected probability pieces" })).toContainText("6 dice and 2 coins selected");
   await page.setViewportSize({ width: 390, height: 844 });
@@ -4788,9 +4788,9 @@ test("animates a selected spinner and persists its numbered result", async ({ pa
   expect(afterSpin?.angles).toEqual(beforeSpin?.angles);
 
   await page.locator(".editor-host .excalidraw").focus();
-  await page.keyboard.press("Meta+z");
+  await page.keyboard.press("ControlOrMeta+z");
   await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.fileIds).toEqual(beforeSpin?.fileIds);
-  await page.keyboard.press("Meta+Shift+z");
+  await page.keyboard.press("ControlOrMeta+Shift+z");
   await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.fileIds).toEqual(afterSpin?.fileIds);
 
   await page.setViewportSize({ width: 390, height: 844 });
