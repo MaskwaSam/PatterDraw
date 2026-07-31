@@ -375,6 +375,7 @@ export default function App() {
   const [zoom, setZoom] = useState(100);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [autosaveRecoveryDetail, setAutosaveRecoveryDetail] = useState<string | null>(null);
   const [initialExcalidrawData] = useState<Promise<{ libraryItems: LibraryItems } | null>>(() => (
     loadLibraryItems()
       .then((libraryItems) => ({ libraryItems }))
@@ -645,7 +646,7 @@ export default function App() {
       })
       .catch((error) => {
         if (!cancelled) {
-          setErrorMessage(`Autosave could not be opened: ${error instanceof Error ? error.message : String(error)}`);
+          setAutosaveRecoveryDetail(error instanceof Error ? error.message : String(error));
           // Keep the unread autosave untouched. Showing a temporary blank
           // board must not turn a transient IndexedDB/PDF-integrity failure
           // into permanent data loss before the teacher can recover storage.
@@ -1107,6 +1108,7 @@ export default function App() {
     setIsMathToolsOpen(false);
     setSaveStatus(replacementSaved ? "saved" : "error");
     autosaveSuspendedRef.current = false;
+    setAutosaveRecoveryDetail(null);
   }, []);
 
   const handleFile = useCallback(async (file: File) => {
@@ -1114,6 +1116,12 @@ export default function App() {
     setBusyMessage(`Opening ${file.name}…`);
     try {
       const isPdfFile = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+      if (
+        autosaveRecoveryDetail
+        && !window.confirm(
+          `Open ${file.name} and replace the protected unreadable autosave? Download the temporary board first if you want a separate backup.`,
+        )
+      ) return;
       if (!isPdfFile && file.size > MAX_PROJECT_BYTES) {
         throw new Error("The selected project is too large to open safely.");
       }
@@ -1143,6 +1151,7 @@ export default function App() {
         };
         assertProjectFitsContentBudget(nextProject, nextPdfBytes);
         autosaveSuspendedRef.current = false;
+        setAutosaveRecoveryDetail(null);
         pdfBytesRef.current = nextPdfBytes;
         projectRef.current = nextProject;
         setPdfBytes(nextPdfBytes);
@@ -1173,7 +1182,7 @@ export default function App() {
       setBusyMessage(null);
       if (inputRef.current) inputRef.current.value = "";
     }
-  }, [commitPendingScenePersistence, openLoadedProject]);
+  }, [autosaveRecoveryDetail, commitPendingScenePersistence, openLoadedProject]);
 
   const saveProjectFile = useCallback(async () => {
     const currentProject = commitPendingScenePersistence();
@@ -1192,6 +1201,57 @@ export default function App() {
       setBusyMessage(null);
     }
   }, [commitPendingScenePersistence]);
+
+  const resumeAutosaveWithCurrentBoard = useCallback(async () => {
+    const currentProject = commitPendingScenePersistence();
+    if (!currentProject || !autosaveRecoveryDetail) return;
+    if (!window.confirm(
+      "Replace the unreadable stored autosave with this temporary board and resume autosave? Download this board first if you want a separate backup.",
+    )) return;
+
+    const snapshot = {
+      project: currentProject,
+      pdfBytes: pdfBytesRef.current,
+    };
+    autosaveSnapshotRef.current = snapshot;
+    setBusyMessage("Replacing the unreadable autosave…");
+    setSaveStatus("saving");
+    let followupNeeded = false;
+    try {
+      await autosaveQueueRef.current.catch(() => undefined);
+      autosaveSavingRef.current = true;
+      const replacementSave = saveAutosave(
+        snapshot.project,
+        snapshot.pdfBytes,
+        { prepared: true },
+      ).then((contentSize) => {
+        autosaveContentBytesRef.current = contentSize.totalBytes;
+      });
+      autosaveQueueRef.current = replacementSave;
+      await replacementSave;
+      const latestSnapshot = autosaveSnapshotRef.current;
+      const newerSnapshotPending = latestSnapshot?.project !== snapshot.project
+        || latestSnapshot?.pdfBytes !== snapshot.pdfBytes;
+      autosaveDirtyRef.current = newerSnapshotPending;
+      followupNeeded = newerSnapshotPending;
+      autosaveUrgentRef.current = false;
+      autosaveLastQueuedAtRef.current = Date.now();
+      autosaveSuspendedRef.current = false;
+      setAutosaveRecoveryDetail(null);
+      setErrorMessage(null);
+      setSaveStatus(newerSnapshotPending ? "saving" : "saved");
+    } catch (error) {
+      // Keep recovery mode active if the explicit replacement cannot be
+      // committed atomically. The unreadable stored copy remains untouched.
+      autosaveDirtyRef.current = true;
+      setSaveStatus("error");
+      setErrorMessage(autosaveFailureMessage(error));
+    } finally {
+      autosaveSavingRef.current = false;
+      setBusyMessage(null);
+    }
+    if (followupNeeded) flushAutosave(true);
+  }, [autosaveRecoveryDetail, commitPendingScenePersistence, flushAutosave]);
 
   const runPdfExport = useCallback(async (kind: "slides" | PdfExportMode) => {
     const currentProject = commitPendingScenePersistence();
@@ -2780,6 +2840,32 @@ export default function App() {
           onLibraryToggle={toggleLibrary}
           onHide={() => setIsNavigationVisible(false)}
         />
+      )}
+      {autosaveRecoveryDetail && (
+        <section
+          className="autosave-recovery-banner"
+          role="alert"
+          aria-labelledby="autosave-recovery-title"
+        >
+          <div className="autosave-recovery-copy">
+            <strong id="autosave-recovery-title">Autosave is paused</strong>
+            <span>
+              Autosave could not be opened: {autosaveRecoveryDetail}. PatterDraw has not
+              replaced that stored copy, and this temporary board is not saving automatically.
+            </span>
+          </div>
+          <div className="autosave-recovery-actions">
+            <button type="button" onClick={() => inputRef.current?.click()}>Open a replacement file</button>
+            <button type="button" onClick={() => void saveProjectFile()}>Download this board</button>
+            <button
+              className="is-primary"
+              type="button"
+              onClick={() => void resumeAutosaveWithCurrentBoard()}
+            >
+              Use this board and resume autosave
+            </button>
+          </div>
+        </section>
       )}
       {!presentation && workspaceMode === "slides" && (
         <SlideRail

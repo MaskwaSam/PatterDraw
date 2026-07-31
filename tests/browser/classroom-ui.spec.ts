@@ -1526,7 +1526,11 @@ test("does not replace an unreadable autosave with a blank project", async ({ pa
 
   await page.reload();
 
-  await expect(page.getByText(/Autosave could not be opened/)).toBeVisible();
+  const recoveryNotice = page.getByRole("alert").filter({ hasText: "Autosave is paused" });
+  await expect(recoveryNotice).toContainText("Autosave could not be opened");
+  await expect(recoveryNotice).toContainText("this temporary board is not saving automatically");
+  const title = page.getByRole("textbox", { name: "Project title" });
+  await title.fill("Temporary recovery board");
   await page.locator('.statusbar button[aria-label="Zoom in"]').click();
   await page.waitForTimeout(1_200);
   await expect.poll(async () => (
@@ -1537,6 +1541,32 @@ test("does not replace an unreadable autosave with a blank project", async ({ pa
   )).toMatchObject({
     id: "recoverable-autosave",
     title: "Recoverable classroom work",
+  });
+
+  page.once("dialog", (dialog) => void dialog.dismiss());
+  await recoveryNotice.getByRole("button", { name: "Use this board and resume autosave" }).click();
+  await expect(recoveryNotice).toBeVisible();
+  await expect.poll(async () => (
+    await keyvalValue<{ id: string; title: string }>(
+      page,
+      "patterdraw:autosave:project:v1",
+    )
+  )).toMatchObject({
+    id: "recoverable-autosave",
+    title: "Recoverable classroom work",
+  });
+
+  page.once("dialog", (dialog) => void dialog.accept());
+  await recoveryNotice.getByRole("button", { name: "Use this board and resume autosave" }).click();
+  await expect(recoveryNotice).toBeHidden();
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  await expect.poll(async () => (
+    await keyvalValue<{ title: string }>(
+      page,
+      "patterdraw:autosave:project:v1",
+    )
+  )).toMatchObject({
+    title: "Temporary recovery board",
   });
 });
 

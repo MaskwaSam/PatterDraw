@@ -1405,6 +1405,42 @@ button { color: inherit; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .error-toast { position: fixed; z-index: 310; right: 18px; bottom: 58px; max-width: 440px; display: flex; align-items: center; gap: 16px; padding: 12px 13px; border: 1px solid #e8b6b6; border-radius: 8px; background: #fff7f7; color: #7d2525; box-shadow: 0 8px 30px rgb(80 20 20 / 16%); font-size: 13px; }
 .error-toast button { border: 0; background: transparent; color: #8d3030; font-size: 12px; font-weight: 700; cursor: pointer; }
+.autosave-recovery-banner {
+  position: fixed;
+  z-index: 250;
+  top: 70px;
+  left: 50%;
+  width: min(760px, calc(100vw - 24px));
+  transform: translateX(-50%);
+  display: grid;
+  gap: 11px;
+  padding: 14px;
+  border: 1px solid #d49a35;
+  border-radius: 10px;
+  background: #fffaf0;
+  color: #60400d;
+  box-shadow: 0 10px 32px rgb(82 52 10 / 18%);
+}
+.app-shell.is-nav-hidden .autosave-recovery-banner,
+.app-shell.is-presenting .autosave-recovery-banner { top: 12px; }
+.autosave-recovery-copy { display: grid; gap: 4px; font-size: 13px; line-height: 1.45; }
+.autosave-recovery-copy strong { font-size: 14px; }
+.autosave-recovery-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.autosave-recovery-actions button {
+  min-height: 34px;
+  padding: 6px 11px;
+  border: 1px solid #c9a25b;
+  border-radius: 7px;
+  background: #fff;
+  color: #66450f;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.autosave-recovery-actions button:hover { background: #fff4d9; }
+.autosave-recovery-actions button:focus-visible { outline: 2px solid #9b6511; outline-offset: 2px; }
+.autosave-recovery-actions button.is-primary { border-color: #7b5313; background: #7b5313; color: #fff; }
+.autosave-recovery-actions button.is-primary:hover { background: #65420c; }
 .loading-screen { width: 100%; height: 100%; display: grid; place-items: center; background: #f2f4f7; color: #465066; font: 600 14px Inter, sans-serif; }
 .visually-hidden { position: fixed; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
@@ -1447,6 +1483,9 @@ button { color: inherit; }
     gap: 0 8px;
     padding: 0 8px;
   }
+  .autosave-recovery-banner { top: 108px; }
+  .autosave-recovery-actions { display: grid; }
+  .autosave-recovery-actions button { width: 100%; }
   .probability-randomizer { gap: 7px; padding-left: 9px; }
   .probability-randomizer button { padding-inline: 9px; }
   .topbar-show { top: 62px; right: auto; left: 50%; transform: translateX(-50%); }
