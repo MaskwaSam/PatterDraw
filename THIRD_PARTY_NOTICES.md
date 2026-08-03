@@ -15,10 +15,18 @@ PatterDraw directly bundles these open-source packages. Production builds copy t
 | `pdfjs-dist` | 6.1.200 | Apache-2.0 | <https://github.com/mozilla/pdf.js> |
 | `pdf-lib` | 1.17.1 | MIT | <https://github.com/Hopding/pdf-lib> |
 | `fflate` | 0.8.3 | MIT | <https://github.com/101arrowz/fflate> |
+| PptxGenJS | 4.0.1 | MIT | <https://github.com/gitbrent/PptxGenJS> |
+| JSZip | 3.10.1 | MIT (selected from MIT OR GPL-3.0-or-later) | <https://github.com/Stuk/jszip> |
+| pako | 1.0.11 and 2.0.3 | MIT and Zlib | <https://github.com/nodeca/pako> |
 | `idb-keyval` | 6.3.0 | Apache-2.0 | <https://github.com/jakearchibald/idb-keyval> |
 | MathJax and MathJax New Computer Modern font data | 4.1.3 | Apache-2.0 | <https://github.com/mathjax/MathJax> |
 | `points-on-curve` | 1.0.1 | MIT | <https://github.com/pshihn/bezier-points> |
 | React / React DOM | 18.3.1 | MIT | <https://github.com/facebook/react> |
+
+PDF.js standard-font data (Foxit/PDFium PFB data and Liberation Sans) is copied
+from `pdfjs-dist/standard_fonts/` for offline rendering. The build keeps the
+upstream `LICENSE_FOXIT` and `LICENSE_LIBERATION` files beside those assets in
+`dist/pdfjs/standard_fonts/`.
 
 ## Fonts distributed by Excalidraw
 

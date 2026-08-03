@@ -1,4 +1,9 @@
-import type { ClassroomProject, SerializedScene, SlideFrameAspectRatio } from "../types";
+import {
+  DEFAULT_PROJECT_TITLE,
+  type ClassroomProject,
+  type SerializedScene,
+  type SlideFrameAspectRatio,
+} from "../types";
 import { sanitizeClassroomMathToolMetadata } from "./math-tools/types";
 import { canonicalizePdfBackground } from "./pdf/background";
 import { reconcilePdfPageOrder } from "./pdf/page-order";
@@ -22,6 +27,10 @@ export const MAX_PDF_PAGES = 250;
 
 const embeddedImageDataUrl = /^data:image\/(?:png|jpe?g|gif|webp|svg\+xml);base64,([a-z\d+/]*={0,2})$/i;
 const MAX_EMBEDDED_IMAGE_SOURCE_LENGTH = Math.ceil(MAX_PROJECT_BYTES * 4 / 3) + 128;
+const LEGACY_DEFAULT_PROJECT_TITLES = new Set([
+  "Untitled classroom canvas",
+  "Untitled PatterDraw project",
+]);
 
 export function normalizeSlideFrameAspectRatio(
   value: ClassroomProject["slideFrameAspectRatio"],
@@ -110,6 +119,18 @@ export function sanitizeProject(project: ClassroomProject): ClassroomProject {
     pdfDocuments: {},
     pdfPageOrder: project.pdfPageOrder ? [] : undefined,
   }) as ClassroomProject;
+  if (
+    safe.titleMode === "default"
+    || (safe.titleMode === undefined && (
+      safe.title === DEFAULT_PROJECT_TITLE
+      || LEGACY_DEFAULT_PROJECT_TITLES.has(safe.title)
+    ))
+  ) {
+    safe.title = DEFAULT_PROJECT_TITLE;
+    safe.titleMode = "default";
+  } else {
+    safe.titleMode = "custom";
+  }
   safe.slideOrder = reconcileSlideTitleModes(clone(project.slideOrder));
   safe.pdfDocuments = clone(project.pdfDocuments);
   safe.pdfPageOrder = project.pdfPageOrder ? clone(project.pdfPageOrder) : undefined;
@@ -172,8 +193,16 @@ export function sanitizeProject(project: ClassroomProject): ClassroomProject {
 
 function assertProject(project: ClassroomProject, requireSanitized: boolean): void {
   if (!project || typeof project !== "object") throw new Error("Project must be an object.");
-  if (project.schemaVersion !== 1) throw new Error("Unsupported classroom project version.");
+  if (project.schemaVersion !== 1) throw new Error("Unsupported PatterDraw project version.");
   if (!project.id || !project.activeSceneId) throw new Error("Project identity is missing.");
+  if (typeof project.title !== "string") throw new Error("Project title must be text.");
+  if (
+    project.titleMode !== undefined
+    && project.titleMode !== "default"
+    && project.titleMode !== "custom"
+  ) {
+    throw new Error("Project title mode must be default or custom.");
+  }
   if (!project.scenes || typeof project.scenes !== "object" || Array.isArray(project.scenes)) {
     throw new Error("Project scenes must be an object.");
   }
@@ -271,7 +300,7 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
         || element.type === "iframe"
         || element.type === "magicframe"
       ) {
-        throw new Error("Web embeds and generated frames are not supported in classroom projects.");
+        throw new Error("Web embeds and generated frames are not supported in PatterDraw projects.");
       }
       if (element.type === "frame") {
         const sceneFrames = frameElements.get(sceneKey) || new Set<string>();
@@ -296,14 +325,14 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
       }
       if (requireSanitized) {
         if (element.link) {
-          throw new Error("External links are not supported in classroom projects.");
+          throw new Error("External links are not supported in PatterDraw projects.");
         }
         if (
           customData
           && typeof customData === "object"
           && ("url" in customData || "href" in customData)
         ) {
-          throw new Error("External links are not supported in classroom projects.");
+          throw new Error("External links are not supported in PatterDraw projects.");
         }
         if (
           element.type === "image"

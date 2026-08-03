@@ -81,8 +81,8 @@ export function SlideRail({
         </span>
       </div>
       <div className="slide-rail-actions" role="group" aria-label="Slide controls">
-        <button className="new-slide-button" type="button" onClick={onAddSlide}>
-          <PlusIcon /> Add slide
+        <button className="new-slide-button" type="button" aria-label="Add slide" title="Add slide" onClick={onAddSlide}>
+          <PlusIcon /><span className="icon-label">Add slide</span>
         </button>
         <button
           className={`draw-frame-button ${frameDrawingActive ? "is-active" : ""}`}
@@ -90,9 +90,11 @@ export function SlideRail({
           aria-pressed={frameDrawingActive}
           aria-expanded={frameDrawingActive}
           aria-controls="slide-frame-aspect-options"
+          aria-label="Draw slide"
+          title="Draw slide"
           onClick={onToggleFrameDrawing}
         >
-          <FrameIcon /> Draw slide
+          <FrameIcon /><span className="icon-label">Draw slide</span>
         </button>
         {frameDrawingActive ? (
           <div id="slide-frame-aspect-options" className="slide-frame-aspect-options">
@@ -130,9 +132,10 @@ export function SlideRail({
             onClick={onToggleFrames}
             aria-label={framesVisible ? "Hide slide frames" : "Show slide frames"}
             aria-pressed={framesVisible}
+            title={framesVisible ? "Hide slide frames" : "Show slide frames"}
           >
             {framesVisible ? <EyeOffIcon /> : <EyeIcon />}
-            {framesVisible ? "Hide frames" : "Show frames"}
+            <span className="icon-label">{framesVisible ? "Hide frames" : "Show frames"}</span>
           </button>
           <button
             className={`toggle-morph-button ${morphEnabled ? "is-active" : ""}`}
@@ -142,7 +145,7 @@ export function SlideRail({
             aria-pressed={morphEnabled}
             title={morphEnabled ? "Disable Morph slide transition" : "Enable Morph slide transition"}
           >
-            <MorphIcon /> Morph
+            <MorphIcon /><span className="icon-label">Morph</span>
           </button>
         </div>
         {morphEnabled ? (

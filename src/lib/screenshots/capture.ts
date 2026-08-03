@@ -5,6 +5,7 @@ import {
 } from "@excalidraw/excalidraw";
 import type {
   AppState,
+  BinaryFiles,
   DataURL,
   ExcalidrawImperativeAPI,
 } from "@excalidraw/excalidraw/types";
@@ -59,6 +60,11 @@ export interface RenderedScreenshot {
   height: number;
   sceneWidth: number;
   sceneHeight: number;
+}
+
+export interface ScreenshotExportSource {
+  elements?: readonly ExcalidrawElement[];
+  files?: BinaryFiles;
 }
 
 export type ClipboardWriteResult = "success" | "unsupported" | "denied" | "failed";
@@ -205,14 +211,15 @@ export async function downsamplePngToByteLimit(
 export async function exportScreenshotArea(
   api: ExcalidrawImperativeAPI,
   bounds: SceneCaptureBounds,
+  source: ScreenshotExportSource = {},
 ): Promise<RenderedScreenshot> {
   const frame = createScreenshotExportFrame(bounds);
   const appState = api.getAppState();
-  const elements = api.getSceneElements().filter(isExportableElement);
+  const elements = (source.elements || api.getSceneElements()).filter(isExportableElement);
   let renderedDimensions = getScreenshotExportDimensions(bounds.width, bounds.height);
   const blob = await exportToBlob({
     elements,
-    files: api.getFiles(),
+    files: source.files || api.getFiles(),
     mimeType: "image/png",
     exportPadding: 0,
     exportingFrame: frame,

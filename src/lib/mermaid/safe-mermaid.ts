@@ -86,7 +86,7 @@ function assertFiniteElement(element: ExcalidrawElement): void {
     throw new Error("The Mermaid converter returned invalid geometry.");
   }
   if (element.width > MAX_ELEMENT_DIMENSION || element.height > MAX_ELEMENT_DIMENSION) {
-    throw new Error("That Mermaid diagram is too large for the classroom canvas.");
+    throw new Error("That Mermaid diagram is too large for the PatterDraw canvas.");
   }
   if ("points" in element && Array.isArray(element.points)) {
     for (const point of element.points) {
@@ -131,7 +131,7 @@ export async function renderMermaidToElements(value: string): Promise<RenderedMe
   const [minX, minY, maxX, maxY] = getCommonBounds(elements);
   if (![minX, minY, maxX, maxY].every(Number.isFinite) ||
     maxX - minX > MAX_DIAGRAM_SPAN || maxY - minY > MAX_DIAGRAM_SPAN) {
-    throw new Error("That Mermaid diagram is too large for the classroom canvas.");
+    throw new Error("That Mermaid diagram is too large for the PatterDraw canvas.");
   }
   return { source, elements };
 }

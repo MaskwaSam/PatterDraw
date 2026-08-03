@@ -28,10 +28,11 @@ function selectionLabel({ coins, dice, spinners }: ProbabilitySelectionSummary):
 
 export function ProbabilityRandomizer({ isSpinning, onRandomize, summary }: ProbabilityRandomizerProps) {
   const spinnerOnly = Boolean(summary.spinners) && selectedTypeCount(summary) === 1;
+  const label = isSpinning ? "Spinning" : actionLabel(summary);
   return (
     <div className="probability-randomizer" role="toolbar" aria-label="Selected probability pieces" aria-busy={isSpinning}>
       <span>{selectionLabel(summary)}</span>
-      <button type="button" data-testid="probability-randomize-selected" disabled={isSpinning} onClick={() => void onRandomize()}>
+      <button type="button" data-testid="probability-randomize-selected" aria-label={label} title={label} disabled={isSpinning} onClick={() => void onRandomize()}>
         {spinnerOnly ? (
           <svg className={`probability-spinner-icon${isSpinning ? " is-spinning" : ""}`} aria-hidden="true" viewBox="0 0 24 24">
             <circle cx="12" cy="12" r="8.5" />
@@ -48,7 +49,7 @@ export function ProbabilityRandomizer({ isSpinning, onRandomize, summary }: Prob
             <circle cx="16" cy="16" r="1.25" />
           </svg>
         )}
-        {isSpinning ? "Spinning…" : actionLabel(summary)}
+        <span className="icon-label">{isSpinning ? "Spinning…" : actionLabel(summary)}</span>
       </button>
     </div>
   );

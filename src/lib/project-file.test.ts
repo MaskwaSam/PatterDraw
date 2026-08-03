@@ -76,6 +76,7 @@ describe("classroom project files", () => {
   it("round-trips already-sanitized state through the low-memory archive path", async () => {
     const project = createBlankProject();
     project.title = "Prepared classroom backup";
+    project.titleMode = "custom";
 
     const decoded = await decodeProjectFile(await encodePreparedProjectFile(project, {}));
 
@@ -249,6 +250,7 @@ describe("classroom project files", () => {
   it("refuses to create a project whose complete uncompressed contents exceed the limit", async () => {
     const project = createBlankProject();
     project.title = "A".repeat(8_192);
+    project.titleMode = "custom";
     await expect(encodeProjectFile(project, {}, 1_024)).rejects.toThrow(/too large to save safely/);
   });
 

@@ -161,6 +161,29 @@ describe("area screenshot export", () => {
       frameRendering: { clip: false, name: false, outline: false },
     });
   });
+
+  it("uses a canonical source override instead of a transient display raster", async () => {
+    const liveElements = [{ id: "dark-pdf", type: "image", isDeleted: false }];
+    const lightElements = [{ id: "light-pdf", type: "image", isDeleted: false }];
+    const liveFiles = { dark: { id: "dark" } };
+    const lightFiles = { light: { id: "light" } };
+    const api = {
+      getSceneElements: () => liveElements,
+      getFiles: () => liveFiles,
+      getAppState: () => ({ frameRendering: {} }),
+    } as unknown as ExcalidrawImperativeAPI;
+    vi.mocked(exportToBlob).mockResolvedValueOnce(pngBlob(100));
+
+    await exportScreenshotArea(
+      api,
+      { x: 0, y: 0, width: 100, height: 100 },
+      { elements: lightElements as never, files: lightFiles as never },
+    );
+
+    const request = vi.mocked(exportToBlob).mock.calls.at(-1)?.[0];
+    expect(request?.elements).toEqual(lightElements);
+    expect(request?.files).toBe(lightFiles);
+  });
 });
 
 describe("screenshot clipboard", () => {

@@ -25,7 +25,8 @@ This repository is intentionally independent from PolyPad. Nothing here patches 
   - **Expand pages** keeps the source scale and enlarges each output page to include off-page writing.
   - **Fit like OpenBoard** keeps the source paper size and scales the visible union to fit.
 - Presentation PDF export with one ordered frame per page.
-- Source tests for import safety, project round trips, LaTeX validation, full-board export sizing, slide ordering, PDF page ordering, reordered PDF export, and expanded PDF bounds.
+- PowerPoint (`.pptx`) export with one high-fidelity local image per ordered frame. Decks open in PowerPoint, Keynote, and Google Slides, while individual drawing objects remain editable only in the source `.patterdraw` project.
+- Source tests for import safety, project round trips, LaTeX validation, full-board export sizing, slide ordering, PDF page ordering, reordered PDF export, PowerPoint deck structure, and expanded PDF bounds.
 
 The Moodle activity is designed but not yet implemented. See [the Moodle boundary](moodle/mod_patterdraw/README.md) and [roadmap](docs/ROADMAP.md).
 

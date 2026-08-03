@@ -76,9 +76,9 @@ export function PresentationOverlay({
         <span className="presentation-count">{index + 1} / {slides.length}</span>
         <button type="button" onClick={() => onIndexChange(Math.min(slides.length - 1, index + 1))} disabled={index >= slides.length - 1} aria-label="Next slide"><NextIcon /></button>
         <span className="presentation-separator" />
-        <button type="button" className={tool === "laser" ? "is-active" : ""} onClick={() => onToolChange("laser")} aria-pressed={tool === "laser"}><LaserIcon />Laser</button>
-        <button type="button" className={tool === "freedraw" ? "is-active" : ""} onClick={() => onToolChange("freedraw")} aria-pressed={tool === "freedraw"}><InkIcon />Ink</button>
-        <button type="button" onClick={onExit}><CloseIcon />Exit</button>
+        <button type="button" className={tool === "laser" ? "is-active" : ""} onClick={() => onToolChange("laser")} aria-label="Laser" aria-pressed={tool === "laser"} title="Laser"><LaserIcon /><span className="icon-label">Laser</span></button>
+        <button type="button" className={tool === "freedraw" ? "is-active" : ""} onClick={() => onToolChange("freedraw")} aria-label="Ink" aria-pressed={tool === "freedraw"} title="Ink"><InkIcon /><span className="icon-label">Ink</span></button>
+        <button type="button" onClick={onExit} aria-label="Exit" title="Exit presentation"><CloseIcon /><span className="icon-label">Exit</span></button>
       </div>
       <div className="presentation-ink-palette" role="group" aria-label="Ink colours">
         <span className="presentation-palette-label">Ink colour</span>

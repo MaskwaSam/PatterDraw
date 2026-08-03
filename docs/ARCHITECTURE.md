@@ -9,7 +9,7 @@ Local files / Moodle
         |
 Project codec + import validation
         |
-Classroom project model
+PatterDraw project model
    |            |             |             |
 Scenes       Slide order   PDF page order   Original PDFs
    |            |             |             |
@@ -52,6 +52,10 @@ Frames remain source-of-truth visual boundaries. `slideOrder` provides stable or
 `workspaceMode` is UI-only and defaults to `board`. Turning Slides on reveals the frame rail and presentation/export controls without remounting Excalidraw or changing the scene. Opening a saved project or Excalidraw file returns to board mode; importing a PDF enters PDF mode so its ordered page rail is immediately available.
 
 Presentation focuses frames through a single adapter around Excalidraw's viewport API. Frame chrome and normal editor UI are hidden, but the live canvas remains active. Laser is transient; free-draw ink is stored as ordinary scene elements and therefore participates in autosave and export.
+
+Presentation PDF and PowerPoint export both follow `slideOrder` and render each referenced frame from the current persisted scene. PowerPoint export is a deliberately high-fidelity visual snapshot: each slide contains one locally generated PNG with the PatterDraw slide title stored as alternative text. This preserves Excalidraw appearance without introducing remote assets or translating drawings into an incomplete second object model; the `.patterdraw` file remains the editable source.
+
+A PowerPoint deck has one global page size. Projects set to 4:3 export as 4:3; 16:9, freeform, and legacy projects export as 16:9. Frames with a different shape are proportionally contained on white, never stretched or cropped. The exporter applies stricter PPTX-specific raster limits plus per-slide and per-deck encoded-PNG byte limits before retaining base64 images, preventing high-entropy photos or very large decks from exhausting browser memory. The exact-pinned local `pptxgenjs` package is dynamically imported only when the user chooses **PowerPoint (.pptx)**, keeping its serialization code out of the initial editor bundle.
 
 ## Equations
 

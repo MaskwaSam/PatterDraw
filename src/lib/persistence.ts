@@ -16,6 +16,7 @@ const PDF_KEY_PREFIX = "patterdraw:autosave:pdf:v1:";
 const LEGACY_PROJECT_KEY = "excalidraw-classroom:autosave:project:v1";
 const LEGACY_PDF_KEY_PREFIX = "excalidraw-classroom:autosave:pdf:v1:";
 const MUTATION_LOCK = "patterdraw:autosave:mutation:v1";
+const AUTOSAVE_LOAD_RETRY_LIMIT = 2;
 const autosaveStore = createStore("keyval-store", "keyval");
 let mutationQueue: Promise<void> = Promise.resolve();
 
@@ -134,6 +135,257 @@ export function commitAutosaveTransaction(
       abort(error);
     }
   });
+}
+
+export function autosaveManifestsMatch(
+  expected: ClassroomProject | undefined,
+  stored: ClassroomProject | undefined,
+): boolean {
+  if (!expected || !stored) return expected === stored;
+  try {
+    // A migration is allowed to rewrite only the exact manifest it verified.
+    // Comparing the complete structured value also protects against two tabs
+    // producing different edits within the same timestamp resolution.
+    return JSON.stringify(expected) === JSON.stringify(stored);
+  } catch {
+    return false;
+  }
+}
+
+export function commitAutosaveMigrationTransaction(
+  store: IDBObjectStore,
+  expectedProject: ClassroomProject,
+  fromLegacyKey: boolean,
+  verifiedProject: ClassroomProject,
+  pdfEntries: readonly (readonly [PdfDocumentId, Uint8Array])[],
+): Promise<boolean> {
+  return new Promise<boolean>((resolve, reject) => {
+    const transaction = store.transaction;
+    let migrated = false;
+    let decisionMade = false;
+    let currentReady = false;
+    let legacyReady = !fromLegacyKey;
+    let storedCurrent: ClassroomProject | undefined;
+    let storedLegacy: ClassroomProject | undefined;
+
+    transaction.oncomplete = () => resolve(migrated);
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+
+    const abort = (error: unknown) => {
+      try {
+        transaction.abort();
+      } catch {
+        // The transaction may already have aborted because of the request.
+      }
+      reject(error);
+    };
+    const queueMigration = () => {
+      if (!currentReady || !legacyReady || decisionMade) return;
+      decisionMade = true;
+      const sourceStillCurrent = fromLegacyKey
+        ? !storedCurrent && autosaveManifestsMatch(expectedProject, storedLegacy)
+        : autosaveManifestsMatch(expectedProject, storedCurrent);
+      if (!sourceStillCurrent) return;
+
+      try {
+        store.put(verifiedProject, PROJECT_KEY);
+        for (const [id, bytes] of pdfEntries) {
+          store.put(bytes, `${PDF_KEY_PREFIX}${id}`);
+        }
+        if (fromLegacyKey) {
+          store.delete(LEGACY_PROJECT_KEY);
+          for (const [id] of pdfEntries) {
+            store.delete(`${LEGACY_PDF_KEY_PREFIX}${id}`);
+          }
+        }
+        migrated = true;
+      } catch (error) {
+        abort(error);
+      }
+    };
+
+    try {
+      // The comparison and conditional writes share one readwrite transaction.
+      // IndexedDB therefore serializes them with saves from every other tab,
+      // even in browsers that do not implement the Web Locks API.
+      const currentRequest = store.get(PROJECT_KEY);
+      currentRequest.onsuccess = () => {
+        storedCurrent = currentRequest.result as ClassroomProject | undefined;
+        currentReady = true;
+        queueMigration();
+      };
+      currentRequest.onerror = () => abort(currentRequest.error);
+
+      if (fromLegacyKey) {
+        const legacyRequest = store.get(LEGACY_PROJECT_KEY);
+        legacyRequest.onsuccess = () => {
+          storedLegacy = legacyRequest.result as ClassroomProject | undefined;
+          legacyReady = true;
+          queueMigration();
+        };
+        legacyRequest.onerror = () => abort(legacyRequest.error);
+      }
+    } catch (error) {
+      abort(error);
+    }
+  });
+}
+
+export function validateAutosaveSnapshotTransaction(
+  store: IDBObjectStore,
+  expectedProject: ClassroomProject,
+  fromLegacyKey: boolean,
+): Promise<boolean> {
+  return new Promise<boolean>((resolve, reject) => {
+    const transaction = store.transaction;
+    let matches = false;
+    let decisionMade = false;
+    let currentReady = false;
+    let legacyReady = !fromLegacyKey;
+    let storedCurrent: ClassroomProject | undefined;
+    let storedLegacy: ClassroomProject | undefined;
+
+    transaction.oncomplete = () => resolve(matches);
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+
+    const abort = (error: unknown) => {
+      try {
+        transaction.abort();
+      } catch {
+        // The transaction may already have aborted because of the request.
+      }
+      reject(error);
+    };
+    const decide = () => {
+      if (!currentReady || !legacyReady || decisionMade) return;
+      decisionMade = true;
+      matches = fromLegacyKey
+        ? !storedCurrent && autosaveManifestsMatch(expectedProject, storedLegacy)
+        : autosaveManifestsMatch(expectedProject, storedCurrent);
+    };
+
+    try {
+      // A readwrite transaction acts as the same cross-tab serialization
+      // point as save/migration transactions in browsers without Web Locks.
+      // No data is written; it only proves that the manifest whose PDF bytes
+      // were verified is still the current one before loadAutosave returns it.
+      const currentRequest = store.get(PROJECT_KEY);
+      currentRequest.onsuccess = () => {
+        storedCurrent = currentRequest.result as ClassroomProject | undefined;
+        currentReady = true;
+        decide();
+      };
+      currentRequest.onerror = () => abort(currentRequest.error);
+
+      if (fromLegacyKey) {
+        const legacyRequest = store.get(LEGACY_PROJECT_KEY);
+        legacyRequest.onsuccess = () => {
+          storedLegacy = legacyRequest.result as ClassroomProject | undefined;
+          legacyReady = true;
+          decide();
+        };
+        legacyRequest.onerror = () => abort(legacyRequest.error);
+      }
+    } catch (error) {
+      abort(error);
+    }
+  });
+}
+
+export function commitAutosaveClearTransaction(store: IDBObjectStore): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const transaction = store.transaction;
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+
+    const abort = (error: unknown) => {
+      try {
+        transaction.abort();
+      } catch {
+        // The transaction may already have aborted because of the request.
+      }
+      reject(error);
+    };
+
+    try {
+      const keyRequest = store.getAllKeys();
+      keyRequest.onsuccess = () => {
+        try {
+          for (const key of keyRequest.result) {
+            if (
+              typeof key === "string"
+              && (
+                key === PROJECT_KEY
+                || key === LEGACY_PROJECT_KEY
+                || key.startsWith(PDF_KEY_PREFIX)
+                || key.startsWith(LEGACY_PDF_KEY_PREFIX)
+              )
+            ) store.delete(key);
+          }
+        } catch (error) {
+          abort(error);
+        }
+      };
+      keyRequest.onerror = () => abort(keyRequest.error);
+    } catch (error) {
+      abort(error);
+    }
+  });
+}
+
+async function migrateAutosaveWithoutCrossContextLock(
+  expectedProject: ClassroomProject,
+  fromLegacyKey: boolean,
+  verifiedProject: ClassroomProject,
+  pdfEntries: readonly (readonly [PdfDocumentId, Uint8Array])[],
+): Promise<boolean> {
+  // Unit environments can replace createStore with an unavailable test
+  // double. Production browsers always take the transaction branch below.
+  if (!autosaveStore) {
+    await setMany([
+      [PROJECT_KEY, verifiedProject],
+      ...pdfEntries.map(
+        ([id, bytes]): [string, Uint8Array] => [`${PDF_KEY_PREFIX}${id}`, bytes],
+      ),
+    ]);
+    if (fromLegacyKey) {
+      await delMany([
+        LEGACY_PROJECT_KEY,
+        ...pdfEntries.map(([id]) => `${LEGACY_PDF_KEY_PREFIX}${id}`),
+      ]);
+    }
+    return true;
+  }
+  return autosaveStore(
+    "readwrite",
+    (store) => commitAutosaveMigrationTransaction(
+      store,
+      expectedProject,
+      fromLegacyKey,
+      verifiedProject,
+      pdfEntries,
+    ),
+  );
+}
+
+async function validateAutosaveWithoutCrossContextLock(
+  expectedProject: ClassroomProject,
+  fromLegacyKey: boolean,
+): Promise<boolean> {
+  // Unit suites that replace createStore exercise the transaction helper
+  // directly. Production browsers always have this store function.
+  if (!autosaveStore) return true;
+  return autosaveStore(
+    "readwrite",
+    (store) => validateAutosaveSnapshotTransaction(
+      store,
+      expectedProject,
+      fromLegacyKey,
+    ),
+  );
 }
 
 async function setManyAndDeleteStaleAtomically(
@@ -259,8 +511,10 @@ export async function saveAutosave(
   return contentSize;
 }
 
-export async function loadAutosave(): Promise<LoadedClassroomProject | null> {
-  return withCrossContextLock(async () => {
+async function loadAutosaveAttempt(
+  remainingRetries: number,
+): Promise<LoadedClassroomProject | null> {
+  return withCrossContextLock(async (hasCrossContextLock) => {
     const currentProject = await get<ClassroomProject>(PROJECT_KEY);
     const project = currentProject || await get<ClassroomProject>(LEGACY_PROJECT_KEY);
     if (!project) return null;
@@ -294,38 +548,79 @@ export async function loadAutosave(): Promise<LoadedClassroomProject | null> {
     const pdfEntries = loadedPdfEntries.map(({ bytes, id }) => [id, bytes] as const);
 
     const needsMigration = !currentProject
+      || safeProject.title !== project.title
+      || safeProject.titleMode !== project.titleMode
       || Object.values(safeProject.pdfDocuments).some((source) => !source.sha256);
+    let snapshotSuperseded = false;
     if (needsMigration) {
-      try {
-        await setMany([
-          [PROJECT_KEY, verifiedProject],
-          ...pdfEntries.map(
-            ([id, bytes]): [string, Uint8Array] => [`${PDF_KEY_PREFIX}${id}`, bytes],
-          ),
-        ]);
-        if (!currentProject) {
-          try {
-            await delMany([
-              LEGACY_PROJECT_KEY,
-              ...pdfEntries.map(([id]) => `${LEGACY_PDF_KEY_PREFIX}${id}`),
-            ]);
-          } catch {
-            // The verified current copy is complete; stale legacy cleanup can
-            // be retried by a later save or explicit clear.
-          }
+      if (!hasCrossContextLock) {
+        try {
+          const migrated = await migrateAutosaveWithoutCrossContextLock(
+            project,
+            !currentProject,
+            verifiedProject,
+            pdfEntries,
+          );
+          // A clean false result means the transaction observed a newer
+          // manifest. Storage failures are different: migration is optional
+          // and the already-verified source can still be opened safely.
+          snapshotSuperseded = !migrated;
+        } catch {
+          // Preserve the existing recovery contract for quota/upgrade write
+          // failures. A later autosave can retry the schema migration.
         }
-      } catch {
-        // Opening valid work is more important than an eager schema upgrade.
-        // The returned project carries hashes, so the next autosave retries
-        // the same atomic migration.
+      } else {
+        try {
+          await setMany([
+            [PROJECT_KEY, verifiedProject],
+            ...pdfEntries.map(
+              ([id, bytes]): [string, Uint8Array] => [`${PDF_KEY_PREFIX}${id}`, bytes],
+            ),
+          ]);
+          if (!currentProject) {
+            try {
+              await delMany([
+                LEGACY_PROJECT_KEY,
+                ...pdfEntries.map(([id]) => `${LEGACY_PDF_KEY_PREFIX}${id}`),
+              ]);
+            } catch {
+              // The verified current copy is complete; stale legacy cleanup can
+              // be retried by a later save or explicit clear.
+            }
+          }
+        } catch {
+          // Opening valid work is more important than an eager schema upgrade
+          // while a browser-wide Web Lock already prevents a competing save.
+          // The returned project carries hashes, so the next autosave retries.
+        }
       }
+    }
+    if (!hasCrossContextLock && !needsMigration) {
+      snapshotSuperseded = !(await validateAutosaveWithoutCrossContextLock(
+        project,
+        !currentProject,
+      ));
+    }
+    if (snapshotSuperseded) {
+      if (remainingRetries <= 0) {
+        throw new Error("Autosave changed in another tab while it was opening. Try opening it again.");
+      }
+      return loadAutosaveAttempt(remainingRetries - 1);
     }
     return { project: verifiedProject, pdfBytes: Object.fromEntries(pdfEntries) };
   });
 }
 
+export async function loadAutosave(): Promise<LoadedClassroomProject | null> {
+  return loadAutosaveAttempt(AUTOSAVE_LOAD_RETRY_LIMIT);
+}
+
 export async function clearAutosave(_project?: ClassroomProject): Promise<void> {
   await enqueueMutation(async () => {
+    if (autosaveStore) {
+      await autosaveStore("readwrite", commitAutosaveClearTransaction);
+      return;
+    }
     const pdfKeys = (await keys()).filter((key): key is string => (
       typeof key === "string"
       && (key.startsWith(PDF_KEY_PREFIX) || key.startsWith(LEGACY_PDF_KEY_PREFIX))

@@ -18,12 +18,16 @@ vi.mock("idb-keyval", () => ({
 }));
 
 import {
+  autosaveManifestsMatch,
   clearAutosave,
+  commitAutosaveClearTransaction,
+  commitAutosaveMigrationTransaction,
   commitAutosaveTransaction,
   getAutosaveWriteEntries,
   getStaleAutosaveKeys,
   loadAutosave,
   saveAutosave,
+  validateAutosaveSnapshotTransaction,
 } from "./persistence";
 
 const PDF_SHA256 = "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a";
@@ -282,6 +286,110 @@ describe("PatterDraw autosave persistence", () => {
 
     expect(transaction.transaction.abort).toHaveBeenCalledOnce();
     expect(transaction.committed.get("patterdraw:autosave:project:v1")).toBe(original);
+  });
+
+  it("does not migrate over a newer manifest when Web Locks are unavailable", async () => {
+    const verified = createBlankProject();
+    verified.title = "Verified older project";
+    const newer = structuredClone(verified);
+    newer.title = "Newer tab edit";
+    newer.updatedAt = "2099-01-01T00:00:00.000Z";
+    const transaction = fakeTransactionStore([
+      ["patterdraw:autosave:project:v1", newer],
+    ]);
+
+    await expect(commitAutosaveMigrationTransaction(
+      transaction.store,
+      verified,
+      false,
+      { ...verified, titleMode: "custom" },
+      [],
+    )).resolves.toBe(false);
+
+    expect(transaction.puts).toEqual([]);
+    expect(transaction.deletes).toEqual([]);
+    expect(transaction.committed.get("patterdraw:autosave:project:v1")).toBe(newer);
+    expect(autosaveManifestsMatch(verified, newer)).toBe(false);
+  });
+
+  it("validates an unchanged normalized manifest without rewriting it", async () => {
+    const project = createBlankProject();
+    const transaction = fakeTransactionStore([
+      ["patterdraw:autosave:project:v1", structuredClone(project)],
+    ]);
+
+    await expect(validateAutosaveSnapshotTransaction(
+      transaction.store,
+      project,
+      false,
+    )).resolves.toBe(true);
+
+    expect(transaction.puts).toEqual([]);
+    expect(transaction.deletes).toEqual([]);
+  });
+
+  it("rejects a normalized snapshot superseded by another tab", async () => {
+    const expected = createBlankProject();
+    const newer = {
+      ...structuredClone(expected),
+      title: "Newer tab edit",
+      titleMode: "custom" as const,
+      updatedAt: "2099-01-01T00:00:00.000Z",
+    };
+    const transaction = fakeTransactionStore([
+      ["patterdraw:autosave:project:v1", newer],
+    ]);
+
+    await expect(validateAutosaveSnapshotTransaction(
+      transaction.store,
+      expected,
+      false,
+    )).resolves.toBe(false);
+
+    expect(transaction.puts).toEqual([]);
+    expect(transaction.deletes).toEqual([]);
+    expect(transaction.committed.get("patterdraw:autosave:project:v1")).toBe(newer);
+  });
+
+  it("clears current and legacy autosaves in one transaction", async () => {
+    const project = createBlankProject();
+    const transaction = fakeTransactionStore([
+      ["patterdraw:autosave:project:v1", project],
+      ["patterdraw:autosave:pdf:v1:current", new Uint8Array([1])],
+      ["excalidraw-classroom:autosave:project:v1", project],
+      ["excalidraw-classroom:autosave:pdf:v1:legacy", new Uint8Array([2])],
+      ["patterdraw:library:v1", "keep"],
+    ]);
+
+    await commitAutosaveClearTransaction(transaction.store);
+
+    expect([...transaction.committed.keys()]).toEqual(["patterdraw:library:v1"]);
+    expect(transaction.puts).toEqual([]);
+  });
+
+  it("atomically migrates the exact verified legacy manifest", async () => {
+    const legacy = createBlankProject();
+    legacy.title = "Untitled classroom canvas";
+    delete legacy.titleMode;
+    const verified = { ...legacy, title: "PatterDraw canvas", titleMode: "default" as const };
+    const pdfBytes = new Uint8Array([1, 2, 3, 4]);
+    const transaction = fakeTransactionStore([
+      ["excalidraw-classroom:autosave:project:v1", legacy],
+      ["excalidraw-classroom:autosave:pdf:v1:pdf", pdfBytes],
+    ]);
+
+    await expect(commitAutosaveMigrationTransaction(
+      transaction.store,
+      legacy,
+      true,
+      verified,
+      [["pdf", pdfBytes]],
+    )).resolves.toBe(true);
+
+    expect(transaction.committed.get("patterdraw:autosave:project:v1")).toEqual(verified);
+    expect(transaction.committed.get("patterdraw:autosave:pdf:v1:pdf")).toBe(pdfBytes);
+    expect(transaction.committed.has("excalidraw-classroom:autosave:project:v1")).toBe(false);
+    expect(transaction.committed.has("excalidraw-classroom:autosave:pdf:v1:pdf")).toBe(false);
   });
 
   it.each([
@@ -613,6 +721,26 @@ describe("PatterDraw autosave persistence", () => {
     expect(getMock).toHaveBeenNthCalledWith(2, "excalidraw-classroom:autosave:project:v1");
     expect(setManyMock).toHaveBeenCalledWith([
       ["patterdraw:autosave:project:v1", expect.objectContaining({ id: project.id })],
+    ]);
+  });
+
+  it("persists legacy default-title ownership when loading the current autosave key", async () => {
+    const project = createBlankProject();
+    project.title = "Untitled classroom canvas";
+    delete project.titleMode;
+    getMock.mockResolvedValueOnce(project);
+
+    await expect(loadAutosave()).resolves.toMatchObject({
+      project: {
+        title: "Untitled PatterDraw canvas",
+        titleMode: "default",
+      },
+    });
+    expect(setManyMock).toHaveBeenCalledWith([
+      ["patterdraw:autosave:project:v1", expect.objectContaining({
+        title: "Untitled PatterDraw canvas",
+        titleMode: "default",
+      })],
     ]);
   });
 

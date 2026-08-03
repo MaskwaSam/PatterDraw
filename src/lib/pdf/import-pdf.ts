@@ -27,6 +27,12 @@ import {
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
+function localPdfStandardFontDataUrl(): string {
+  // Keep the directory relative to the loaded application so both Vite dev
+  // middleware and a copied static build resolve the same local assets.
+  return new URL("./pdfjs/standard_fonts/", window.location.href).toString();
+}
+
 export interface ImportedPdf {
   source: PdfDocumentSource;
   bytes: Uint8Array;
@@ -140,6 +146,7 @@ async function parsePdfPages(file: File): Promise<ParsedPdfPages> {
     useSystemFonts: false,
     useWorkerFetch: false,
     useWasm: false,
+    standardFontDataUrl: localPdfStandardFontDataUrl(),
   });
 
   try {
@@ -179,7 +186,7 @@ async function parsePdfPages(file: File): Promise<ParsedPdfPages> {
 
 export async function importPdf(file: File): Promise<ImportedPdf> {
   if (file.type && file.type !== "application/pdf") throw new Error("Choose a PDF file.");
-  if (file.size > MAX_PDF_BYTES) throw new Error("The PDF is larger than the classroom limit.");
+  if (file.size > MAX_PDF_BYTES) throw new Error("The PDF is larger than the PatterDraw limit.");
 
   const parsed = await parsePdfPages(file);
   const bytes = new Uint8Array(await file.arrayBuffer());

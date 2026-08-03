@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { findRemoteSourceFindings } from "./offline-source-scan.mjs";
@@ -64,12 +64,62 @@ if (packageSource.dependencies?.mathjax !== "4.1.3") {
 if (packageSource.dependencies?.["@excalidraw/mermaid-to-excalidraw"] !== "2.2.2") {
   findings.push("package.json:1 Mermaid converter must remain pinned to 2.2.2");
 }
+if (packageSource.dependencies?.pptxgenjs !== "4.0.1") {
+  findings.push("package.json:1 PptxGenJS must remain pinned to 4.0.1");
+}
 const viteSource = await readFile(path.join(root, "vite.config.ts"), "utf8");
 if (!viteSource.includes("localMathJaxAssets") || !viteSource.includes('"mathjax/tex-svg.js"')) {
   findings.push("vite.config.ts:1 local MathJax asset packaging is missing");
 }
+if (
+  !viteSource.includes("localPdfjsAssets")
+  || !viteSource.includes("pdfjs/standard_fonts/")
+) {
+  findings.push("vite.config.ts:1 local PDF.js standard-font asset packaging is missing");
+}
+if (
+  !viteSource.includes("mathJaxSreRoot")
+  || !viteSource.includes('"speech-worker.js"')
+  || !viteSource.includes('"mathmaps/base.json"')
+  || !viteSource.includes('"mathmaps/en.json"')
+) {
+  findings.push("vite.config.ts:1 local MathJax SRE worker assets are missing");
+}
 if (viteSource.includes("input/tex/extensions")) {
   findings.push("vite.config.ts:1 optional MathJax TeX extensions must not be shipped");
+}
+const importPdfSource = await readFile(path.join(root, "src/lib/pdf/import-pdf.ts"), "utf8");
+if (
+  !importPdfSource.includes("standardFontDataUrl")
+  || !importPdfSource.includes("./pdfjs/standard_fonts/")
+) {
+  findings.push("src/lib/pdf/import-pdf.ts:1 PDF.js standardFontDataUrl must point at bundled local assets");
+}
+const noticesSource = await readFile(path.join(root, "THIRD_PARTY_NOTICES.md"), "utf8");
+if (!noticesSource.includes("LICENSE_FOXIT") || !noticesSource.includes("LICENSE_LIBERATION")) {
+  findings.push("THIRD_PARTY_NOTICES.md:1 PDF.js standard-font license provenance is missing");
+}
+
+// When a build has already been produced, verify the exact runtime files that
+// PDF.js and MathJax request. Keep this optional so check:safety remains useful
+// before the first build in a fresh checkout.
+try {
+  await stat(path.join(root, "dist"));
+  for (const relative of [
+    "pdfjs/standard_fonts/LiberationSans-Regular.ttf",
+    "pdfjs/standard_fonts/LICENSE_LIBERATION",
+    "mathjax/sre/speech-worker.js",
+    "mathjax/sre/mathmaps/base.json",
+    "mathjax/sre/mathmaps/en.json",
+  ]) {
+    try {
+      await stat(path.join(root, "dist", relative));
+    } catch {
+      findings.push(`dist/${relative}: bundled local runtime asset is missing`);
+    }
+  }
+} catch {
+  // No build output yet; source checks above still enforce the packaging path.
 }
 const latexSource = await readFile(path.join(root, "src/lib/latex/render-latex.ts"), "utf8");
 if (!latexSource.includes("/mathjax/tex-svg.js") || !latexSource.includes("sanitizeMathSvg")) {
@@ -93,6 +143,20 @@ if (
   || !appSource.includes('import("./lib/pdf/export-pdf")')
 ) {
   findings.push("src/App.tsx:1 heavy PDF runtime modules must remain conditionally loaded");
+}
+if (
+  appSource.includes('from "./lib/export-pptx"')
+  || !appSource.includes('import("./lib/export-pptx")')
+) {
+  findings.push("src/App.tsx:1 PPTX generation must remain conditionally loaded");
+}
+const pptxExportSource = await readFile(path.join(root, "src/lib/export-pptx.ts"), "utf8");
+if (
+  !pptxExportSource.includes("MAX_PPTX_RASTER_PIXELS_PER_DECK")
+  || !pptxExportSource.includes("MAX_PPTX_PNG_BYTES_PER_SLIDE")
+  || !pptxExportSource.includes("MAX_PPTX_PNG_BYTES_PER_DECK")
+) {
+  findings.push("src/lib/export-pptx.ts:1 PPTX raster and encoded-image safety limits are missing");
 }
 const safetySource = await readFile(path.join(root, "src/lib/safety.ts"), "utf8");
 if (

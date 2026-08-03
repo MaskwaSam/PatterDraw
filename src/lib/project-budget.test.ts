@@ -45,6 +45,7 @@ describe("project content budget", () => {
   it("rejects content before an oversized project is committed", () => {
     const project = createBlankProject();
     project.title = "worksheet".repeat(100);
+    project.titleMode = "custom";
     expect(() => assertProjectFitsContentBudget(project, {}, 256))
       .toThrow("complete project is too large");
   });

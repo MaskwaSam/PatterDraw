@@ -118,11 +118,13 @@ export function ScreenshotLibrary({
         <button
           type="button"
           className="screenshot-capture-button"
+          aria-label={busy ? "Capturing area" : "Capture area"}
+          title={busy ? "Capturing area" : "Capture area"}
           onClick={onCaptureArea}
           disabled={busy}
         >
           <ScreenshotIcon />
-          {busy ? "Capturing…" : "Capture area"}
+          <span className="icon-label">{busy ? "Capturing…" : "Capture area"}</span>
         </button>
       </div>
       {loading ? (

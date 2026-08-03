@@ -60,6 +60,7 @@ function hasCanonicalBackgroundGeometry(
 export function canonicalizePdfBackground(
   scene: SerializedScene,
   liveElements: readonly Record<string, unknown>[],
+  displayFileId?: string,
 ): readonly Record<string, unknown>[] {
   const workspace = scene.pdfPage;
   if (!workspace) return liveElements;
@@ -68,6 +69,7 @@ export function canonicalizePdfBackground(
   if (!persisted || persisted.type !== "image" || typeof persisted.fileId !== "string") {
     return liveElements;
   }
+  const expectedFileId = displayFileId || persisted.fileId;
 
   let live: Record<string, unknown> | undefined;
   let matchCount = 0;
@@ -79,7 +81,7 @@ export function canonicalizePdfBackground(
   if (
     matchCount === 1
     && liveElements[0] === live
-    && live.fileId === persisted.fileId
+    && live.fileId === expectedFileId
     && hasCanonicalBackgroundGeometry(live, scene, persisted)
   ) {
     return liveElements;
@@ -108,7 +110,7 @@ export function canonicalizePdfBackground(
     scale: [1, 1],
     crop: null,
     link: null,
-    fileId: persisted.fileId,
+    fileId: expectedFileId,
     status: "saved",
     version,
     updated: Math.max(

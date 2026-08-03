@@ -9,7 +9,12 @@ const excalidrawFontRoot = fileURLToPath(new URL(
   "./node_modules/@excalidraw/excalidraw/dist/prod/fonts/",
   import.meta.url,
 ));
+const pdfjsStandardFontRoot = fileURLToPath(new URL(
+  "./node_modules/pdfjs-dist/standard_fonts/",
+  import.meta.url,
+));
 const mathJaxRoot = fileURLToPath(new URL("./node_modules/mathjax/", import.meta.url));
+const mathJaxSreRoot = fileURLToPath(new URL("./node_modules/mathjax/sre/", import.meta.url));
 const mathJaxFontRoot = fileURLToPath(new URL(
   "./node_modules/@mathjax/mathjax-newcm-font/",
   import.meta.url,
@@ -26,6 +31,31 @@ async function fontFiles(root: string, prefix = ""): Promise<Array<{ absolute: s
     }
   }
   return files;
+}
+
+async function assetFiles(root: string, prefix = ""): Promise<Array<{ absolute: string; relative: string }>> {
+  const files: Array<{ absolute: string; relative: string }> = [];
+  for (const entry of await readdir(path.join(root, prefix), { withFileTypes: true })) {
+    const relative = prefix ? path.join(prefix, entry.name) : entry.name;
+    if (entry.isDirectory()) files.push(...await assetFiles(root, relative));
+    else if (entry.isFile()) {
+      files.push({ absolute: path.join(root, relative), relative: relative.split(path.sep).join("/") });
+    }
+  }
+  return files;
+}
+
+function localAssetContentType(relativePath: string): string {
+  switch (path.extname(relativePath).toLowerCase()) {
+    case ".json": return "application/json; charset=utf-8";
+    case ".js":
+    case ".mjs": return "text/javascript; charset=utf-8";
+    case ".ttf": return "font/ttf";
+    case ".woff2": return "font/woff2";
+    case ".txt":
+    case ".mts": return "text/plain; charset=utf-8";
+    default: return "application/octet-stream";
+  }
 }
 
 function localExcalidrawFonts(): Plugin {
@@ -60,6 +90,40 @@ function localExcalidrawFonts(): Plugin {
   };
 }
 
+async function localPdfjsAssetList(): Promise<LocalAsset[]> {
+  return (await assetFiles(pdfjsStandardFontRoot)).map((file) => ({
+    absolute: file.absolute,
+    output: `pdfjs/standard_fonts/${file.relative}`,
+  }));
+}
+
+function localPdfjsAssets(): Plugin {
+  return {
+    name: "local-pdfjs-assets",
+    configureServer(server) {
+      server.middlewares.use(async (request, response, next) => {
+        const requestPath = decodeURIComponent((request.url || "").split(/[?#]/, 1)[0]).replace(/^\//, "");
+        if (!requestPath.startsWith("pdfjs/standard_fonts/")) return next();
+        const asset = (await localPdfjsAssetList()).find((candidate) => candidate.output === requestPath);
+        if (!asset) return next();
+        try {
+          response.statusCode = 200;
+          response.setHeader("Content-Type", localAssetContentType(asset.output));
+          response.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+          response.end(await readFile(asset.absolute));
+        } catch {
+          next();
+        }
+      });
+    },
+    async generateBundle() {
+      for (const asset of await localPdfjsAssetList()) {
+        this.emitFile({ type: "asset", fileName: asset.output, source: await readFile(asset.absolute) });
+      }
+    },
+  };
+}
+
 interface LocalAsset {
   absolute: string;
   output: string;
@@ -68,9 +132,19 @@ interface LocalAsset {
 async function localMathJaxAssetList(): Promise<LocalAsset[]> {
   const dynamicFontNames = (await readdir(path.join(mathJaxFontRoot, "svg/dynamic")))
     .filter((name) => name.endsWith(".js"));
+  const sreFiles = await assetFiles(mathJaxSreRoot);
+  for (const required of ["speech-worker.js", "mathmaps/base.json", "mathmaps/en.json"]) {
+    if (!sreFiles.some((file) => file.relative === required)) {
+      throw new Error(`MathJax SRE asset is missing: ${required}`);
+    }
+  }
   return [
     { absolute: path.join(mathJaxRoot, "tex-svg.js"), output: "mathjax/tex-svg.js" },
     { absolute: path.join(mathJaxRoot, "ui/safe.js"), output: "mathjax/ui/safe.js" },
+    ...sreFiles.map((file) => ({
+      absolute: file.absolute,
+      output: `mathjax/sre/${file.relative}`,
+    })),
     { absolute: path.join(mathJaxFontRoot, "svg.js"), output: "mathjax-fonts/mathjax-newcm-font/svg.js" },
     ...dynamicFontNames.map((name) => ({
       absolute: path.join(mathJaxFontRoot, "svg/dynamic", name),
@@ -90,7 +164,7 @@ function localMathJaxAssets(): Plugin {
         if (!asset) return next();
         try {
           response.statusCode = 200;
-          response.setHeader("Content-Type", "text/javascript; charset=utf-8");
+          response.setHeader("Content-Type", localAssetContentType(asset.output));
           response.setHeader("Cache-Control", "public, max-age=31536000, immutable");
           response.end(await readFile(asset.absolute));
         } catch {
@@ -134,7 +208,7 @@ function releaseLicenseBundle(): Plugin {
 
 export default defineConfig({
   base: "./",
-  plugins: [react(), localExcalidrawFonts(), localMathJaxAssets(), releaseLicenseBundle()],
+  plugins: [react(), localExcalidrawFonts(), localPdfjsAssets(), localMathJaxAssets(), releaseLicenseBundle()],
   define: {
     "process.env.IS_PREACT": JSON.stringify("false"),
   },

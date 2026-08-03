@@ -71,7 +71,7 @@ export function extractProjectArchiveSync(
           || !Number.isSafeInteger(uncompressedBytes)
           || uncompressedBytes > maxBytes
         ) {
-          throw new ProjectArchiveError("Project archive expands beyond the classroom safety limit.");
+          throw new ProjectArchiveError("Project archive expands beyond the PatterDraw safety limit.");
         }
         return true;
       },

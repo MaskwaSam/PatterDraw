@@ -12,6 +12,7 @@ interface PdfPageRailProps {
   project: ClassroomProject;
   pages: readonly SerializedScene[];
   activeSceneId: SceneId;
+  thumbnailDataUrls?: Readonly<Partial<Record<SceneId, string>>>;
   onOpenPage: (sceneId: SceneId) => void;
   onMovePage: (movingId: SceneId, targetId: SceneId, edge: PdfPageDropEdge) => void;
   onShiftPage: (sceneId: SceneId, direction: -1 | 1) => void;
@@ -44,6 +45,7 @@ export function PdfPageRail({
   project,
   pages,
   activeSceneId,
+  thumbnailDataUrls,
   onOpenPage,
   onMovePage,
   onShiftPage,
@@ -94,7 +96,8 @@ export function PdfPageRail({
           const workspace = scene.pdfPage;
           if (!workspace) return null;
           const source = project.pdfDocuments[workspace.documentId];
-          const thumbnail = thumbnailDataUrl(scene);
+          const darkThumbnail = thumbnailDataUrls?.[scene.id];
+          const thumbnail = darkThumbnail || thumbnailDataUrl(scene);
           const notes = annotationCount(scene);
           const isBlankPage = source?.name === "Blank page";
           const label = isBlankPage
@@ -135,7 +138,7 @@ export function PdfPageRail({
                 <span className="pdf-output-position">{index + 1}</span>
                 <span className="page-sheet">
                   {thumbnail
-                    ? <img src={thumbnail} alt="" loading="lazy" decoding="async" />
+                    ? <img className={darkThumbnail ? "pdf-page-dark-thumbnail" : undefined} src={thumbnail} alt="" loading="lazy" decoding="async" />
                     : <span className="page-lines" />}
                   {notes > 0 ? <span className="pdf-annotation-count">{notes}</span> : null}
                 </span>
@@ -203,8 +206,8 @@ export function PdfPageRail({
         })}
       </ol>
       <div className="pdf-rail-actions">
-        <button className="pdf-add-page" type="button" onClick={onAddPage}>
-          <PlusIcon /> Add page
+        <button className="pdf-add-page" type="button" aria-label="Add page" title="Add page" onClick={onAddPage}>
+          <PlusIcon /><span className="icon-label">Add page</span>
         </button>
       </div>
       <span className="visually-hidden" aria-live="polite">{announcement}</span>

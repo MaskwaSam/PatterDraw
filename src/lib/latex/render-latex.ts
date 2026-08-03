@@ -101,7 +101,7 @@ export function validateLatexSource(value: string): string {
   }
   const commandCount = source.match(/\\[a-zA-Z]+|\\./g)?.length || 0;
   if (deepest > MAX_LATEX_NESTING || commandCount > MAX_LATEX_COMMANDS) {
-    throw new Error("That equation is too structurally complex for the classroom renderer.");
+    throw new Error("That equation is too structurally complex for the PatterDraw renderer.");
   }
   return source;
 }

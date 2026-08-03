@@ -41,6 +41,7 @@ import {
 } from "./components/LassoOverlay";
 import { EquationDialog } from "./components/EquationDialog";
 import { MermaidDialog } from "./components/MermaidDialog";
+import { ProjectFindPanel } from "./components/ProjectFindPanel";
 import { useModalDialog } from "./components/useModalDialog";
 import { ScreenshotCaptureOverlay } from "./components/ScreenshotCaptureOverlay";
 import {
@@ -60,6 +61,7 @@ import {
   PreviousIcon,
   RedoIcon,
   ScreenshotIcon,
+  SearchIcon,
   ShowBottomBarIcon,
   ShowPanelIcon,
   ShowTopBarIcon,
@@ -86,6 +88,7 @@ import { bytesForBlob } from "./lib/blob-bytes";
 import { downloadBlob, safeFileStem } from "./lib/download";
 import { exportFullBoardPng } from "./lib/export-board";
 import { createLocalId } from "./lib/id";
+import { sha256Hex } from "./lib/sha256";
 import {
   beginPngClipboardWrite,
   exportScreenshotArea,
@@ -103,6 +106,10 @@ import {
 import type { RenderedLatex } from "./lib/latex/render-latex";
 import type { RenderedMermaid } from "./lib/mermaid/safe-mermaid";
 import { canonicalizePdfBackground } from "./lib/pdf/background";
+import {
+  getPdfRasterDimensions,
+  renderDarkPdfPreview,
+} from "./lib/pdf/dark-preview";
 import {
   movePdfPage,
   orderedPdfScenes,
@@ -129,6 +136,26 @@ import {
   assertProjectCanAcceptAdditionalBytes,
   assertProjectFitsContentBudget,
 } from "./lib/project-budget";
+import {
+  DEFAULT_FEATURE_PREFERENCES,
+  persistFeaturePreference,
+  persistFeaturePreferences,
+  readFeaturePreferences,
+  subscribeToFeaturePreferences,
+  type FeaturePreferenceKey,
+  type FeaturePreferences,
+} from "./lib/feature-preferences";
+import {
+  DEFAULT_THEME_PREFERENCE,
+  persistThemePreference,
+  readThemePreference,
+  resolvedTheme,
+  subscribeToSystemTheme,
+  subscribeToThemePreference,
+  systemPrefersDark,
+  type ThemePreference,
+} from "./lib/theme-preference";
+import type { ProjectSearchResult } from "./lib/project-search";
 import {
   activateSlideFrameTool,
   addBlankSlideFrame,
@@ -199,18 +226,68 @@ type MathInteractionState = {
 type SlideFrameAction =
   | { kind: "add"; frameId: string; title: string }
   | { kind: "draw" };
+type PendingSlideFrameAction = {
+  action: SlideFrameAction;
+  sceneId: string;
+};
 type SlideFrameGesture = {
   current: SlideFramePoint;
   origin: SlideFramePoint;
   pointerId: number;
 };
 type PendingPresentationTransition = { frameId: string; animate: boolean; durationMs: number };
+type PendingProjectSearchTarget = Pick<ProjectSearchResult, "elementId" | "sceneId">;
 type PendingScenePersistence = {
   sceneId: string;
   elements: readonly ExcalidrawElement[];
   appState: AppState;
   files: BinaryFiles;
 };
+type ProjectFindShortcutBridge = {
+  enabled: boolean;
+  open: (() => void) | null;
+};
+const PROJECT_FIND_SHORTCUT_BRIDGE_KEY = "__patterdrawProjectFindShortcutBridgeV1";
+
+function installProjectFindShortcutBridge(): ProjectFindShortcutBridge | null {
+  if (typeof window === "undefined") return null;
+  const browserWindow = window as Window & {
+    [PROJECT_FIND_SHORTCUT_BRIDGE_KEY]?: ProjectFindShortcutBridge;
+  };
+  const existing = browserWindow[PROJECT_FIND_SHORTCUT_BRIDGE_KEY];
+  if (existing) return existing;
+  const bridge: ProjectFindShortcutBridge = { enabled: false, open: null };
+  browserWindow[PROJECT_FIND_SHORTCUT_BRIDGE_KEY] = bridge;
+  // Register before Excalidraw mounts. Its native scene-search shortcut stops
+  // later listeners on the same window, while PatterDraw owns Ctrl/Cmd+F once
+  // mounted: it opens project-wide Find when enabled and suppresses the native
+  // search when the user has turned the feature off.
+  window.addEventListener("keydown", (event) => {
+    const visibleModal = Array.from(document.querySelectorAll<HTMLElement>(
+      '[role="dialog"][aria-modal="true"]',
+    )).some((dialog) => (
+      !dialog.closest(".editor-host .excalidraw")
+      && !dialog.hidden
+      && dialog.getClientRects().length > 0
+    ));
+    if (
+      !bridge.open
+      || event.altKey
+      || event.shiftKey
+      || (!event.ctrlKey && !event.metaKey)
+      || event.key.toLowerCase() !== "f"
+      || visibleModal
+    ) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    if (bridge.enabled) bridge.open();
+  }, true);
+  return bridge;
+}
+
+const projectFindShortcutBridge = installProjectFindShortcutBridge();
+
 const CLASSROOM_UI_OPTIONS: ExcalidrawProps["UIOptions"] = {
   canvasActions: {
     changeViewBackgroundColor: false,
@@ -226,6 +303,7 @@ const CLASSROOM_UI_OPTIONS: ExcalidrawProps["UIOptions"] = {
 const SPINNER_ANIMATION_DURATION_MS = 1_100;
 const SCENE_PERSISTENCE_DELAY_MS = 150;
 const PERSONAL_LIBRARY_SIDEBAR_TAB = "library";
+const PROJECT_FIND_SIDEBAR_TAB = "project-find";
 type LibrarySidebarTab = typeof PERSONAL_LIBRARY_SIDEBAR_TAB | typeof SCREENSHOT_SIDEBAR_TAB;
 
 const renderNoEmbeddable: NonNullable<ExcalidrawProps["renderEmbeddable"]> = () => null;
@@ -250,7 +328,7 @@ function afterNextPaint(): Promise<void> {
 
 function screenshotDownloadName(createdAt: number): string {
   const timestamp = new Date(createdAt).toISOString().replace(/:\d{2}\.\d{3}Z$/, "Z").replaceAll(":", "-");
-  return `classroom-screenshot-${timestamp}.png`;
+  return `patterdraw-screenshot-${timestamp}.png`;
 }
 
 function clipboardCaptureToast(result: ClipboardWriteResult): string {
@@ -300,12 +378,63 @@ function serializedSceneFromChange(
     appState: Record<string, unknown>;
     files: Record<string, Record<string, unknown>>;
   };
+  // Theme and grid visibility are device preferences. Excalidraw serializes
+  // them by default, so remove only those toggles while retaining scene data
+  // such as the configured grid size and background colour.
+  delete exported.appState.theme;
+  delete exported.appState.gridModeEnabled;
   return sanitizeScene({
     ...previous,
     elements: exported.elements,
     appState: exported.appState,
     files: exported.files || {},
   });
+}
+
+function persistentFilesForScene(
+  scene: SerializedScene,
+  liveFiles: BinaryFiles,
+  transientFileIds: ReadonlySet<string>,
+): BinaryFiles {
+  if (!scene.pdfPage && transientFileIds.size === 0) return liveFiles;
+  const files = { ...liveFiles } as BinaryFiles;
+  for (const transientFileId of transientFileIds) {
+    delete files[transientFileId as FileId];
+  }
+  const background = scene.pdfPage
+    ? scene.elements.find((element) => element.id === scene.pdfPage?.backgroundElementId)
+    : undefined;
+  const lightFileId = typeof background?.fileId === "string"
+    ? background.fileId as FileId
+    : null;
+  const lightFile = lightFileId
+    ? scene.files[lightFileId] as unknown as BinaryFileData | undefined
+    : undefined;
+  if (lightFileId && lightFile) files[lightFileId] = lightFile;
+  return files;
+}
+
+function serializedValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    return left.every((value, index) => serializedValuesEqual(value, right[index]));
+  }
+  if (
+    !left
+    || !right
+    || typeof left !== "object"
+    || typeof right !== "object"
+  ) return false;
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord);
+  const rightKeys = Object.keys(rightRecord);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((key) => (
+    Object.prototype.hasOwnProperty.call(rightRecord, key)
+    && serializedValuesEqual(leftRecord[key], rightRecord[key])
+  ));
 }
 
 function projectWithPendingScene(
@@ -327,6 +456,10 @@ function projectWithPendingScene(
     pending.appState,
     pending.files,
   );
+  if (
+    serializedValuesEqual(scene, previousScene)
+    && serializedValuesEqual(slideOrder, current.slideOrder)
+  ) return current;
   return {
     ...current,
     updatedAt: nowIso(),
@@ -357,6 +490,7 @@ function nativeExcalidrawProject(text: string): ClassroomProject {
       : {},
   });
   project.title = typeof data.name === "string" ? data.name : "Imported drawing";
+  project.titleMode = "custom";
   project.slideOrder = reconcileSlides(
     sceneId,
     project.scenes[sceneId].elements as unknown as ExcalidrawElement[],
@@ -367,10 +501,11 @@ function nativeExcalidrawProject(text: string): ClassroomProject {
 
 export default function App() {
   const [project, setProject] = useState<ClassroomProject | null>(null);
+  const [projectHydrationRevision, setProjectHydrationRevision] = useState(0);
   const [pdfBytes, setPdfBytes] = useState<Record<PdfDocumentId, Uint8Array>>({});
   const [api, setApi] = useState<ExcalidrawImperativeAPI | null>(null);
   const [strokeWidth, setStrokeWidth] = useState(2);
-  const [saveStatus, setSaveStatus] = useState<SaveStatus>("saved");
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("saving");
   const [activeSlideId, setActiveSlideId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(100);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
@@ -386,6 +521,8 @@ export default function App() {
   ));
   const [exportOpen, setExportOpen] = useState(false);
   const [isLibraryOpen, setIsLibraryOpen] = useState(false);
+  const [isProjectFindOpen, setIsProjectFindOpen] = useState(false);
+  const [isSizePositionOpen, setIsSizePositionOpen] = useState(false);
   const [screenshots, setScreenshots] = useState<StoredScreenshot[]>([]);
   const [isScreenshotLibraryLoading, setIsScreenshotLibraryLoading] = useState(true);
   const [isScreenshotCaptureActive, setIsScreenshotCaptureActive] = useState(false);
@@ -399,7 +536,24 @@ export default function App() {
   const [areSlideFramesVisible, setAreSlideFramesVisible] = useState(true);
   const [isSlideFrameDrawingActive, setIsSlideFrameDrawingActive] = useState(false);
   const [isNavigationVisible, setIsNavigationVisible] = useState(true);
-  const [isFooterVisible, setIsFooterVisible] = useState(true);
+  const [featurePreferences, setFeaturePreferences] = useState(readFeaturePreferences);
+  const [themePreference, setThemePreferenceState] = useState(readThemePreference);
+  const [prefersDarkTheme, setPrefersDarkTheme] = useState(systemPrefersDark);
+  const [darkPdfPreviewUrls, setDarkPdfPreviewUrls] = useState<Record<string, string>>({});
+  const [darkPdfDisplayRevision, setDarkPdfDisplayRevision] = useState(0);
+  const editorTheme = useMemo(
+    () => resolvedTheme(themePreference, prefersDarkTheme),
+    [prefersDarkTheme, themePreference],
+  );
+  const featurePreferencesRef = useRef(featurePreferences);
+  featurePreferencesRef.current = featurePreferences;
+  const applyingEditorPreferencesRef = useRef<Pick<
+    FeaturePreferences,
+    "penOnly" | "showGrid" | "snapToObjects"
+  > | null>(null);
+  const editorThemeRef = useRef(editorTheme);
+  editorThemeRef.current = editorTheme;
+  const isFooterVisible = featurePreferences.footer;
   const [equationEditor, setEquationEditor] = useState<EquationEditorState | null>(null);
   const [mermaidEditor, setMermaidEditor] = useState<MermaidEditorState | null>(null);
   const [isMathToolsOpen, setIsMathToolsOpen] = useState(false);
@@ -413,6 +567,78 @@ export default function App() {
   const [probabilitySelection, setProbabilitySelection] = useState<ProbabilitySelectionSummary | null>(null);
   const [isProbabilitySpinning, setIsProbabilitySpinning] = useState(false);
   const [spinnerPointerAnimations, setSpinnerPointerAnimations] = useState<SpinnerPointerAnimation[]>([]);
+  const pendingSlideFrameActionRef = useRef<PendingSlideFrameAction | null>(null);
+  const setFeaturePreference = useCallback((key: FeaturePreferenceKey, enabled: boolean) => {
+    if (key === "slides" && !enabled) pendingSlideFrameActionRef.current = null;
+    let next = featurePreferencesRef.current;
+    if (enabled && key === "showGrid" && next.snapToObjects) {
+      next = persistFeaturePreference(next, "snapToObjects", false);
+    } else if (enabled && key === "snapToObjects" && next.showGrid) {
+      next = persistFeaturePreference(next, "showGrid", false);
+    }
+    if (next[key] !== enabled) next = persistFeaturePreference(next, key, enabled);
+    featurePreferencesRef.current = next;
+    setFeaturePreferences(next);
+  }, []);
+  const setThemePreference = useCallback((preference: ThemePreference) => {
+    setThemePreferenceState(persistThemePreference(preference));
+  }, []);
+  const toggleFooterPreference = useCallback(() => {
+    const next = persistFeaturePreference(
+      featurePreferencesRef.current,
+      "footer",
+      !featurePreferencesRef.current.footer,
+    );
+    featurePreferencesRef.current = next;
+    setFeaturePreferences(next);
+  }, []);
+  const restoreFeaturePreferences = useCallback(() => {
+    const defaults = { ...DEFAULT_FEATURE_PREFERENCES };
+    persistFeaturePreferences(defaults);
+    persistThemePreference(DEFAULT_THEME_PREFERENCE);
+    featurePreferencesRef.current = defaults;
+    setFeaturePreferences(defaults);
+    setThemePreferenceState(DEFAULT_THEME_PREFERENCE);
+  }, []);
+  useEffect(() => subscribeToFeaturePreferences((nextPreferences) => {
+    if (!nextPreferences.slides) pendingSlideFrameActionRef.current = null;
+    featurePreferencesRef.current = nextPreferences;
+    setFeaturePreferences(nextPreferences);
+  }), []);
+  useEffect(() => subscribeToThemePreference(setThemePreferenceState), []);
+  useEffect(() => subscribeToSystemTheme(setPrefersDarkTheme), []);
+  useEffect(() => {
+    if (!api) return;
+    const appState = api.getAppState();
+    const preferences = featurePreferencesRef.current;
+    if (
+      appState.penMode === preferences.penOnly
+      && appState.gridModeEnabled === preferences.showGrid
+      && appState.objectsSnapModeEnabled === preferences.snapToObjects
+    ) {
+      applyingEditorPreferencesRef.current = null;
+      return;
+    }
+    applyingEditorPreferencesRef.current = {
+      penOnly: preferences.penOnly,
+      showGrid: preferences.showGrid,
+      snapToObjects: preferences.snapToObjects,
+    };
+    api.updateScene({
+      appState: {
+        penMode: preferences.penOnly,
+        penDetected: true,
+        gridModeEnabled: preferences.showGrid,
+        objectsSnapModeEnabled: preferences.snapToObjects,
+      },
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
+  }, [
+    api,
+    featurePreferences.penOnly,
+    featurePreferences.showGrid,
+    featurePreferences.snapToObjects,
+  ]);
   const inputRef = useRef<HTMLInputElement>(null);
   const insertTriggerRef = useRef<HTMLButtonElement>(null);
   const exportOptionsTriggerRef = useRef<HTMLButtonElement>(null);
@@ -422,11 +648,109 @@ export default function App() {
   const pdfBytesRef = useRef<Record<PdfDocumentId, Uint8Array>>(pdfBytes);
   const currentSceneRef = useRef<SerializedScene | null>(null);
   const activeSceneIdRef = useRef<string | null>(null);
-  const switchingSceneRef = useRef(false);
+  const darkPdfPreviewCacheRef = useRef(new Map<string, Promise<BinaryFileData>>());
+  const darkPdfThumbnailCacheRef = useRef(new Map<string, Promise<DataURL>>());
+  const darkPdfDisplayFileIdsRef = useRef(new Map<string, FileId>());
+  const darkPdfPreviewErrorsRef = useRef(new Set<string>());
+  const transientDarkPdfFileIdsRef = useRef(new Set<string>());
+  const darkPdfPreviewGenerationRef = useRef(0);
+  const suspendDarkPdfDisplayRef = useRef(false);
+  const getDarkPdfDisplayFile = useCallback((scene: SerializedScene): Promise<BinaryFileData> => {
+    const workspace = scene.pdfPage;
+    const background = workspace
+      ? scene.elements.find((element) => element.id === workspace.backgroundElementId)
+      : undefined;
+    const lightFileId = typeof background?.fileId === "string" ? background.fileId : null;
+    const lightFile = lightFileId
+      ? scene.files[lightFileId] as Record<string, unknown> | undefined
+      : undefined;
+    const lightDataUrl = typeof lightFile?.dataURL === "string" ? lightFile.dataURL : null;
+    const sourceBytes = workspace ? pdfBytesRef.current[workspace.documentId] : undefined;
+    const recordedSourceSha256 = workspace
+      ? projectRef.current?.pdfDocuments[workspace.documentId]?.sha256
+      : undefined;
+    if (!workspace || !lightFileId || !lightDataUrl || !sourceBytes) {
+      return Promise.reject(new Error("The original PDF page is unavailable."));
+    }
+    const cacheKey = `${projectRef.current?.id || "project"}:${scene.id}:${lightFileId}`;
+    const cached = darkPdfPreviewCacheRef.current.get(cacheKey);
+    if (cached) return cached;
+
+    const preview = getPdfRasterDimensions(lightDataUrl).then(async ({ width, height }) => {
+      const sourceSha256 = recordedSourceSha256 || await sha256Hex(sourceBytes);
+      const dataURL = await renderDarkPdfPreview({
+        bytes: sourceBytes,
+        pageIndex: workspace.pageIndex,
+        width,
+        height,
+      });
+      // Excalidraw's file API only merges. A content-derived ID lets an
+      // identical page preview reuse the existing entry after project
+      // hydration instead of retaining another full-size data URL.
+      const id = [
+        "patterdraw-dark-pdf-v1",
+        sourceSha256,
+        workspace.pageIndex,
+        `${width}x${height}`,
+      ].join("-") as FileId;
+      const file: BinaryFileData = {
+        id,
+        // Excalidraw applies an additional image-preservation filter to PNGs
+        // before its dark canvas filter. This display-only raster already
+        // compensates its picture regions, so opt out via the SVG MIME path;
+        // the browser still decodes the PNG data URL itself.
+        mimeType: "image/svg+xml",
+        dataURL,
+        created: Date.now(),
+      };
+      transientDarkPdfFileIdsRef.current.add(id);
+      return file;
+    });
+    darkPdfPreviewCacheRef.current.set(cacheKey, preview);
+    return preview;
+  }, []);
+  const getDarkPdfThumbnailUrl = useCallback((scene: SerializedScene): Promise<DataURL> => {
+    const workspace = scene.pdfPage;
+    const background = workspace
+      ? scene.elements.find((element) => element.id === workspace.backgroundElementId)
+      : undefined;
+    const lightFileId = typeof background?.fileId === "string" ? background.fileId : null;
+    const lightFile = lightFileId
+      ? scene.files[lightFileId] as Record<string, unknown> | undefined
+      : undefined;
+    const lightDataUrl = typeof lightFile?.dataURL === "string" ? lightFile.dataURL : null;
+    const sourceBytes = workspace ? pdfBytesRef.current[workspace.documentId] : undefined;
+    if (!workspace || !lightFileId || !lightDataUrl || !sourceBytes) {
+      return Promise.reject(new Error("The original PDF page is unavailable."));
+    }
+    const cacheKey = `${projectRef.current?.id || "project"}:${scene.id}:${lightFileId}`;
+    const cached = darkPdfThumbnailCacheRef.current.get(cacheKey);
+    if (cached) return cached;
+
+    const preview = getPdfRasterDimensions(lightDataUrl).then(({ width, height }) => {
+      const scale = Math.min(1, 256 / Math.max(width, height));
+      return renderDarkPdfPreview({
+        bytes: sourceBytes,
+        pageIndex: workspace.pageIndex,
+        width: Math.max(1, Math.round(width * scale)),
+        height: Math.max(1, Math.round(height * scale)),
+      });
+    });
+    darkPdfThumbnailCacheRef.current.set(cacheKey, preview);
+    return preview;
+  }, []);
+  // Excalidraw can emit its initial blank scene after the API is ready but
+  // before the asynchronously loaded classroom project reaches the editor.
+  // Treat that window as a scene switch so the blank scene cannot overwrite
+  // the stored project during startup.
+  const switchingSceneRef = useRef(true);
+  const sceneHydrationGenerationRef = useRef(0);
+  const sceneHydrationOuterFrameRef = useRef<number | null>(null);
+  const sceneHydrationInnerFrameRef = useRef<number | null>(null);
   const pendingFrameIdRef = useRef<string | null>(null);
+  const pendingProjectSearchTargetRef = useRef<PendingProjectSearchTarget | null>(null);
   const pendingPresentationTransitionRef = useRef<PendingPresentationTransition | null>(null);
   const pendingCreatedFrameIdRef = useRef<string | null>(null);
-  const pendingSlideFrameActionRef = useRef<SlideFrameAction | null>(null);
   const slideFramesVisibleRef = useRef(true);
   const slideFrameDrawingActiveRef = useRef(false);
   const slideFrameAspectRatioRef = useRef<SlideFrameAspectRatio>("freeform");
@@ -439,6 +763,7 @@ export default function App() {
   const focusAfterMathToolsRef = useRef<"editor" | "trigger" | null>(null);
   const nativeImageExportOpenRef = useRef(false);
   const libraryOpenRef = useRef(false);
+  const nativeCanvasSearchOpenRef = useRef(false);
   const lastLibraryTabRef = useRef<LibrarySidebarTab>(PERSONAL_LIBRARY_SIDEBAR_TAB);
   const screenshotsRef = useRef<StoredScreenshot[]>([]);
   const restoreExportOptionsFocusRef = useRef(false);
@@ -452,6 +777,16 @@ export default function App() {
   const autosaveUrgentRef = useRef(false);
   const autosaveContentBytesRef = useRef(0);
   const autosaveLastDurationMsRef = useRef(0);
+  // A page that is being torn down may emit a final transient empty scene
+  // from Excalidraw. Do not let that teardown notification become a new
+  // autosave after the next page has already started loading this project.
+  const autosavePageExitRef = useRef(false);
+  // Keep the startup save barrier closed until the first scene hydration has
+  // settled. A valid loaded project has no write to perform, but Excalidraw
+  // can still emit a late scene update while it mounts; reporting "Saved
+  // locally" before that update is committed lets page-exit handling race the
+  // just-loaded state.
+  const autosaveStartupReadyRef = useRef(false);
   const skipNextAutosaveEffectRef = useRef(false);
   const autosaveTimerRef = useRef<number | null>(null);
   const autosaveLastQueuedAtRef = useRef(0);
@@ -460,6 +795,29 @@ export default function App() {
   const scenePersistenceTimerRef = useRef<number | null>(null);
   projectRef.current = project;
   pdfBytesRef.current = pdfBytes;
+  const cancelSceneHydrationFrames = useCallback(() => {
+    if (sceneHydrationOuterFrameRef.current !== null) {
+      window.cancelAnimationFrame(sceneHydrationOuterFrameRef.current);
+      sceneHydrationOuterFrameRef.current = null;
+    }
+    if (sceneHydrationInnerFrameRef.current !== null) {
+      window.cancelAnimationFrame(sceneHydrationInnerFrameRef.current);
+      sceneHydrationInnerFrameRef.current = null;
+    }
+  }, []);
+  const beginSceneHydration = useCallback(() => {
+    cancelSceneHydrationFrames();
+    switchingSceneRef.current = true;
+    sceneHydrationGenerationRef.current += 1;
+    return sceneHydrationGenerationRef.current;
+  }, [cancelSceneHydrationFrames]);
+  useEffect(() => () => {
+    sceneHydrationGenerationRef.current += 1;
+    cancelSceneHydrationFrames();
+  }, [cancelSceneHydrationFrames]);
+  useEffect(() => () => {
+    window.cancelAnimationFrame(slideDetachmentFrameRef.current);
+  }, []);
   const closeExportDialog = useCallback(() => setExportOpen(false), []);
   const shouldRestoreExportDialogFocus = useCallback(
     () => !nativeImageExportOpenRef.current,
@@ -482,12 +840,22 @@ export default function App() {
     const baseProject = projectRef.current;
     const nextProject = projectWithPendingScene(baseProject, pending);
     if (!nextProject) return baseProject;
+    if (nextProject === baseProject) {
+      if (
+        !autosaveSuspendedRef.current
+        && !autosaveDirtyRef.current
+        && !autosaveSavingRef.current
+        && autosaveStartupReadyRef.current
+      ) setSaveStatus("saved");
+      return baseProject;
+    }
     projectRef.current = nextProject;
     autosaveSnapshotRef.current = {
       project: nextProject,
       pdfBytes: pdfBytesRef.current,
     };
     autosaveDirtyRef.current = true;
+    if (autosaveSavingRef.current) autosaveUrgentRef.current = true;
     setProject((current) => {
       if (current === baseProject) return nextProject;
       const mergedProject = projectWithPendingScene(current, pending);
@@ -512,7 +880,7 @@ export default function App() {
       SCENE_PERSISTENCE_DELAY_MS,
     );
   }, [commitPendingScenePersistence]);
-  const flushAutosave = useCallback((urgent = false) => {
+  const flushAutosave = useCallback((urgent = false, queueBehindActive = false) => {
     if (autosaveSuspendedRef.current) return;
     if (urgent) autosaveUrgentRef.current = true;
     const snapshot = autosaveSnapshotRef.current;
@@ -527,7 +895,13 @@ export default function App() {
     // flush is the one exception: enqueue the newest snapshot immediately
     // behind the active IndexedDB transaction instead of relying on a timer
     // that may never run after the document is torn down.
-    if (autosaveSavingRef.current && !urgent) return;
+    if (autosaveSavingRef.current) {
+      // Ordinary text-entry flushes only mark the current save for an
+      // immediate follow-up. Page-exit/visibility flushes opt into queuing a
+      // second snapshot behind the active transaction because their timers
+      // may never run after the document is torn down.
+      if (!queueBehindActive) return;
+    }
     const elapsed = Date.now() - autosaveLastQueuedAtRef.current;
     const cooldown = getAutosaveCooldownMs(
       autosaveContentBytesRef.current,
@@ -569,17 +943,28 @@ export default function App() {
       () => {
         if (autosaveQueueRef.current !== queuedSave) return;
         autosaveSavingRef.current = false;
+        // Excalidraw can emit the initial scene update while this save is in
+        // flight. queueScenePersistence marks the status as saving but waits
+        // briefly before committing the scene, so checking only
+        // autosaveDirtyRef here could briefly report "Saved locally" with a
+        // stale snapshot still queued. Commit it now and keep the follow-up
+        // write on the same autosave path.
+        if (pendingScenePersistenceRef.current) commitPendingScenePersistence();
         if (!autosaveDirtyRef.current) {
-          setSaveStatus("saved");
+          setSaveStatus(autosaveStartupReadyRef.current ? "saved" : "saving");
           return;
         }
         const elapsed = Date.now() - autosaveLastQueuedAtRef.current;
-        const delay = autosaveUrgentRef.current ? 0 : getAutosaveFollowupDelayMs(
+        const followupUrgent = autosaveUrgentRef.current;
+        const delay = followupUrgent ? 0 : getAutosaveFollowupDelayMs(
           autosaveContentBytesRef.current,
           elapsed,
           autosaveLastDurationMsRef.current,
         );
-        autosaveTimerRef.current = window.setTimeout(() => flushAutosave(), delay);
+        autosaveTimerRef.current = window.setTimeout(
+          () => flushAutosave(followupUrgent),
+          delay,
+        );
       },
       (error) => {
         if (autosaveQueueRef.current !== queuedSave) return;
@@ -726,13 +1111,14 @@ export default function App() {
       if (event.repeat || !event.shiftKey || (!event.ctrlKey && !event.metaKey)) return;
       const key = event.key.toLowerCase();
       if (key !== "h" && key !== "f") return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       event.preventDefault();
       if (key === "h") setIsNavigationVisible((visible) => !visible);
-      else setIsFooterVisible((visible) => !visible);
+      else toggleFooterPreference();
     };
     window.addEventListener("keydown", toggleChrome, true);
     return () => window.removeEventListener("keydown", toggleChrome, true);
-  }, [presentation]);
+  }, [presentation, toggleFooterPreference]);
 
   useLayoutEffect(() => {
     if (!project) return;
@@ -758,7 +1144,14 @@ export default function App() {
       flushAutosave();
       return;
     }
-    if (autosaveSavingRef.current) return;
+    if (autosaveSavingRef.current) {
+      // Preserve one immediate, latest-only follow-up when edits arrive while
+      // a save is in flight. Waiting through a duration-based cooldown here
+      // can leave the visible document ahead of its recovery copy for several
+      // extra seconds on the slow devices that need autosave most.
+      autosaveUrgentRef.current = true;
+      return;
+    }
     autosaveTimerRef.current = window.setTimeout(
       () => flushAutosave(),
       Math.max(0, interval - elapsed),
@@ -772,11 +1165,12 @@ export default function App() {
   }, [project, pdfBytes, flushAutosave]);
 
   useEffect(() => {
-    const flushAfterInteraction = () => {
+    const scheduleInteractionFlush = (urgent = false) => {
       commitPendingScenePersistence();
       if (autosaveTimerRef.current !== null) window.clearTimeout(autosaveTimerRef.current);
-      autosaveTimerRef.current = window.setTimeout(() => flushAutosave(), 0);
+      autosaveTimerRef.current = window.setTimeout(() => flushAutosave(urgent), 0);
     };
+    const flushAfterInteraction = () => scheduleInteractionFlush();
     const flushAfterMutationKey = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
       const target = event.target;
@@ -794,29 +1188,47 @@ export default function App() {
         || key.startsWith("arrow")
         || ((event.ctrlKey || event.metaKey) && (key === "z" || key === "y"))
       ) {
-        flushAfterInteraction();
+        // Text-entry commits are user-visible document changes. If an older
+        // save is still in flight (or the normal project cooldown has not
+        // elapsed), mark one immediate follow-up instead of making the user
+        // wait for that trailing delay. `flushAutosave(true)` keeps the
+        // one-write-at-a-time mutation queue intact while allowing the latest
+        // snapshot to bypass the cooldown.
+        scheduleInteractionFlush(textEntry);
       }
     };
     const flushWhenHidden = () => {
       if (document.visibilityState === "hidden") {
         commitPendingScenePersistence();
-        flushAutosave(true);
+        flushAutosave(true, true);
       }
     };
     const flushBeforePageExit = (event: BeforeUnloadEvent) => {
+      autosavePageExitRef.current = true;
+      // A dismissed beforeunload prompt leaves this document alive and does
+      // not reliably emit pageshow. Let the guard reopen on the next task in
+      // that case; during a real navigation the document is torn down before
+      // this callback can run.
+      window.setTimeout(() => {
+        autosavePageExitRef.current = false;
+      }, 0);
       if (
         !pendingScenePersistenceRef.current
         && !autosaveDirtyRef.current
         && !autosaveSavingRef.current
       ) return;
       commitPendingScenePersistence();
-      flushAutosave(true);
+      flushAutosave(true, true);
       event.preventDefault();
       event.returnValue = "";
     };
     const flushOnPageHide = () => {
+      autosavePageExitRef.current = true;
       commitPendingScenePersistence();
-      flushAutosave(true);
+      flushAutosave(true, true);
+    };
+    const resetPageExit = () => {
+      autosavePageExitRef.current = false;
     };
     window.addEventListener("pointerup", flushAfterInteraction);
     window.addEventListener("click", flushAfterInteraction);
@@ -824,6 +1236,7 @@ export default function App() {
     document.addEventListener("visibilitychange", flushWhenHidden);
     window.addEventListener("beforeunload", flushBeforePageExit);
     window.addEventListener("pagehide", flushOnPageHide);
+    window.addEventListener("pageshow", resetPageExit);
     return () => {
       window.removeEventListener("pointerup", flushAfterInteraction);
       window.removeEventListener("click", flushAfterInteraction);
@@ -831,6 +1244,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", flushWhenHidden);
       window.removeEventListener("beforeunload", flushBeforePageExit);
       window.removeEventListener("pagehide", flushOnPageHide);
+      window.removeEventListener("pageshow", resetPageExit);
       if (autosaveTimerRef.current !== null) window.clearTimeout(autosaveTimerRef.current);
       if (scenePersistenceTimerRef.current !== null) {
         window.clearTimeout(scenePersistenceTimerRef.current);
@@ -857,37 +1271,111 @@ export default function App() {
     addBlankSlideFrame(api, action.title, action.frameId);
   }, [api]);
 
+  const focusProjectSearchTarget = useCallback((target: PendingProjectSearchTarget) => {
+    if (!api) return;
+    pendingProjectSearchTargetRef.current = target;
+    void afterNextPaint().then(() => {
+      // PDF mode centers its page background over two paints. Search wins on
+      // the following paint so the exact text, not the page, remains focused.
+      window.requestAnimationFrame(() => {
+        if (
+          pendingProjectSearchTargetRef.current !== target
+          || activeSceneIdRef.current !== target.sceneId
+        ) return;
+        pendingProjectSearchTargetRef.current = null;
+        const element = api.getSceneElements().find((candidate) => (
+          candidate.id === target.elementId && !candidate.isDeleted
+        ));
+        if (!element) {
+          api.setToast({ message: "That search result is no longer on the canvas." });
+          return;
+        }
+        api.setActiveTool({ type: "selection" });
+        api.updateScene({
+          appState: { selectedElementIds: { [element.id]: true } },
+          captureUpdate: CaptureUpdateAction.NEVER,
+        });
+        api.scrollToContent(element, { animate: true, duration: 250 });
+      });
+    });
+  }, [api]);
+
   const loadSceneIntoEditor = useCallback((scene: SerializedScene) => {
     if (!api) return;
-    switchingSceneRef.current = true;
+    const hydrationGeneration = beginSceneHydration();
+    const sceneId = scene.id;
     const files = scene.files as unknown as BinaryFiles;
+    const liveAppState = api.getAppState();
+    const editorPreferences = featurePreferencesRef.current;
     api.addFiles(Object.values(files));
     api.updateScene({
       elements: scene.elements as unknown as readonly ExcalidrawElement[],
-      appState: scene.appState as unknown as AppState,
+      appState: {
+        ...(scene.appState as unknown as AppState),
+        penMode: editorPreferences.penOnly,
+        penDetected: true,
+        gridModeEnabled: editorPreferences.showGrid,
+        objectsSnapModeEnabled: editorPreferences.snapToObjects,
+        theme: editorThemeRef.current,
+        stats: liveAppState.stats,
+        openSidebar: liveAppState.openSidebar,
+      },
       captureUpdate: CaptureUpdateAction.NEVER,
     });
     api.updateFrameRendering({ enabled: slideFramesVisibleRef.current, clip: false });
     api.history.clear();
-    window.requestAnimationFrame(() => {
-      switchingSceneRef.current = false;
-      if (pendingFrameIdRef.current) {
-        focusSlide(api, pendingFrameIdRef.current, true);
-        pendingFrameIdRef.current = null;
-      }
-      if (pendingSlideFrameActionRef.current) {
-        const action = pendingSlideFrameActionRef.current;
-        pendingSlideFrameActionRef.current = null;
-        runSlideFrameAction(action);
-      }
+    sceneHydrationOuterFrameRef.current = window.requestAnimationFrame(() => {
+      sceneHydrationOuterFrameRef.current = null;
+      if (
+        sceneHydrationGenerationRef.current !== hydrationGeneration
+        || projectRef.current?.activeSceneId !== sceneId
+      ) return;
+      // Excalidraw may deliver its initial onChange after updateScene returns.
+      // Keep scene persistence suppressed through a second paint so the
+      // startup "Saved locally" state cannot precede that hydration event.
+      sceneHydrationInnerFrameRef.current = window.requestAnimationFrame(() => {
+        sceneHydrationInnerFrameRef.current = null;
+        if (
+          sceneHydrationGenerationRef.current !== hydrationGeneration
+          || projectRef.current?.activeSceneId !== sceneId
+        ) return;
+        switchingSceneRef.current = false;
+        if (!autosaveStartupReadyRef.current) {
+          autosaveStartupReadyRef.current = true;
+          if (
+            !autosaveSuspendedRef.current
+            && !autosaveDirtyRef.current
+            && !autosaveSavingRef.current
+            && !pendingScenePersistenceRef.current
+          ) {
+            setSaveStatus("saved");
+          }
+        }
+        if (pendingFrameIdRef.current) {
+          focusSlide(api, pendingFrameIdRef.current, true);
+          pendingFrameIdRef.current = null;
+        }
+        if (pendingSlideFrameActionRef.current) {
+          const pendingAction = pendingSlideFrameActionRef.current;
+          pendingSlideFrameActionRef.current = null;
+          if (
+            pendingAction.sceneId === sceneId
+            && featurePreferencesRef.current.slides
+          ) runSlideFrameAction(pendingAction.action);
+        }
+        const pendingSearchTarget = pendingProjectSearchTargetRef.current;
+        if (pendingSearchTarget?.sceneId === sceneId) {
+          focusProjectSearchTarget(pendingSearchTarget);
+        }
+      });
     });
-  }, [api, runSlideFrameAction]);
+  }, [api, beginSceneHydration, focusProjectSearchTarget, runSlideFrameAction]);
 
   useEffect(() => {
     if (!api || !project) return;
     const scene = project.scenes[project.activeSceneId];
     if (scene) loadSceneIntoEditor(scene);
-  }, [api, project?.id, project?.activeSceneId, loadSceneIntoEditor]);
+  }, [api, project?.id, project?.activeSceneId, projectHydrationRevision, loadSceneIntoEditor]);
 
   useEffect(() => {
     const frameId = pendingCreatedFrameIdRef.current;
@@ -899,13 +1387,40 @@ export default function App() {
   }, [project?.slideOrder]);
 
   const handleChange = useCallback<NonNullable<ExcalidrawProps["onChange"]>>((elements, appState, files) => {
+    if (autosavePageExitRef.current) return;
     const isNativeImageExportOpen = appState.openDialog?.name === "imageExport";
-    if (nativeImageExportOpenRef.current && !isNativeImageExportOpen && restoreExportOptionsFocusRef.current) {
-      restoreExportOptionsFocusRef.current = false;
-      window.requestAnimationFrame(() => exportOptionsTriggerRef.current?.focus());
+    if (nativeImageExportOpenRef.current && !isNativeImageExportOpen) {
+      if (restoreExportOptionsFocusRef.current) {
+        restoreExportOptionsFocusRef.current = false;
+        window.requestAnimationFrame(() => exportOptionsTriggerRef.current?.focus());
+      }
+      if (suspendDarkPdfDisplayRef.current) {
+        suspendDarkPdfDisplayRef.current = false;
+        setDarkPdfDisplayRevision((revision) => revision + 1);
+      }
     }
     nativeImageExportOpenRef.current = isNativeImageExportOpen;
     const sidebarTab = appState.openSidebar?.name === "default" ? appState.openSidebar.tab : undefined;
+    const redirectNativeSearchToProjectFind = sidebarTab === "search"
+      && featurePreferencesRef.current.projectFind
+      && !nativeCanvasSearchOpenRef.current;
+    if (redirectNativeSearchToProjectFind) {
+      api?.updateScene({
+        appState: { openSidebar: { name: "default", tab: PROJECT_FIND_SIDEBAR_TAB } },
+        captureUpdate: CaptureUpdateAction.NEVER,
+      });
+      setIsProjectFindOpen(true);
+      window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+        const input = editorHostRef.current?.querySelector<HTMLInputElement>(".project-find-query");
+        input?.focus();
+        input?.select();
+      }));
+    } else {
+      if (sidebarTab !== "search") nativeCanvasSearchOpenRef.current = false;
+      const projectFindOpen = sidebarTab === PROJECT_FIND_SIDEBAR_TAB;
+      if (!projectFindOpen) pendingProjectSearchTargetRef.current = null;
+      setIsProjectFindOpen(projectFindOpen);
+    }
     if (sidebarTab === PERSONAL_LIBRARY_SIDEBAR_TAB || sidebarTab === SCREENSHOT_SIDEBAR_TAB) {
       lastLibraryTabRef.current = sidebarTab;
     }
@@ -915,6 +1430,14 @@ export default function App() {
       libraryOpenRef.current = isNativeLibraryOpen;
       setIsLibraryOpen(isNativeLibraryOpen);
     }
+    const sizePositionEnabled = featurePreferencesRef.current.sizePosition;
+    if (!sizePositionEnabled && appState.stats.open) {
+      api?.updateScene({
+        appState: { stats: { ...appState.stats, open: false } },
+        captureUpdate: CaptureUpdateAction.NEVER,
+      });
+    }
+    setIsSizePositionOpen(sizePositionEnabled && appState.stats.open);
     setZoom(Math.round(appState.zoom.value * 100));
     setStrokeWidth(appState.currentItemStrokeWidth);
     setAreSlideFramesVisible(appState.frameRendering.enabled);
@@ -925,6 +1448,28 @@ export default function App() {
       return nextProbabilitySelection;
     });
     if (switchingSceneRef.current) return;
+    const preferences = featurePreferencesRef.current;
+    const applyingPreferences = applyingEditorPreferencesRef.current;
+    const wrapperPreferenceUpdateSettled = !!applyingPreferences
+      && appState.penMode === applyingPreferences.penOnly
+      && appState.gridModeEnabled === applyingPreferences.showGrid
+      && appState.objectsSnapModeEnabled === applyingPreferences.snapToObjects;
+    if (wrapperPreferenceUpdateSettled) applyingEditorPreferencesRef.current = null;
+    // Excalidraw can emit an older app-state snapshot between two rapid
+    // settings changes. Ignore that stale snapshot until the wrapper-owned
+    // update lands; native toolbar/shortcut changes still flow back once the
+    // pending update has settled.
+    if (!applyingPreferences || wrapperPreferenceUpdateSettled) {
+      if (appState.penMode !== preferences.penOnly) {
+        setFeaturePreference("penOnly", appState.penMode);
+      }
+      if (appState.gridModeEnabled !== preferences.showGrid) {
+        setFeaturePreference("showGrid", appState.gridModeEnabled);
+      }
+      if (appState.objectsSnapModeEnabled !== preferences.snapToObjects) {
+        setFeaturePreference("snapToObjects", appState.objectsSnapModeEnabled);
+      }
+    }
     const activeToolType = appState.activeTool.type;
     if (
       lassoActiveRef.current
@@ -976,10 +1521,15 @@ export default function App() {
         .map((element) => element.link
           ? { ...element, link: null }
           : element) as readonly ExcalidrawElement[];
+      const suppressionGeneration = sceneHydrationGenerationRef.current;
       switchingSceneRef.current = true;
       api?.updateScene({ elements: safeElements, captureUpdate: CaptureUpdateAction.NEVER });
       api?.setToast({ message: "External links and web embeds are disabled in PatterDraw." });
-      window.requestAnimationFrame(() => { switchingSceneRef.current = false; });
+      window.requestAnimationFrame(() => {
+        if (sceneHydrationGenerationRef.current === suppressionGeneration) {
+          switchingSceneRef.current = false;
+        }
+      });
       return;
     }
     const sceneId = activeSceneIdRef.current;
@@ -987,18 +1537,37 @@ export default function App() {
     const persistedScene = currentSceneRef.current?.id === sceneId
       ? currentSceneRef.current
       : null;
-    const backgroundSafeElements = persistedScene
+    const persistentBackgroundElements = persistedScene
       ? canonicalizePdfBackground(
         persistedScene,
         elements as unknown as readonly Record<string, unknown>[],
       ) as unknown as readonly ExcalidrawElement[]
       : elements;
-    const detachedElements = detachElementsFromSlideFrames(backgroundSafeElements);
+    const persistentElements = detachElementsFromSlideFrames(persistentBackgroundElements);
+    const displayFileId = persistedScene
+      && editorThemeRef.current === "dark"
+      && !suspendDarkPdfDisplayRef.current
+      ? darkPdfDisplayFileIdsRef.current.get(sceneId)
+      : undefined;
+    const editorBackgroundElements = persistedScene
+      ? canonicalizePdfBackground(
+        persistedScene,
+        elements as unknown as readonly Record<string, unknown>[],
+        displayFileId,
+      ) as unknown as readonly ExcalidrawElement[]
+      : elements;
+    const editorElements = detachElementsFromSlideFrames(editorBackgroundElements);
     queueScenePersistence({
       sceneId,
-      elements: detachedElements,
+      elements: persistentElements,
       appState,
-      files,
+      files: persistedScene
+        ? persistentFilesForScene(
+          persistedScene,
+          files,
+          transientDarkPdfFileIdsRef.current,
+        )
+        : files,
     });
     const elementGestureInProgress = !!(
       appState.newElement
@@ -1007,7 +1576,7 @@ export default function App() {
       || appState.isRotating
       || appState.multiElement
     );
-    if (api && detachedElements !== elements && !elementGestureInProgress) {
+    if (api && editorElements !== elements && !elementGestureInProgress) {
       window.cancelAnimationFrame(slideDetachmentFrameRef.current);
       slideDetachmentFrameRef.current = window.requestAnimationFrame(() => {
         if (switchingSceneRef.current || activeSceneIdRef.current !== sceneId) return;
@@ -1015,10 +1584,16 @@ export default function App() {
         const liveScene = currentSceneRef.current?.id === sceneId
           ? currentSceneRef.current
           : null;
+        const liveDisplayFileId = liveScene
+          && editorThemeRef.current === "dark"
+          && !suspendDarkPdfDisplayRef.current
+          ? darkPdfDisplayFileIdsRef.current.get(sceneId)
+          : undefined;
         const liveBackgroundSafeElements = liveScene
           ? canonicalizePdfBackground(
             liveScene,
             liveElements as unknown as readonly Record<string, unknown>[],
+            liveDisplayFileId,
           ) as unknown as readonly ExcalidrawElement[]
           : liveElements;
         const liveDetachedElements = detachElementsFromSlideFrames(liveBackgroundSafeElements);
@@ -1029,7 +1604,7 @@ export default function App() {
         });
       });
     }
-  }, [api, queueScenePersistence]);
+  }, [api, queueScenePersistence, setFeaturePreference]);
 
   const toggleLibrary = useCallback(() => {
     if (!api) return;
@@ -1038,6 +1613,150 @@ export default function App() {
     setIsLibraryOpen(nextOpen);
   }, [api]);
 
+  const focusSidebarSearchInput = useCallback((selector: string) => {
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      const input = editorHostRef.current?.querySelector<HTMLInputElement>(selector);
+      input?.focus();
+      input?.select();
+    }));
+  }, []);
+
+  const openProjectFind = useCallback(() => {
+    if (!api || !featurePreferencesRef.current.projectFind) return;
+    nativeCanvasSearchOpenRef.current = false;
+    commitPendingScenePersistence();
+    api.updateScene({
+      appState: { openSidebar: { name: "default", tab: PROJECT_FIND_SIDEBAR_TAB } },
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
+    setIsProjectFindOpen(true);
+    focusSidebarSearchInput(".project-find-query");
+  }, [api, commitPendingScenePersistence, focusSidebarSearchInput]);
+
+  const toggleProjectFind = useCallback(() => {
+    if (!api || !featurePreferencesRef.current.projectFind) return;
+    const open = api.getAppState().openSidebar?.name === "default"
+      && api.getAppState().openSidebar?.tab === PROJECT_FIND_SIDEBAR_TAB;
+    if (open) {
+      pendingProjectSearchTargetRef.current = null;
+      api.updateScene({
+        appState: { openSidebar: null },
+        captureUpdate: CaptureUpdateAction.NEVER,
+      });
+      setIsProjectFindOpen(false);
+      return;
+    }
+    openProjectFind();
+  }, [api, openProjectFind]);
+
+  const openCurrentCanvasSearch = useCallback(() => {
+    if (!api || !featurePreferencesRef.current.projectFind) return;
+    nativeCanvasSearchOpenRef.current = true;
+    api.updateScene({
+      appState: { openSidebar: { name: "default", tab: "search" } },
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
+    setIsProjectFindOpen(false);
+    focusSidebarSearchInput(".layer-ui__search input");
+  }, [api, focusSidebarSearchInput]);
+
+  const toggleSizePosition = useCallback(() => {
+    if (!api) return;
+    const appState = api.getAppState();
+    const open = !appState.stats.open;
+    api.updateScene({
+      appState: {
+        stats: {
+          open,
+          panels: appState.stats.panels || 3,
+        },
+      },
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
+    setIsSizePositionOpen(open);
+  }, [api]);
+
+  useEffect(() => {
+    if (!api || featurePreferences.sizePosition || !api.getAppState().stats.open) return;
+    api.updateScene({
+      appState: { stats: { ...api.getAppState().stats, open: false } },
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
+    setIsSizePositionOpen(false);
+  }, [api, featurePreferences.sizePosition]);
+
+  useEffect(() => {
+    if (!isSizePositionOpen) return;
+    const host = editorHostRef.current;
+    if (!host) return;
+    const applyAccessibleLabel = () => {
+      const panel = host.querySelector<HTMLElement>(".exc-stats");
+      if (!panel) return;
+      panel.setAttribute("role", "region");
+      panel.setAttribute("aria-label", "Size & Position");
+      panel.querySelector(".title h2")?.setAttribute("aria-label", "Size & Position");
+    };
+    applyAccessibleLabel();
+    const observer = new MutationObserver(applyAccessibleLabel);
+    observer.observe(host, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [isSizePositionOpen]);
+
+  useEffect(() => {
+    if (!api || featurePreferences.projectFind) return;
+    pendingProjectSearchTargetRef.current = null;
+    const sidebar = api.getAppState().openSidebar;
+    if (sidebar?.name !== "default" || (sidebar.tab !== PROJECT_FIND_SIDEBAR_TAB && sidebar.tab !== "search")) return;
+    api.updateScene({
+      appState: { openSidebar: null },
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
+    setIsProjectFindOpen(false);
+  }, [api, featurePreferences.projectFind]);
+
+  useEffect(() => {
+    if (!projectFindShortcutBridge) return;
+    projectFindShortcutBridge.enabled = !presentation && featurePreferences.projectFind;
+    projectFindShortcutBridge.open = openProjectFind;
+    return () => {
+      if (projectFindShortcutBridge.open !== openProjectFind) return;
+      projectFindShortcutBridge.enabled = false;
+      projectFindShortcutBridge.open = null;
+    };
+  }, [featurePreferences.projectFind, openProjectFind, presentation]);
+
+  useEffect(() => {
+    if (featurePreferences.insert) return;
+    setEquationEditor(null);
+    setMermaidEditor(null);
+  }, [featurePreferences.insert]);
+
+  useEffect(() => {
+    if (featurePreferences.mathTools) return;
+    const lassoWasActive = lassoActiveRef.current;
+    lassoActiveRef.current = false;
+    preparedLassoSelectionRef.current = null;
+    setIsLassoActive(false);
+    setLassoGeometryFactory(null);
+    setLassoInitialSelection(null);
+    setIsMathToolsOpen(false);
+    setMathToolEdit(null);
+    setMathInteraction(null);
+    setIsProbabilitySpinning(false);
+    setSpinnerPointerAnimations([]);
+    if (lassoWasActive) api?.setActiveTool({ type: "selection" });
+  }, [api, featurePreferences.mathTools]);
+
+  useEffect(() => {
+    if (featurePreferences.library) return;
+    setIsScreenshotCaptureActive(false);
+    if (libraryOpenRef.current && api) {
+      api.toggleSidebar({ name: "default", force: false });
+    }
+    libraryOpenRef.current = false;
+    setIsLibraryOpen(false);
+  }, [api, featurePreferences.library]);
+
   const handleLibraryChange = useCallback((libraryItems: LibraryItems) => {
     void saveLibraryItems(libraryItems).catch((error) => {
       setErrorMessage(`Personal library could not be saved: ${error instanceof Error ? error.message : String(error)}`);
@@ -1045,6 +1764,11 @@ export default function App() {
   }, []);
 
   const openLoadedProject = useCallback(async (loaded: LoadedClassroomProject) => {
+    beginSceneHydration();
+    pendingFrameIdRef.current = null;
+    pendingProjectSearchTargetRef.current = null;
+    pendingSlideFrameActionRef.current = null;
+    autosaveStartupReadyRef.current = false;
     autosaveSuspendedRef.current = true;
     pendingScenePersistenceRef.current = null;
     if (scenePersistenceTimerRef.current !== null) {
@@ -1097,6 +1821,10 @@ export default function App() {
     const framesVisible = loaded.project.slideFramesVisible !== false;
     slideFramesVisibleRef.current = framesVisible;
     setAreSlideFramesVisible(framesVisible);
+    // Project archives are allowed to reuse the same project and scene IDs.
+    // Force the editor hydration effect to run for a full replacement even
+    // when its identity fields are unchanged.
+    setProjectHydrationRevision((revision) => revision + 1);
     setProject(startupProject);
     setActiveSlideId(null);
     setWorkspaceMode("board");
@@ -1106,10 +1834,10 @@ export default function App() {
     setMermaidEditor(null);
     setMathToolEdit(null);
     setIsMathToolsOpen(false);
-    setSaveStatus(replacementSaved ? "saved" : "error");
+    setSaveStatus(replacementSaved ? "saving" : "error");
     autosaveSuspendedRef.current = false;
     setAutosaveRecoveryDetail(null);
-  }, []);
+  }, [beginSceneHydration]);
 
   const handleFile = useCallback(async (file: File) => {
     setErrorMessage(null);
@@ -1150,6 +1878,11 @@ export default function App() {
           pdfDocuments: { ...base.pdfDocuments, [imported.source.id]: imported.source },
         };
         assertProjectFitsContentBudget(nextProject, nextPdfBytes);
+        beginSceneHydration();
+        pendingFrameIdRef.current = null;
+        pendingProjectSearchTargetRef.current = null;
+        pendingCreatedFrameIdRef.current = null;
+        pendingSlideFrameActionRef.current = null;
         autosaveSuspendedRef.current = false;
         setAutosaveRecoveryDetail(null);
         pdfBytesRef.current = nextPdfBytes;
@@ -1182,7 +1915,7 @@ export default function App() {
       setBusyMessage(null);
       if (inputRef.current) inputRef.current.value = "";
     }
-  }, [autosaveRecoveryDetail, commitPendingScenePersistence, openLoadedProject]);
+  }, [autosaveRecoveryDetail, beginSceneHydration, commitPendingScenePersistence, openLoadedProject]);
 
   const saveProjectFile = useCallback(async () => {
     const currentProject = commitPendingScenePersistence();
@@ -1273,13 +2006,41 @@ export default function App() {
     }
   }, [commitPendingScenePersistence]);
 
+  const runPptxExport = useCallback(async () => {
+    const currentProject = commitPendingScenePersistence();
+    if (!currentProject) return;
+    setExportOpen(false);
+    setBusyMessage("Exporting PowerPoint…");
+    try {
+      await afterNextPaint();
+      const { exportSlidesPptx } = await import("./lib/export-pptx");
+      const blob = await exportSlidesPptx(currentProject);
+      downloadBlob(blob, `${safeFileStem(currentProject.title)}-slides.pptx`);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }, [commitPendingScenePersistence]);
+
   const runFullBoardExport = useCallback(async () => {
     if (!api || !project) return;
     setExportOpen(false);
     setBusyMessage("Exporting the full board…");
     try {
       await afterNextPaint();
-      const { blob, scale } = await exportFullBoardPng(api);
+      const scene = currentSceneRef.current;
+      const liveElements = api.getSceneElements();
+      const elements = scene
+        ? canonicalizePdfBackground(
+          scene,
+          liveElements as unknown as readonly Record<string, unknown>[],
+        ) as unknown as readonly ExcalidrawElement[]
+        : liveElements;
+      const files = scene
+        ? persistentFilesForScene(scene, api.getFiles(), transientDarkPdfFileIdsRef.current)
+        : api.getFiles();
+      const { blob, scale } = await exportFullBoardPng(api, { elements, files });
       downloadBlob(blob, `${safeFileStem(project.title)}-full-board.png`);
       api.setToast({
         message: scale < 1
@@ -1296,15 +2057,39 @@ export default function App() {
   const openNativeImageExport = useCallback(() => {
     if (!api || !project || api.getSceneElements().length === 0) return;
     setExportOpen(false);
-    nativeImageExportOpenRef.current = true;
-    restoreExportOptionsFocusRef.current = true;
-    api.updateScene({
-      appState: {
-        name: project.title,
-        openDialog: { name: "imageExport" },
-      },
-      captureUpdate: CaptureUpdateAction.NEVER,
-    });
+    const showDialog = () => {
+      nativeImageExportOpenRef.current = true;
+      restoreExportOptionsFocusRef.current = true;
+      api.updateScene({
+        appState: {
+          name: project.title,
+          exportWithDarkMode: false,
+          openDialog: { name: "imageExport" },
+        },
+        captureUpdate: CaptureUpdateAction.NEVER,
+      });
+    };
+    const scene = currentSceneRef.current;
+    const displayFileId = scene
+      ? darkPdfDisplayFileIdsRef.current.get(scene.id)
+      : undefined;
+    if (scene?.pdfPage && editorThemeRef.current === "dark" && displayFileId) {
+      suspendDarkPdfDisplayRef.current = true;
+      const liveElements = api.getSceneElements();
+      const lightElements = canonicalizePdfBackground(
+        scene,
+        liveElements as unknown as readonly Record<string, unknown>[],
+      ) as unknown as readonly ExcalidrawElement[];
+      if (lightElements !== liveElements) {
+        api.updateScene({
+          elements: lightElements,
+          captureUpdate: CaptureUpdateAction.NEVER,
+        });
+      }
+      void afterNextPaint().then(showDialog);
+      return;
+    }
+    showDialog();
   }, [api, project]);
 
   const openEquationEditor = useCallback(() => {
@@ -1910,20 +2695,54 @@ export default function App() {
   }, [api, mermaidEditor]);
 
   const openScene = useCallback((sceneId: string, frameId?: string) => {
+    pendingProjectSearchTargetRef.current = null;
     commitPendingScenePersistence();
+    const isSceneChange = sceneId !== activeSceneIdRef.current;
+    if (
+      isSceneChange
+      && pendingSlideFrameActionRef.current?.sceneId !== sceneId
+    ) pendingSlideFrameActionRef.current = null;
     if (frameId) pendingFrameIdRef.current = frameId;
-    if (sceneId !== activeSceneIdRef.current) switchingSceneRef.current = true;
+    else if (isSceneChange) pendingFrameIdRef.current = null;
+    if (isSceneChange) pendingCreatedFrameIdRef.current = null;
+    if (isSceneChange) beginSceneHydration();
     setProject((current) => current ? { ...current, activeSceneId: sceneId } : current);
     if (api && sceneId === activeSceneIdRef.current && frameId) {
       focusSlide(api, frameId);
       pendingFrameIdRef.current = null;
     }
-  }, [api, commitPendingScenePersistence]);
+  }, [api, beginSceneHydration, commitPendingScenePersistence]);
 
   const openSlide = useCallback((slide: ClassroomSlide) => {
     setActiveSlideId(slide.id);
     openScene(slide.sceneId, slide.frameId);
   }, [openScene]);
+
+  const activateProjectSearchResult = useCallback((result: ProjectSearchResult) => {
+    if (!api) return;
+    const latestProject = commitPendingScenePersistence();
+    if (!latestProject?.scenes[result.sceneId]) {
+      api.setToast({ message: "That search result is no longer in this project." });
+      return;
+    }
+    if (result.scope === "slide" && featurePreferencesRef.current.slides) {
+      setWorkspaceMode("slides");
+      setActiveSlideId(result.slideId || null);
+    } else if (result.scope === "pdf" && featurePreferencesRef.current.pdf) {
+      setWorkspaceMode("pdf");
+      setActiveSlideId(null);
+    } else {
+      setWorkspaceMode("board");
+      setActiveSlideId(result.scope === "slide" ? result.slideId || null : null);
+    }
+    const target = { sceneId: result.sceneId, elementId: result.elementId };
+    if (result.sceneId === activeSceneIdRef.current) {
+      focusProjectSearchTarget(target);
+    } else {
+      openScene(result.sceneId);
+      pendingProjectSearchTargetRef.current = target;
+    }
+  }, [api, commitPendingScenePersistence, focusProjectSearchTarget, openScene]);
 
   const setPresentationIndex = useCallback((index: number, allowMorph = true) => {
     if (!project?.slideOrder[index]) return;
@@ -1941,11 +2760,18 @@ export default function App() {
       inkWidth: current?.inkWidth || DEFAULT_PRESENTATION_INK_WIDTH,
     }));
     setActiveSlideId(slide.id);
-    if (slide.sceneId !== activeSceneIdRef.current) switchingSceneRef.current = true;
+    if (slide.sceneId !== activeSceneIdRef.current) {
+      pendingFrameIdRef.current = null;
+      pendingCreatedFrameIdRef.current = null;
+      if (pendingSlideFrameActionRef.current?.sceneId !== slide.sceneId) {
+        pendingSlideFrameActionRef.current = null;
+      }
+      beginSceneHydration();
+    }
     setProject((current) => current && current.activeSceneId !== slide.sceneId
       ? { ...current, activeSceneId: slide.sceneId }
       : current);
-  }, [project]);
+  }, [beginSceneHydration, project]);
 
   const startPresentation = useCallback(async () => {
     if (!project || !api || workspaceMode !== "slides") return;
@@ -1955,6 +2781,14 @@ export default function App() {
     }
     const index = Math.max(0, project.slideOrder.findIndex((slide) => slide.id === activeSlideId));
     api.setToast(null);
+    api.updateScene({
+      appState: { openSidebar: null },
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
+    pendingProjectSearchTargetRef.current = null;
+    libraryOpenRef.current = false;
+    setIsLibraryOpen(false);
+    setIsProjectFindOpen(false);
     api.updateFrameRendering({ enabled: true, outline: false, name: false, clip: true });
     api.setActiveTool({ type: "laser" });
     setPresentationIndex(index, false);
@@ -2103,9 +2937,133 @@ export default function App() {
 
   const currentScene = project ? project.scenes[project.activeSceneId] : null;
   currentSceneRef.current = currentScene;
+  useEffect(() => {
+    darkPdfPreviewGenerationRef.current += 1;
+    darkPdfPreviewCacheRef.current.clear();
+    darkPdfThumbnailCacheRef.current.clear();
+    darkPdfDisplayFileIdsRef.current.clear();
+    darkPdfPreviewErrorsRef.current.clear();
+    // Excalidraw's file API merges files and exposes no supported delete call.
+    // Keep every display-only ID for this mounted session so a stale preview
+    // left in the editor's file map can never enter a later project or export.
+    suspendDarkPdfDisplayRef.current = false;
+    setDarkPdfPreviewUrls({});
+  }, [project?.id, projectHydrationRevision]);
+
+  useEffect(() => {
+    const scene = currentScene;
+    if (!api || !scene?.pdfPage) return;
+    const generation = ++darkPdfPreviewGenerationRef.current;
+    const liveElements = api.getSceneElements();
+    if (editorTheme !== "dark" || suspendDarkPdfDisplayRef.current) {
+      darkPdfDisplayFileIdsRef.current.delete(scene.id);
+      const lightElements = canonicalizePdfBackground(
+        scene,
+        liveElements as unknown as readonly Record<string, unknown>[],
+      ) as unknown as readonly ExcalidrawElement[];
+      if (lightElements !== liveElements) {
+        api.updateScene({
+          elements: lightElements,
+          captureUpdate: CaptureUpdateAction.NEVER,
+        });
+      }
+      return;
+    }
+
+    let cancelled = false;
+    void getDarkPdfDisplayFile(scene).then((file) => {
+      if (
+        cancelled
+        || generation !== darkPdfPreviewGenerationRef.current
+        || editorThemeRef.current !== "dark"
+        || suspendDarkPdfDisplayRef.current
+        || activeSceneIdRef.current !== scene.id
+      ) return;
+      api.addFiles([file]);
+      darkPdfDisplayFileIdsRef.current.set(scene.id, file.id);
+      setDarkPdfPreviewUrls((current) => current[scene.id] === file.dataURL
+        ? current
+        : { ...current, [scene.id]: file.dataURL });
+      const currentElements = api.getSceneElements();
+      const darkElements = canonicalizePdfBackground(
+        scene,
+        currentElements as unknown as readonly Record<string, unknown>[],
+        file.id,
+      ) as unknown as readonly ExcalidrawElement[];
+      if (darkElements !== currentElements) {
+        api.updateScene({
+          elements: darkElements,
+          captureUpdate: CaptureUpdateAction.NEVER,
+        });
+      } else {
+        api.refresh();
+      }
+    }).catch(() => {
+      if (
+        cancelled
+        || generation !== darkPdfPreviewGenerationRef.current
+        || darkPdfPreviewErrorsRef.current.has(scene.id)
+      ) return;
+      darkPdfPreviewErrorsRef.current.add(scene.id);
+      api.setToast({ message: "This PDF page could not be shown in dark mode." });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    api,
+    currentScene?.id,
+    currentScene?.pdfPage?.backgroundElementId,
+    currentScene?.pdfPage?.documentId,
+    currentScene?.pdfPage?.pageIndex,
+    darkPdfDisplayRevision,
+    editorTheme,
+    getDarkPdfDisplayFile,
+    projectHydrationRevision,
+  ]);
   const pdfScenes = useMemo(() => project
     ? orderedPdfScenes(project)
     : [], [project]);
+  useEffect(() => {
+    if (editorTheme !== "dark" || pdfScenes.length === 0) return;
+    let cancelled = false;
+    let nextIndex = 0;
+    const projectId = project?.id;
+    const renderNextThumbnail = async () => {
+      while (!cancelled && nextIndex < pdfScenes.length) {
+        const scene = pdfScenes[nextIndex];
+        nextIndex += 1;
+        if (darkPdfDisplayFileIdsRef.current.has(scene.id)) continue;
+        try {
+          const dataURL = await getDarkPdfThumbnailUrl(scene);
+          if (
+            cancelled
+            || editorThemeRef.current !== "dark"
+            || projectRef.current?.id !== projectId
+            || darkPdfDisplayFileIdsRef.current.has(scene.id)
+          ) continue;
+          setDarkPdfPreviewUrls((current) => current[scene.id] === dataURL
+            ? current
+            : { ...current, [scene.id]: dataURL });
+        } catch {
+          // The active-page renderer owns user-facing errors. A failed rail
+          // preview safely falls back to its canonical light thumbnail.
+        }
+      }
+    };
+    // Keep large classroom PDFs responsive while progressively darkening all
+    // rail thumbnails. Each thumbnail is capped at 256px on its longest edge.
+    void Promise.all([renderNextThumbnail(), renderNextThumbnail()]);
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    editorTheme,
+    getDarkPdfThumbnailUrl,
+    pdfScenes,
+    project?.id,
+    projectHydrationRevision,
+  ]);
   const pageIndex = currentScene?.pdfPage
     ? pdfScenes.findIndex((scene) => scene.id === currentScene.id)
     : -1;
@@ -2146,7 +3104,18 @@ export default function App() {
       { x: editorBounds.left, y: editorBounds.top },
       api.getAppState(),
     );
-    const rendered = exportScreenshotArea(api, sceneBounds);
+    const scene = currentSceneRef.current;
+    const liveElements = api.getSceneElements();
+    const elements = scene
+      ? canonicalizePdfBackground(
+        scene,
+        liveElements as unknown as readonly Record<string, unknown>[],
+      ) as unknown as readonly ExcalidrawElement[]
+      : liveElements;
+    const files = scene
+      ? persistentFilesForScene(scene, api.getFiles(), transientDarkPdfFileIdsRef.current)
+      : api.getFiles();
+    const rendered = exportScreenshotArea(api, sceneBounds, { elements, files });
     // ClipboardItem accepts a promised Blob, so the privileged write begins
     // synchronously inside the pointer-up gesture while rendering continues.
     const clipboardWrite = beginPngClipboardWrite(rendered.then((capture) => capture.blob));
@@ -2340,6 +3309,8 @@ export default function App() {
   ]);
 
   const changeWorkspaceMode = useCallback((mode: WorkspaceMode) => {
+    pendingProjectSearchTargetRef.current = null;
+    if (mode !== "slides") pendingSlideFrameActionRef.current = null;
     if (mode !== "pdf") {
       if (mode === "board") api?.setActiveTool({ type: "selection" });
       setWorkspaceMode(mode);
@@ -2352,7 +3323,9 @@ export default function App() {
       }
       const blank = createBlankProject();
       const scene = blank.scenes[blank.activeSceneId];
-      switchingSceneRef.current = true;
+      pendingFrameIdRef.current = null;
+      pendingCreatedFrameIdRef.current = null;
+      beginSceneHydration();
       setProject((current) => current ? {
         ...current,
         updatedAt: nowIso(),
@@ -2364,7 +3337,18 @@ export default function App() {
     if (!project || !pdfScenes.length) return;
     setWorkspaceMode("pdf");
     if (!currentScene?.pdfPage) openScene(pdfScenes[0].id);
-  }, [api, currentScene?.pdfPage, openScene, pdfScenes, project]);
+  }, [api, beginSceneHydration, currentScene?.pdfPage, openScene, pdfScenes, project]);
+
+  useEffect(() => {
+    const hiddenActiveMode = (workspaceMode === "slides" && !featurePreferences.slides)
+      || (workspaceMode === "pdf" && !featurePreferences.pdf);
+    if (hiddenActiveMode) changeWorkspaceMode("board");
+  }, [
+    changeWorkspaceMode,
+    featurePreferences.pdf,
+    featurePreferences.slides,
+    workspaceMode,
+  ]);
 
   const beginSlideFrameAction = useCallback((action: SlideFrameAction) => {
     if (!api || !project) return;
@@ -2374,8 +3358,10 @@ export default function App() {
     if (!targetSceneId) {
       const blank = createBlankProject();
       const scene = blank.scenes[blank.activeSceneId];
-      pendingSlideFrameActionRef.current = action;
-      switchingSceneRef.current = true;
+      pendingFrameIdRef.current = null;
+      pendingCreatedFrameIdRef.current = null;
+      pendingSlideFrameActionRef.current = { action, sceneId: scene.id };
+      beginSceneHydration();
       setProject((current) => current ? {
         ...current,
         updatedAt: nowIso(),
@@ -2385,16 +3371,39 @@ export default function App() {
       return;
     }
     if (targetSceneId !== project.activeSceneId) {
-      pendingSlideFrameActionRef.current = action;
+      pendingSlideFrameActionRef.current = { action, sceneId: targetSceneId };
       openScene(targetSceneId);
       return;
     }
     if (switchingSceneRef.current) {
-      pendingSlideFrameActionRef.current = action;
+      const pendingAction = { action, sceneId: targetSceneId };
+      pendingSlideFrameActionRef.current = pendingAction;
+      if (
+        sceneHydrationOuterFrameRef.current === null
+        && sceneHydrationInnerFrameRef.current === null
+      ) {
+        const runWhenStable = (remainingFrames: number) => {
+          if (pendingSlideFrameActionRef.current !== pendingAction) return;
+          if (
+            activeSceneIdRef.current !== targetSceneId
+            || !featurePreferencesRef.current.slides
+          ) {
+            pendingSlideFrameActionRef.current = null;
+            return;
+          }
+          if (switchingSceneRef.current && remainingFrames > 0) {
+            window.requestAnimationFrame(() => runWhenStable(remainingFrames - 1));
+            return;
+          }
+          pendingSlideFrameActionRef.current = null;
+          if (!switchingSceneRef.current) runSlideFrameAction(action);
+        };
+        window.requestAnimationFrame(() => runWhenStable(3));
+      }
       return;
     }
     runSlideFrameAction(action);
-  }, [api, openScene, project, runSlideFrameAction]);
+  }, [api, beginSceneHydration, openScene, project, runSlideFrameAction]);
 
   const addSlide = useCallback(() => {
     if (!project) return;
@@ -2480,9 +3489,11 @@ export default function App() {
     const remainingSlides = removeSlide(project.slideOrder, slide.id);
     const nextSlide = remainingSlides[Math.min(slideIndex, remainingSlides.length - 1)] || null;
     const isActiveScene = slide.sceneId === activeSceneIdRef.current;
+    const ownsSuppression = isActiveScene && !switchingSceneRef.current;
+    const suppressionGeneration = sceneHydrationGenerationRef.current;
 
     if (isActiveScene) {
-      switchingSceneRef.current = true;
+      if (ownsSuppression) switchingSceneRef.current = true;
       const nextElements = syncSlideFrameNames(
         deleteSlideBoundary(api.getSceneElements(), slide.frameId),
         remainingSlides,
@@ -2518,7 +3529,10 @@ export default function App() {
     setActiveSlideId(nextSlide?.id || null);
     api.setToast({ message: "Slide deleted. Its content is still on the board." });
     window.requestAnimationFrame(() => {
-      switchingSceneRef.current = false;
+      if (ownsSuppression) {
+        if (sceneHydrationGenerationRef.current !== suppressionGeneration) return;
+        switchingSceneRef.current = false;
+      }
       if (nextSlide) openSlide(nextSlide);
     });
   }, [api, openSlide, project]);
@@ -2585,6 +3599,14 @@ export default function App() {
       (candidate) => candidate.id !== sceneId && candidate.pdfPage?.documentId === documentId,
     );
 
+    const activeSceneWillChange = nextSceneId !== project.activeSceneId;
+    if (activeSceneWillChange) {
+      beginSceneHydration();
+      pendingFrameIdRef.current = null;
+      pendingProjectSearchTargetRef.current = null;
+      pendingCreatedFrameIdRef.current = null;
+      pendingSlideFrameActionRef.current = null;
+    }
     setProject((current) => {
       if (!current?.scenes[sceneId]) return current;
       const scenes = { ...current.scenes };
@@ -2609,7 +3631,7 @@ export default function App() {
       });
     }
     if (!remainingOrder.length) setWorkspaceMode("board");
-  }, [project]);
+  }, [beginSceneHydration, project]);
 
   const addPdfPage = useCallback(async () => {
     const workspace = currentScene?.pdfPage;
@@ -2641,6 +3663,10 @@ export default function App() {
         pdfDocuments: { ...current.pdfDocuments, [source.id]: source },
       };
       assertProjectFitsContentBudget(nextProject, nextPdfBytes);
+      beginSceneHydration();
+      pendingFrameIdRef.current = null;
+      pendingCreatedFrameIdRef.current = null;
+      pendingSlideFrameActionRef.current = null;
       pdfBytesRef.current = nextPdfBytes;
       projectRef.current = nextProject;
       setPdfBytes(nextPdfBytes);
@@ -2650,7 +3676,7 @@ export default function App() {
     } finally {
       setBusyMessage(null);
     }
-  }, [commitPendingScenePersistence, currentScene?.pdfPage, project]);
+  }, [beginSceneHydration, commitPendingScenePersistence, currentScene?.pdfPage, project]);
 
   const handlePaste = useCallback<NonNullable<ExcalidrawProps["onPaste"]>>((_data, event) => {
     const html = event?.clipboardData?.getData("text/html");
@@ -2697,6 +3723,12 @@ export default function App() {
   }, [api]);
 
   const handleEditorPointerDownCapture = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const sidebarTrigger = target?.closest(".default-sidebar .sidebar-tab-trigger");
+    const triggerList = sidebarTrigger?.parentElement;
+    if (sidebarTrigger && triggerList?.querySelector(".sidebar-tab-trigger") === sidebarTrigger) {
+      nativeCanvasSearchOpenRef.current = true;
+    }
     captureMathInteractionPoint(event);
   }, [captureMathInteractionPoint]);
 
@@ -2776,37 +3808,66 @@ export default function App() {
     return () => window.removeEventListener("keydown", cancelOnEscape, true);
   }, [stopSlideFrameDrawing]);
 
-  const screenshotSidebar = useMemo(() => (
+  const defaultSidebar = useMemo(() => (
     <DefaultSidebar>
-      <DefaultSidebar.TabTriggers>
-        <Sidebar.TabTrigger
-          tab={SCREENSHOT_SIDEBAR_TAB}
-          aria-label="Screenshot Library"
-          title="Screenshot Library"
-        >
-          <ScreenshotIcon />
-        </Sidebar.TabTrigger>
-      </DefaultSidebar.TabTriggers>
-      <Sidebar.Tab tab={SCREENSHOT_SIDEBAR_TAB}>
-        <ScreenshotLibrary
-          busy={isScreenshotBusy}
-          loading={isScreenshotLibraryLoading}
-          items={screenshots}
-          onCaptureArea={startScreenshotCapture}
-          onCopy={copyScreenshot}
-          onDelete={deleteScreenshot}
-          onDownload={downloadScreenshot}
-          onInsert={(item) => void insertScreenshot(item)}
-        />
-      </Sidebar.Tab>
+      {featurePreferences.library ? (
+        <>
+          <DefaultSidebar.TabTriggers>
+            <Sidebar.TabTrigger
+              tab={SCREENSHOT_SIDEBAR_TAB}
+              aria-label="Screenshot Library"
+              title="Screenshot Library"
+            >
+              <ScreenshotIcon />
+            </Sidebar.TabTrigger>
+          </DefaultSidebar.TabTriggers>
+          <Sidebar.Tab tab={SCREENSHOT_SIDEBAR_TAB}>
+            <ScreenshotLibrary
+              busy={isScreenshotBusy}
+              loading={isScreenshotLibraryLoading}
+              items={screenshots}
+              onCaptureArea={startScreenshotCapture}
+              onCopy={copyScreenshot}
+              onDelete={deleteScreenshot}
+              onDownload={downloadScreenshot}
+              onInsert={(item) => void insertScreenshot(item)}
+            />
+          </Sidebar.Tab>
+        </>
+      ) : null}
+      {featurePreferences.projectFind && project ? (
+        <>
+          <DefaultSidebar.TabTriggers>
+            <Sidebar.TabTrigger
+              tab={PROJECT_FIND_SIDEBAR_TAB}
+              aria-label="Project Find"
+              title="Project Find"
+            >
+              <SearchIcon />
+            </Sidebar.TabTrigger>
+          </DefaultSidebar.TabTriggers>
+          <Sidebar.Tab tab={PROJECT_FIND_SIDEBAR_TAB}>
+            <ProjectFindPanel
+              project={project}
+              onActivate={activateProjectSearchResult}
+              onOpenCanvasSearch={openCurrentCanvasSearch}
+            />
+          </Sidebar.Tab>
+        </>
+      ) : null}
     </DefaultSidebar>
   ), [
+    activateProjectSearchResult,
     copyScreenshot,
     deleteScreenshot,
     downloadScreenshot,
+    featurePreferences.library,
+    featurePreferences.projectFind,
     insertScreenshot,
     isScreenshotBusy,
     isScreenshotLibraryLoading,
+    openCurrentCanvasSearch,
+    project,
     screenshots,
     startScreenshotCapture,
   ]);
@@ -2816,14 +3877,25 @@ export default function App() {
   return (
     <div
       ref={shellRef}
-      className={`app-shell ${workspaceModeClassName(workspaceMode)} ${workspaceMode === "pdf" && !isPdfRailVisible ? "is-pdf-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfToolbarVisible ? "is-pdf-toolbar-hidden" : ""} ${!isNavigationVisible ? "is-nav-hidden" : ""} ${!isFooterVisible ? "is-footer-hidden" : ""} ${presentation ? "is-presenting" : ""}`}
+      className={`app-shell ${workspaceModeClassName(workspaceMode)} ${workspaceMode === "pdf" && !isPdfRailVisible ? "is-pdf-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfToolbarVisible ? "is-pdf-toolbar-hidden" : ""} ${!isNavigationVisible ? "is-nav-hidden" : ""} ${!isFooterVisible ? "is-footer-hidden" : ""} ${!featurePreferences.projectFind ? "is-project-find-disabled" : ""} ${!featurePreferences.library ? "is-library-disabled" : ""} ${featurePreferences.iconOnlyControls ? "is-icon-only-controls" : ""} ${presentation ? "is-presenting" : ""}`}
+      data-theme={editorTheme}
       style={{ "--pdf-rail-width": `${pdfRailWidth}px` } as CSSProperties}
     >
       {!presentation && isNavigationVisible && (
         <TopBar
           title={project.title}
           status={saveStatus}
-          onTitleChange={(title) => setProject((current) => current ? { ...current, title, updatedAt: nowIso() } : current)}
+          featurePreferences={featurePreferences}
+          themePreference={themePreference}
+          onTitleChange={(title) => setProject((current) => current ? {
+            ...current,
+            title,
+            titleMode: "custom",
+            updatedAt: nowIso(),
+          } : current)}
+          onFeaturePreferenceChange={setFeaturePreference}
+          onThemePreferenceChange={setThemePreference}
+          onRestoreFeaturePreferences={restoreFeaturePreferences}
           onOpen={() => inputRef.current?.click()}
           onSave={saveProjectFile}
           onEquation={openEquationEditor}
@@ -2838,6 +3910,10 @@ export default function App() {
           libraryAvailable={Boolean(api)}
           libraryOpen={isLibraryOpen}
           onLibraryToggle={toggleLibrary}
+          sizePositionOpen={isSizePositionOpen}
+          onSizePositionToggle={toggleSizePosition}
+          projectFindOpen={isProjectFindOpen}
+          onProjectFindToggle={toggleProjectFind}
           onHide={() => setIsNavigationVisible(false)}
         />
       )}
@@ -2892,6 +3968,7 @@ export default function App() {
           project={project}
           pages={pdfScenes}
           activeSceneId={project.activeSceneId}
+          thumbnailDataUrls={editorTheme === "dark" ? darkPdfPreviewUrls : undefined}
           onOpenPage={openScene}
           onMovePage={reorderPdfPage}
           onShiftPage={shiftPdfPagePosition}
@@ -2926,7 +4003,7 @@ export default function App() {
           <button
             className="footer-show"
             type="button"
-            onClick={() => setIsFooterVisible(true)}
+            onClick={() => setFeaturePreference("footer", true)}
             aria-label="Show footer"
             title="Show footer (Ctrl/⌘ + Shift + F)"
           >
@@ -2952,10 +4029,10 @@ export default function App() {
             validateEmbeddable={false}
             renderEmbeddable={renderNoEmbeddable}
             isCollaborating={false}
-            theme="light"
+            theme={editorTheme}
             UIOptions={CLASSROOM_UI_OPTIONS}
           >
-            {screenshotSidebar}
+            {featurePreferences.library || featurePreferences.projectFind ? defaultSidebar : null}
           </Excalidraw>
           {isSlideFrameDrawingActive && workspaceMode === "slides" && (
             <div
@@ -2991,19 +4068,21 @@ export default function App() {
                 editorHost={editorHostRef.current}
                 strokeWidth={strokeWidth}
               />
-              <MathToolsMenuExtension
-                editorHost={editorHostRef.current}
-                onOpen={openMathTools}
-                onPrepareLasso={prepareLasso}
-                onStartLasso={startLasso}
-              />
-              {!presentation && !mathInteraction && probabilitySelection && (
+              {featurePreferences.mathTools ? (
+                <MathToolsMenuExtension
+                  editorHost={editorHostRef.current}
+                  onOpen={openMathTools}
+                  onPrepareLasso={prepareLasso}
+                  onStartLasso={startLasso}
+                />
+              ) : null}
+              {featurePreferences.mathTools && !presentation && !mathInteraction && probabilitySelection ? (
                 <ProbabilityRandomizer
                   isSpinning={isProbabilitySpinning}
                   summary={probabilitySelection}
                   onRandomize={randomizeSelectedProbabilityPieces}
                 />
-              )}
+              ) : null}
             </>
           )}
           {api && isLassoActive && lassoGeometryFactory && lassoInitialSelection && editorHostRef.current ? (
@@ -3040,7 +4119,7 @@ export default function App() {
                 type="button"
                 aria-label="Hide footer"
                 title="Hide footer (Ctrl/⌘ + Shift + F)"
-                onClick={() => setIsFooterVisible(false)}
+                onClick={() => setFeaturePreference("footer", false)}
               >
                 <HideBottomBarIcon />
               </button>
@@ -3053,7 +4132,7 @@ export default function App() {
                   title="Show PDF pages"
                 >
                   <ShowPanelIcon />
-                  <span>Pages</span>
+                  <span className="icon-label">Pages</span>
                 </button>
               )}
               {pageIndex >= 0 ? (
@@ -3075,7 +4154,7 @@ export default function App() {
               {workspaceMode === "slides" && (
                 <>
                   <button className="present-button" type="button" onClick={startPresentation} title="Start presentation">
-                    <PresentIcon /><span>Present</span>
+                    <PresentIcon /><span className="icon-label">Present</span>
                   </button>
                   <button className="footer-history-button" type="button" aria-label="Undo" title="Undo" onClick={() => clickEditorControl('[data-testid="button-undo"]')}><UndoIcon /></button>
                   <button className="footer-history-button" type="button" aria-label="Redo" title="Redo" onClick={() => clickEditorControl('[data-testid="button-redo"]')}><RedoIcon /></button>
@@ -3150,9 +4229,14 @@ export default function App() {
               <strong>Full board PNG</strong><span>Everything on this board, including content outside the window. Editable scene data is embedded when supported.</span>
             </button>
             {workspaceMode === "slides" && (
-              <button type="button" onClick={() => void runPdfExport("slides")} disabled={!project.slideOrder.length}>
-                <strong>Presentation PDF</strong><span>One ordered frame per slide.</span>
-              </button>
+              <>
+                <button type="button" onClick={() => void runPdfExport("slides")} disabled={!project.slideOrder.length}>
+                  <strong>Presentation PDF</strong><span>One ordered frame per slide.</span>
+                </button>
+                <button type="button" onClick={() => void runPptxExport()} disabled={!project.slideOrder.length}>
+                  <strong>PowerPoint (.pptx)</strong><span>High-fidelity visual slides for PowerPoint, Keynote, or Google Slides. Slide contents are not individually editable.</span>
+                </button>
+              </>
             )}
             <button type="button" onClick={() => void runPdfExport("expand")} disabled={!Object.keys(project.pdfDocuments).length}>
               <strong>Annotated PDF — expand pages</strong><span>Keep original scale and grow pages to include off-page writing.</span>
@@ -3182,14 +4266,14 @@ export default function App() {
           returnFocusRef={insertTriggerRef}
         />
       )}
-      {isMathToolsOpen && (
+      {featurePreferences.mathTools && isMathToolsOpen ? (
         <MathToolsDialog
           initialConfiguration={mathToolEdit?.initialConfiguration}
           onCancel={closeMathTools}
           onInsert={insertMathTool}
           onStartInteraction={startMathInteraction}
         />
-      )}
+      ) : null}
       {busyMessage && <div className="busy-overlay" role="status"><span className="spinner" />{busyMessage}</div>}
       {errorMessage && (
         <div className="error-toast" role="alert"><span>{errorMessage}</span><button type="button" onClick={() => setErrorMessage(null)}>Dismiss</button></div>

@@ -2,6 +2,7 @@ import { createLocalId } from "./lib/id";
 import { DEFAULT_SLIDE_MORPH_DURATION_MS } from "./lib/slide-transition";
 
 export const CLASSROOM_PROJECT_VERSION = 1 as const;
+export const DEFAULT_PROJECT_TITLE = "Untitled PatterDraw canvas";
 
 export type SceneId = string;
 export type SlideId = string;
@@ -51,6 +52,8 @@ export interface ClassroomProject {
   schemaVersion: typeof CLASSROOM_PROJECT_VERSION;
   id: string;
   title: string;
+  /** Explicit title ownership. Optional only for legacy v1 project files. */
+  titleMode?: "default" | "custom";
   createdAt: string;
   updatedAt: string;
   activeSceneId: SceneId;
@@ -91,7 +94,8 @@ export function createBlankProject(now = new Date()): ClassroomProject {
   return {
     schemaVersion: CLASSROOM_PROJECT_VERSION,
     id: createLocalId(),
-    title: "Untitled PatterDraw project",
+    title: DEFAULT_PROJECT_TITLE,
+    titleMode: "default",
     createdAt: timestamp,
     updatedAt: timestamp,
     activeSceneId: sceneId,

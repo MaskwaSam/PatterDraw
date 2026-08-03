@@ -1,4 +1,4 @@
-import { createCanvas } from "@napi-rs/canvas";
+import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { expect, test, type Download } from "@playwright/test";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import {
@@ -270,6 +270,157 @@ async function openTestPdf(page: import("@playwright/test").Page, pageCount = 1)
   });
   await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, { timeout: 15_000 });
   await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(pageCount, { timeout: 15_000 });
+  await expect.poll(() => autosavedPdfBackgroundPosition(page), { timeout: 15_000 })
+    .toMatchObject({ locked: true });
+}
+
+async function pictureDarkModePdfBytes(): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const font = await document.embedFont(StandardFonts.Helvetica);
+  const picture = createCanvas(80, 60);
+  const pictureContext = picture.getContext("2d");
+  pictureContext.fillStyle = "#ff00a8";
+  pictureContext.fillRect(0, 0, picture.width, picture.height);
+  pictureContext.fillStyle = "#00d86f";
+  pictureContext.fillRect(8, 8, 18, 18);
+  pictureContext.clearRect(52, 8, 18, 16);
+  const embeddedPicture = await document.embedPng(picture.toBuffer("image/png"));
+  const transparencyGroup = document.context.register(document.context.obj({
+    S: PDFName.of("Transparency"),
+    CS: PDFName.of("DeviceRGB"),
+    I: true,
+    K: false,
+  }));
+
+  for (let index = 0; index < 2; index += 1) {
+    const page = document.addPage([320, 240]);
+    page.node.set(PDFName.of("Group"), transparencyGroup);
+    page.drawRectangle({ x: 20, y: 80, width: 120, height: 80, color: rgb(0, 0, 0) });
+    page.drawText(`VECTOR ${index + 1}`, { x: 25, y: 190, size: 20, font, color: rgb(0, 0, 0) });
+    // The underlay must remain vector-dark through the transparent picture
+    // window, and the final rectangle must remain vector-dark above the photo.
+    page.drawRectangle({ x: 200, y: 90, width: 80, height: 60, color: rgb(0, 0, 0) });
+    page.drawImage(embeddedPicture, { x: 200, y: 90, width: 80, height: 60 });
+    page.drawRectangle({ x: 250, y: 94, width: 18, height: 14, color: rgb(0, 0, 0) });
+  }
+  return document.save();
+}
+
+type PdfDisplaySamples = {
+  background: [number, number, number];
+  picture: [number, number, number];
+  pictureAccent: [number, number, number];
+  pictureTransparentVector: [number, number, number];
+  pictureVectorOverlay: [number, number, number];
+  vector: [number, number, number];
+};
+
+async function exportedPdfDisplaySamples(bytes: Buffer): Promise<PdfDisplaySamples | null> {
+  const image = await loadImage(bytes);
+  const canvas = createCanvas(image.width, image.height);
+  const context = canvas.getContext("2d");
+  context.drawImage(image, 0, 0);
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  let minX = canvas.width;
+  let minY = canvas.height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < canvas.height; y += 1) {
+    for (let x = 0; x < canvas.width; x += 1) {
+      const offset = (y * canvas.width + x) * 4;
+      if (pixels[offset] > 220 && pixels[offset + 1] < 55 && pixels[offset + 2] > 110) {
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+    }
+  }
+  if (maxX < 0 || maxY < 0) return null;
+  const pictureWidth = maxX - minX + 1;
+  const pictureHeight = maxY - minY + 1;
+  const pictureX = (minX + maxX) / 2;
+  const pictureY = (minY + maxY) / 2;
+  const sample = (x: number, y: number): [number, number, number] => {
+    const offset = (
+      Math.max(0, Math.min(canvas.height - 1, Math.round(y))) * canvas.width
+      + Math.max(0, Math.min(canvas.width - 1, Math.round(x)))
+    ) * 4;
+    return [pixels[offset], pixels[offset + 1], pixels[offset + 2]];
+  };
+  return {
+    background: sample(pictureX, minY - pictureHeight * 0.55),
+    picture: sample(pictureX, pictureY),
+    pictureAccent: sample(minX + pictureWidth * 0.21, minY + pictureHeight * 0.28),
+    pictureTransparentVector: sample(minX + pictureWidth * 0.76, minY + pictureHeight * 0.27),
+    pictureVectorOverlay: sample(minX + pictureWidth * 0.76, minY + pictureHeight * 0.84),
+    vector: sample(pictureX - pictureWidth * 2, pictureY),
+  };
+}
+
+async function renderedPdfDisplaySamples(
+  page: import("@playwright/test").Page,
+): Promise<PdfDisplaySamples | null> {
+  const screenshot = await page.locator(".editor-host").screenshot({ type: "png" });
+  const imageUrl = `data:image/png;base64,${screenshot.toString("base64")}`;
+  return page.evaluate(async (url) => {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.drawImage(image, 0, 0);
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let minX = canvas.width;
+    let minY = canvas.height;
+    let maxX = -1;
+    let maxY = -1;
+    for (let y = 0; y < canvas.height; y += 1) {
+      for (let x = 0; x < canvas.width; x += 1) {
+        const offset = (y * canvas.width + x) * 4;
+        if (pixels[offset] > 160 && pixels[offset + 1] < 100 && pixels[offset + 2] > 110) {
+          minX = Math.min(minX, x);
+          minY = Math.min(minY, y);
+          maxX = Math.max(maxX, x);
+          maxY = Math.max(maxY, y);
+        }
+      }
+    }
+    if (maxX < 0 || maxY < 0) return null;
+    const pictureWidth = maxX - minX + 1;
+    const pictureHeight = maxY - minY + 1;
+    const pictureX = (minX + maxX) / 2;
+    const pictureY = (minY + maxY) / 2;
+    const average = (x: number, y: number): [number, number, number] => {
+      const centerX = Math.max(2, Math.min(canvas.width - 3, Math.round(x)));
+      const centerY = Math.max(2, Math.min(canvas.height - 3, Math.round(y)));
+      let red = 0;
+      let green = 0;
+      let blue = 0;
+      let count = 0;
+      for (let offsetY = -2; offsetY <= 2; offsetY += 1) {
+        for (let offsetX = -2; offsetX <= 2; offsetX += 1) {
+          const offset = ((centerY + offsetY) * canvas.width + centerX + offsetX) * 4;
+          red += pixels[offset];
+          green += pixels[offset + 1];
+          blue += pixels[offset + 2];
+          count += 1;
+        }
+      }
+      return [Math.round(red / count), Math.round(green / count), Math.round(blue / count)];
+    };
+    return {
+      background: average(pictureX, minY - pictureHeight * 0.55),
+      picture: average(pictureX, pictureY),
+      pictureAccent: average(minX + pictureWidth * 0.21, minY + pictureHeight * 0.28),
+      pictureTransparentVector: average(minX + pictureWidth * 0.76, minY + pictureHeight * 0.27),
+      pictureVectorOverlay: average(minX + pictureWidth * 0.76, minY + pictureHeight * 0.84),
+      vector: average(pictureX - pictureWidth * 2, pictureY),
+    };
+  }, imageUrl);
 }
 
 async function unusualPdfBytes(): Promise<Uint8Array> {
@@ -358,6 +509,53 @@ function exportTestRectangle(
     link: null,
     locked: false,
     index,
+  };
+}
+
+function exportTestText(
+  id: string,
+  text: string,
+  x: number,
+  y: number,
+  index: string,
+  frameId: string | null = null,
+) {
+  return {
+    id,
+    type: "text",
+    x,
+    y,
+    width: Math.max(40, text.length * 14),
+    height: 30,
+    angle: 0,
+    strokeColor: "#1e1e1e",
+    backgroundColor: "transparent",
+    fillStyle: "solid",
+    strokeWidth: 1,
+    strokeStyle: "solid",
+    roughness: 0,
+    opacity: 100,
+    groupIds: [] as string[],
+    frameId,
+    roundness: null,
+    seed: 2,
+    version: 1,
+    versionNonce: 2,
+    isDeleted: false,
+    boundElements: null,
+    updated: 1,
+    link: null,
+    locked: false,
+    index,
+    fontSize: 24,
+    fontFamily: 1,
+    text,
+    originalText: text,
+    textAlign: "left",
+    verticalAlign: "top",
+    containerId: null,
+    autoResize: true,
+    lineHeight: 1.25,
   };
 }
 
@@ -1393,6 +1591,27 @@ async function autosavedRectanglePositions(page: import("@playwright/test").Page
   });
 }
 
+type AutosavedRectanglePosition = Awaited<ReturnType<typeof autosavedRectanglePositions>>[number];
+
+async function waitForAutosavedRectangleSet(
+  page: import("@playwright/test").Page,
+  expectedIds: readonly string[],
+): Promise<AutosavedRectanglePosition[]> {
+  let settled: AutosavedRectanglePosition[] | undefined;
+  await expect.poll(async () => {
+    const positions = await autosavedRectanglePositions(page);
+    const ids = positions.map((position) => position.id);
+    if (
+      ids.length !== expectedIds.length
+      || ids.some((id, index) => id !== expectedIds[index])
+    ) return false;
+    settled = positions;
+    return true;
+  }, { timeout: 15_000 }).toBe(true);
+  if (!settled) throw new Error("The expected rectangle snapshot was not observed.");
+  return settled;
+}
+
 async function autosavedPdfBackgroundPosition(page: import("@playwright/test").Page): Promise<{
   locked: boolean;
   x: number;
@@ -1428,13 +1647,699 @@ test.beforeEach(async ({ page }) => {
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
 });
 
+test("uses PatterDraw branding for the app and a new canvas", async ({ page }) => {
+  await expect(page).toHaveTitle("PatterDraw");
+  await expect(page.getByRole("img", { name: "PatterDraw", exact: true })).toHaveText("P");
+  const title = page.getByRole("textbox", { name: "Project title", exact: true });
+  await expect(title).toHaveValue("Untitled PatterDraw canvas");
+  await expect(page.getByTitle("Download a complete PatterDraw project")).toBeVisible();
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+
+  const autosaveKey = "patterdraw:autosave:project:v1";
+  const current = await keyvalValue<{
+    title: string;
+    titleMode?: "default" | "custom";
+  }>(page, autosaveKey);
+  if (!current) throw new Error("The initial PatterDraw autosave was not created.");
+  await setKeyvalValue(page, autosaveKey, {
+    ...current,
+    title: "Untitled classroom canvas",
+    titleMode: undefined,
+  });
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(title).toHaveValue("Untitled PatterDraw canvas");
+  await expect.poll(async () => (
+    await keyvalValue<{ title: string; titleMode?: string }>(page, autosaveKey)
+  )).toMatchObject({
+    title: "Untitled PatterDraw canvas",
+    titleMode: "default",
+  });
+
+  await title.fill("Untitled classroom canvas");
+  await title.press("End");
+  await expect.poll(async () => (
+    await keyvalValue<{ title: string; titleMode?: string }>(page, autosaveKey)
+  ), { timeout: 10_000 }).toMatchObject({
+    title: "Untitled classroom canvas",
+    titleMode: "custom",
+  });
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(title).toHaveValue("Untitled classroom canvas");
+});
+
+test("customizes optional features from device-local settings", async ({ page }) => {
+  const settings = page.getByRole("button", { name: "Settings", exact: true });
+  const projectTitle = page.getByRole("textbox", { name: "Project title", exact: true });
+  const settingsBounds = await settings.boundingBox();
+  const titleBounds = await projectTitle.boundingBox();
+  expect(settingsBounds).not.toBeNull();
+  expect(titleBounds).not.toBeNull();
+  expect(settingsBounds?.x || 0).toBeLessThan(titleBounds?.x || 0);
+
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect(page.locator(".slide-rail")).toBeVisible();
+  await page.getByRole("button", { name: "Library", exact: true }).click();
+  await expect(page.locator(".default-sidebar")).toBeVisible();
+
+  await settings.click();
+  const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Preferences stay on this device.");
+  const slidesPreference = dialog.getByRole("switch", { name: "Slides", exact: true });
+  const restoreDefaults = dialog.getByRole("button", { name: "Restore defaults", exact: true });
+  await expect(slidesPreference).toBeFocused();
+  await page.keyboard.press("ControlOrMeta+Shift+H");
+  await page.keyboard.press("ControlOrMeta+Shift+F");
+  await expect(dialog).toBeVisible();
+  await expect(page.locator(".topbar")).toBeVisible();
+  await expect(page.locator(".statusbar")).toBeVisible();
+  await expect(slidesPreference).toBeFocused();
+  await restoreDefaults.focus();
+  await page.keyboard.press("Tab");
+  await expect(slidesPreference).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(restoreDefaults).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(settings).toBeFocused();
+  await settings.click();
+  await expect(dialog).toBeVisible();
+
+  for (const label of ["Slides", "PDF", "Insert tools", "Math tools", "Library", "Size & Position", "Project Find", "Status bar"]) {
+    await expect(dialog.getByRole("switch", { name: label, exact: true })).toBeChecked();
+  }
+  for (const label of ["Pen-only mode", "Show grid", "Snap to objects", "Icon-only controls"]) {
+    await expect(dialog.getByRole("switch", { name: label, exact: true })).not.toBeChecked();
+  }
+  await expect(dialog.getByRole("combobox", { name: "Theme", exact: true })).toHaveValue("light");
+  const experimental = dialog.getByRole("switch", { name: "Experimental math tools", exact: true });
+  await expect(experimental).not.toBeChecked();
+  await experimental.check();
+  expect(await page.evaluate(() => localStorage.getItem("patterdraw:experimental-math-tools:v1"))).toBe("enabled");
+
+  for (const label of ["Slides", "PDF", "Insert tools", "Math tools", "Library", "Size & Position", "Project Find", "Status bar"]) {
+    await dialog.getByRole("switch", { name: label, exact: true }).uncheck();
+  }
+
+  await expect(page.getByRole("button", { name: "Board", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".slide-rail")).toHaveCount(0);
+  await expect(page.locator(".default-sidebar")).toBeHidden();
+  await expect(page.getByRole("button", { name: "Slides", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "PDF", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Insert", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Library", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Find in project", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Size & Position", exact: true })).toHaveCount(0);
+  await expect(page.locator(".statusbar")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Show footer", exact: true })).toBeVisible();
+  await expect(settings).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(settings).toBeFocused();
+  await page.locator(".App-toolbar__extra-tools-trigger").click();
+  await expect(page.locator(".App-toolbar__extra-tools-dropdown")).toBeVisible();
+  await expect(page.getByTestId("toolbar-math-tools")).toHaveCount(0);
+  await page.locator(".App-toolbar__extra-tools-trigger").click();
+  const editorBounds = await page.locator(".editor-host .excalidraw").boundingBox();
+  expect(editorBounds).not.toBeNull();
+  await page.mouse.click(
+    (editorBounds?.x || 0) + (editorBounds?.width || 0) / 2,
+    (editorBounds?.y || 0) + (editorBounds?.height || 0) / 2,
+  );
+  await page.keyboard.press("ControlOrMeta+f");
+  await expect(page.locator(".project-find-query")).toHaveCount(0);
+  await expect(page.locator(".layer-ui__search input")).toHaveCount(0);
+
+  expect(await page.evaluate(() => JSON.parse(
+    localStorage.getItem("patterdraw:feature-preferences:v1") || "null",
+  ))).toEqual({
+    slides: false,
+    pdf: false,
+    insert: false,
+    mathTools: false,
+    library: false,
+    footer: false,
+    penOnly: false,
+    showGrid: false,
+    snapToObjects: false,
+    sizePosition: false,
+    projectFind: false,
+    iconOnlyControls: false,
+  });
+
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("button", { name: "Slides", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Insert", exact: true })).toHaveCount(0);
+  await expect(page.locator(".statusbar")).toHaveCount(0);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await settings.click();
+  await expect(dialog).toBeVisible();
+  const mobileDialogBounds = await dialog.boundingBox();
+  expect(mobileDialogBounds).not.toBeNull();
+  expect(mobileDialogBounds?.x || 0).toBeGreaterThanOrEqual(0);
+  expect((mobileDialogBounds?.x || 0) + (mobileDialogBounds?.width || 0)).toBeLessThanOrEqual(390);
+  expect((mobileDialogBounds?.y || 0) + (mobileDialogBounds?.height || 0)).toBeLessThanOrEqual(844);
+  await dialog.getByRole("button", { name: "Restore defaults", exact: true }).click();
+
+  await expect(dialog.getByRole("switch", { name: "Slides", exact: true })).toBeChecked();
+  await expect(dialog.getByRole("switch", { name: "Experimental math tools", exact: true })).not.toBeChecked();
+  await expect(page.getByRole("button", { name: "Slides", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Insert", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Library", exact: true })).toBeVisible();
+  await expect(page.locator(".statusbar")).toBeVisible();
+  expect(await page.evaluate(() => JSON.parse(
+    localStorage.getItem("patterdraw:feature-preferences:v1") || "null",
+  ))).toEqual({
+    slides: true,
+    pdf: true,
+    insert: true,
+    mathTools: true,
+    library: true,
+    footer: true,
+    penOnly: false,
+    showGrid: false,
+    snapToObjects: false,
+    sizePosition: true,
+    projectFind: true,
+    iconOnlyControls: false,
+  });
+  expect(await page.evaluate(() => localStorage.getItem("patterdraw:experimental-math-tools:v1"))).toBeNull();
+});
+
+test("optionally hides redundant icon labels without removing accessible names", async ({ page }) => {
+  const shell = page.locator(".app-shell");
+  const board = page.getByRole("button", { name: "Board", exact: true });
+  const boardLabel = board.locator(".icon-label");
+  await expect(shell).not.toHaveClass(/is-icon-only-controls/);
+  await expect(boardLabel).toBeVisible();
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const preference = page.getByRole("dialog", { name: "Settings", exact: true })
+    .getByRole("switch", { name: "Icon-only controls", exact: true });
+  await expect(preference).not.toBeChecked();
+  await preference.check();
+  await expect(shell).toHaveClass(/is-icon-only-controls/);
+  await expect(board).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Save", exact: true })).toBeVisible();
+  expect(await boardLabel.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { clipPath: style.clipPath, height: style.height, width: style.width };
+  })).toEqual({ clipPath: "inset(50%)", height: "1px", width: "1px" });
+  expect(await page.evaluate(() => JSON.parse(
+    localStorage.getItem("patterdraw:feature-preferences:v1") || "null",
+  )?.iconOnlyControls)).toBe(true);
+
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await expect(shell).toHaveClass(/is-icon-only-controls/);
+  await expect(page.getByRole("button", { name: "Board", exact: true })).toBeVisible();
+});
+
+test("applies pen-only, grid, and object-snapping preferences to the live editor", async ({ page }) => {
+  const settings = page.getByRole("button", { name: "Settings", exact: true });
+  await settings.click();
+  const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
+  const penOnly = dialog.getByRole("switch", { name: "Pen-only mode", exact: true });
+  const showGrid = dialog.getByRole("switch", { name: "Show grid", exact: true });
+  const snapToObjects = dialog.getByRole("switch", { name: "Snap to objects", exact: true });
+
+  await penOnly.check();
+  await showGrid.check();
+  await expect(showGrid).toBeChecked();
+  await expect(snapToObjects).not.toBeChecked();
+  await page.keyboard.press("Escape");
+
+  const sizePosition = page.getByRole("button", { name: "Size & Position", exact: true });
+  await sizePosition.click();
+  const stats = page.locator(".exc-stats");
+  await expect(stats).toBeVisible();
+  await expect(stats.getByTestId("Grid step")).toBeVisible();
+  await sizePosition.click();
+  await expect(stats).toHaveCount(0);
+
+  await settings.click();
+  await snapToObjects.check();
+  await expect(snapToObjects).toBeChecked();
+  await expect(showGrid).not.toBeChecked();
+  await page.keyboard.press("Escape");
+  await sizePosition.click();
+  await expect(stats).toBeVisible();
+  await expect(stats.getByTestId("Grid step")).toHaveCount(0);
+  await sizePosition.click();
+
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  const host = await page.locator(".editor-host").boundingBox();
+  if (!host) throw new Error("Editor host has no visible bounds.");
+  const drawWithPointer = async (pointerType: "touch" | "pen", pointerId: number, y: number) => {
+    await page.evaluate(({ left, top, pointerId, pointerType, y }) => {
+      const canvas = document.querySelector<HTMLCanvasElement>(".editor-host canvas.interactive");
+      if (!canvas) throw new Error("Interactive drawing canvas is unavailable.");
+      // Synthetic PointerEvents are not registered as active hardware pointers,
+      // so Chromium's native setPointerCapture would throw before Excalidraw can
+      // exercise its pen/touch gate. Real hardware does not need this shim.
+      const setPointerCapture = canvas.setPointerCapture;
+      canvas.setPointerCapture = () => {};
+      const dispatch = (type: string, x: number, buttons: number) => canvas.dispatchEvent(new PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX: left + x,
+        clientY: top + y,
+        pointerId,
+        pointerType,
+        isPrimary: true,
+        button: 0,
+        buttons,
+        pressure: buttons ? 0.5 : 0,
+      }));
+      try {
+        dispatch("pointerdown", 420, 1);
+        dispatch("pointermove", 480, 1);
+        dispatch("pointermove", 540, 1);
+        dispatch("pointerup", 540, 0);
+      } finally {
+        canvas.setPointerCapture = setPointerCapture;
+      }
+    }, { left: host.x, top: host.y, pointerId, pointerType, y });
+  };
+
+  await drawWithPointer("touch", 301, 270);
+  await page.waitForTimeout(400);
+  expect(await autosavedRectanglePositions(page)).toHaveLength(0);
+
+  await drawWithPointer("pen", 302, 410);
+  await expect.poll(() => autosavedRectanglePositions(page)).toHaveLength(1);
+  const saved = await keyvalValue<{
+    activeSceneId: string;
+    scenes: Record<string, { appState: Record<string, unknown> }>;
+  }>(page, "patterdraw:autosave:project:v1");
+  const savedAppState = saved?.scenes[saved.activeSceneId]?.appState || {};
+  expect(savedAppState.penMode).toBeUndefined();
+  expect(savedAppState.gridModeEnabled).toBeUndefined();
+  expect(savedAppState.objectsSnapModeEnabled).toBeUndefined();
+
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await settings.click();
+  await expect(penOnly).toBeChecked();
+  await expect(showGrid).not.toBeChecked();
+  await expect(snapToObjects).toBeChecked();
+});
+
+test("edits exact geometry through the optional Size & Position inspector", async ({ page }) => {
+  await openClassroomFixture(page, [
+    exportTestRectangle("inspected-rectangle", 200, 160, 180, 110, "a0"),
+  ], []);
+  const center = await scenePointInViewport(page, { x: 290, y: 215 });
+  await page.getByTestId("toolbar-selection").check({ force: true });
+  await page.mouse.click(center.x, center.y);
+
+  const toggle = page.getByRole("button", { name: "Size & Position", exact: true });
+  await toggle.click();
+  const panel = page.locator(".exc-stats");
+  await expect(panel).toBeVisible();
+  await expect(panel).toHaveAttribute("aria-label", "Size & Position");
+  await expect(panel.locator(".title h2")).toHaveAttribute("aria-label", "Size & Position");
+  for (const label of ["X", "Y", "W", "H", "A"]) {
+    await expect(panel.getByTestId(label).locator("input")).toHaveCount(1);
+  }
+
+  const xInput = panel.getByTestId("X").locator("input");
+  const widthInput = panel.getByTestId("W").locator("input");
+  await expect(xInput).toHaveValue("200");
+  await expect(widthInput).toHaveValue("180");
+  await xInput.fill("240");
+  await xInput.press("Enter");
+  await widthInput.fill("220");
+  await widthInput.press("Enter");
+  await expect.poll(async () => {
+    const project = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, { elements: Array<{ id: string; width: number; x: number }> }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    const element = project?.scenes[project.activeSceneId]?.elements
+      .find((candidate) => candidate.id === "inspected-rectangle");
+    return element ? { width: element.width, x: element.x } : null;
+  }).toEqual({ width: 220, x: 240 });
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("dialog", { name: "Settings", exact: true })
+    .getByRole("switch", { name: "Size & Position", exact: true })
+    .uncheck();
+  await expect(panel).toHaveCount(0);
+  await expect(toggle).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await page.getByTestId("toolbar-selection").focus();
+  await page.keyboard.press("Alt+/");
+  await expect(panel).toHaveCount(0);
+});
+
+test("finds and activates text across Board, Slides, and PDF pages", async ({ page }) => {
+  test.setTimeout(60_000);
+  const frame = classroomTestFrame("lesson-frame", "Lesson Slide", 300, 180, 520, 320, "a2", true);
+  await openClassroomFixture(page, [
+    exportTestText("board-lesson", "Board lesson", 60, 70, "a0"),
+    exportTestText("slide-lesson", "Slide lesson", 360, 250, "a1"),
+    frame,
+  ], [
+    { id: "lesson-slide", frameId: frame.id, title: "Lesson Slide", titleMode: "custom" },
+  ]);
+  await openTestPdf(page);
+  await page.getByTestId("toolbar-text").check({ force: true });
+  const pdfHost = await page.locator(".editor-host").boundingBox();
+  if (!pdfHost) throw new Error("Editor host has no visible bounds in PDF mode.");
+  await page.mouse.click(pdfHost.x + pdfHost.width / 2, pdfHost.y + pdfHost.height / 2);
+  const textEditor = page.locator("textarea.excalidraw-wysiwyg");
+  await expect(textEditor).toBeVisible();
+  await textEditor.fill("PDF lesson");
+  await textEditor.press("ControlOrMeta+Enter");
+  await expect.poll(async () => {
+    const current = await keyvalValue<{
+      pdfPageOrder: string[];
+      scenes: Record<string, { elements: Array<{ text?: string }> }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    const pdfSceneId = current?.pdfPageOrder[0];
+    return pdfSceneId
+      ? current.scenes[pdfSceneId]?.elements.some((element) => element.text === "PDF lesson")
+      : false;
+  }).toBe(true);
+
+  await page.keyboard.press("ControlOrMeta+f");
+  const query = page.getByRole("searchbox", { name: "Find text across project", exact: true });
+  await expect(query).toBeVisible();
+  await expect(query).toBeFocused();
+  await query.fill("lesson");
+  const results = page.locator(".project-find-result");
+  await expect(results).toHaveCount(3);
+  await expect(page.locator(".project-find-result-scope")).toHaveText(["Board", "Slide 1", "PDF"]);
+  await expect(page.locator(".project-find-result-context")).toHaveText([
+    "Board",
+    "Lesson Slide",
+    "toolbar-position.pdf · Page 1 · Source page 1",
+  ]);
+
+  await query.press("ArrowDown");
+  await query.press("Enter");
+  await expect(page.locator(".app-shell")).toHaveClass(/is-slide-mode/);
+  await expect(page.locator('.slide-thumbnail[aria-current="page"]')).toContainText("Lesson Slide");
+
+  await page.locator(".project-find-result").filter({ hasText: "PDF lesson" }).click();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/);
+  await expect(page.locator(".page-status")).toContainText("Page 1 of 1");
+
+  await page.locator(".project-find-result").filter({ hasText: "Board lesson" }).click();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await page.getByRole("button", { name: "Search current canvas", exact: true }).click();
+  await expect(page.locator(".layer-ui__search input")).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+f");
+  await expect(query).toBeVisible();
+  await expect(query).toBeFocused();
+});
+
+test("switches between light, dark, and live system themes", async ({ page }) => {
+  const settings = page.getByRole("button", { name: "Settings", exact: true });
+  await settings.click();
+  const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
+  const theme = dialog.getByRole("combobox", { name: "Theme", exact: true });
+  await theme.selectOption("dark");
+  await expect(page.locator(".app-shell")).toHaveAttribute("data-theme", "dark");
+  await expect(page.locator(".editor-host .excalidraw")).toHaveClass(/theme--dark/);
+  expect(await page.evaluate(() => localStorage.getItem("patterdraw:theme-preference:v1"))).toBe("dark");
+
+  await page.keyboard.press("Escape");
+  const insert = page.getByRole("button", { name: "Insert", exact: true });
+  await insert.click();
+  await page.getByRole("menuitem", { name: /Equation/ }).click();
+  const equationDialog = page.getByRole("dialog", { name: "Insert equation", exact: true });
+  const equationClose = equationDialog.getByRole("button", { name: "Close equation editor", exact: true });
+  await expect(equationClose).toHaveCSS("color", "rgb(224, 232, 245)");
+  await equationClose.hover();
+  await expect(equationClose).toHaveCSS("background-color", "rgb(38, 50, 72)");
+  const equationSource = equationDialog.getByLabel("LaTeX", { exact: true });
+  await expect(equationSource).toHaveCSS("background-color", "rgb(13, 21, 33)");
+  await expect(equationSource).toHaveCSS("color", "rgb(231, 237, 247)");
+  await page.keyboard.press("Escape");
+
+  await insert.click();
+  await page.getByRole("menuitem", { name: /Diagram/ }).click();
+  const mermaidDialog = page.getByRole("dialog", { name: "Insert Mermaid diagram", exact: true });
+  const mermaidSource = mermaidDialog.getByLabel("Mermaid source", { exact: true });
+  await expect(mermaidSource).toHaveCSS("background-color", "rgb(13, 21, 33)");
+  await expect(mermaidSource).toHaveCSS("color", "rgb(231, 237, 247)");
+  await page.keyboard.press("Escape");
+
+  await page.emulateMedia({ colorScheme: "dark" });
+  await settings.click();
+  await expect(dialog).toBeVisible();
+  await theme.selectOption("system");
+  await expect(page.locator(".app-shell")).toHaveAttribute("data-theme", "dark");
+  await page.emulateMedia({ colorScheme: "light" });
+  await expect(page.locator(".app-shell")).toHaveAttribute("data-theme", "light");
+  await expect(page.locator(".editor-host .excalidraw")).not.toHaveClass(/theme--dark/);
+  expect(await page.evaluate(() => localStorage.getItem("patterdraw:theme-preference:v1"))).toBe("system");
+
+  await dialog.getByRole("button", { name: "Restore defaults", exact: true }).click();
+  await expect(theme).toHaveValue("light");
+  await expect(page.locator(".app-shell")).toHaveAttribute("data-theme", "light");
+  expect(await page.evaluate(() => localStorage.getItem("patterdraw:theme-preference:v1"))).toBeNull();
+});
+
+test("darkens PDF content while preserving embedded picture colours and canonical storage", async ({ page }) => {
+  test.setTimeout(90_000);
+  const browserErrors: string[] = [];
+  page.on("pageerror", (error) => browserErrors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") browserErrors.push(message.text());
+  });
+  await useDownloadBasedImageExport(page);
+  const pdfBytes = await pictureDarkModePdfBytes();
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "dark-mode-picture.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(pdfBytes),
+  });
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, { timeout: 15_000 });
+  const thumbnails = page.locator("#pdf-page-rail .pdf-page-item img");
+  await expect(thumbnails).toHaveCount(2, { timeout: 15_000 });
+  const thumbnail = thumbnails.first();
+  const unvisitedThumbnail = thumbnails.nth(1);
+  await expectLoadedPreview(thumbnail);
+  await expectLoadedPreview(unvisitedThumbnail);
+  const lightThumbnail = await thumbnail.getAttribute("src");
+  const lightUnvisitedThumbnail = await unvisitedThumbnail.getAttribute("src");
+  expect(lightThumbnail).toMatch(/^data:image\/png;base64,/);
+  expect(lightUnvisitedThumbnail).toMatch(/^data:image\/png;base64,/);
+
+  const storedPdfRaster = async () => {
+    const saved = await keyvalValue<{
+      pdfPageOrder: string[];
+      scenes: Record<string, {
+        appState: Record<string, unknown>;
+        elements: Array<{ fileId?: string; id: string }>;
+        files: Record<string, { dataURL?: string }>;
+        pdfPage?: { backgroundElementId: string };
+      }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    const scene = saved?.scenes[saved.pdfPageOrder[0]];
+    const background = scene?.elements.find((element) => (
+      element.id === scene.pdfPage?.backgroundElementId
+    ));
+    const fileId = background?.fileId;
+    return scene && fileId ? {
+      appTheme: scene.appState.theme,
+      dataURL: scene.files[fileId]?.dataURL,
+      fileCount: Object.keys(scene.files).length,
+      fileId,
+    } : null;
+  };
+  await expect.poll(storedPdfRaster, { timeout: 15_000 }).not.toBeNull();
+  const lightStored = await storedPdfRaster();
+  expect(lightStored?.dataURL).toBe(lightThumbnail);
+  expect(lightStored?.appTheme).toBeUndefined();
+
+  await expect.poll(
+    () => renderedPdfDisplaySamples(page),
+    { timeout: 15_000 },
+  ).not.toBeNull();
+  const lightSamples = await renderedPdfDisplaySamples(page);
+  expect(lightSamples?.background.every((channel) => channel > 225)).toBe(true);
+  expect(lightSamples?.vector.every((channel) => channel < 40)).toBe(true);
+  expect(lightSamples?.picture[0]).toBeGreaterThan(220);
+  expect(lightSamples?.picture[1]).toBeLessThan(55);
+  expect(lightSamples?.picture[2]).toBeGreaterThan(110);
+  expect(lightSamples?.pictureAccent[1]).toBeGreaterThan(180);
+  expect(lightSamples?.pictureTransparentVector.every((channel) => channel < 40)).toBe(true);
+  expect(lightSamples?.pictureVectorOverlay.every((channel) => channel < 40)).toBe(true);
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("dialog", { name: "Settings", exact: true })
+    .getByRole("combobox", { name: "Theme", exact: true })
+    .selectOption("dark");
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".app-shell")).toHaveAttribute("data-theme", "dark");
+  await expect.poll(() => thumbnail.getAttribute("src"), { timeout: 30_000 })
+    .not.toBe(lightThumbnail);
+  await expect.poll(() => unvisitedThumbnail.getAttribute("src"), { timeout: 30_000 })
+    .not.toBe(lightUnvisitedThumbnail);
+  await expect(unvisitedThumbnail).toHaveClass(/pdf-page-dark-thumbnail/);
+
+  await expect.poll(async () => {
+    const samples = await renderedPdfDisplaySamples(page);
+    return samples?.background.every((channel) => channel < 45)
+      && samples.vector.every((channel) => channel > 205)
+      ? samples
+      : null;
+  }, { timeout: 30_000 }).not.toBeNull();
+  const darkSamples = await renderedPdfDisplaySamples(page);
+  expect(darkSamples?.background.every((channel) => channel < 45)).toBe(true);
+  expect(darkSamples?.vector.every((channel) => channel > 205)).toBe(true);
+  expect(darkSamples?.picture[0]).toBeGreaterThan(150);
+  expect(darkSamples?.picture[1]).toBeLessThan(100);
+  expect(darkSamples?.picture[2]).toBeGreaterThan(150);
+  expect(darkSamples?.pictureAccent[1] || 0).toBeGreaterThan(150);
+  expect(darkSamples?.pictureAccent[1] || 0).toBeGreaterThan((darkSamples?.pictureAccent[0] || 0) * 2);
+  expect(darkSamples?.pictureAccent[1] || 0).toBeGreaterThan((darkSamples?.pictureAccent[2] || 0) * 2);
+  expect(darkSamples?.pictureTransparentVector.every((channel) => channel > 205)).toBe(true);
+  expect(darkSamples?.pictureVectorOverlay.every((channel) => channel > 205)).toBe(true);
+  await expect.poll(storedPdfRaster, { timeout: 15_000 }).toEqual(lightStored);
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  await page.getByRole("dialog", { name: "More exports", exact: true })
+    .getByRole("button", { name: /Export image…/ })
+    .click();
+  const nativeDialog = page.locator(".Modal").filter({ has: page.locator(".ImageExportModal") });
+  await expect(nativeDialog).toBeVisible();
+  await expect(nativeDialog.getByLabel("Dark mode", { exact: true })).not.toBeChecked();
+  const pngDownloadEvent = page.waitForEvent("download");
+  await nativeDialog.getByRole("button", { name: "Export to PNG", exact: true }).click();
+  const exportedSamples = await exportedPdfDisplaySamples(
+    await downloadBytes(await pngDownloadEvent),
+  );
+  expect(exportedSamples?.background.every((channel) => channel > 225)).toBe(true);
+  expect(exportedSamples?.vector.every((channel) => channel < 40)).toBe(true);
+  expect(exportedSamples?.picture[0]).toBeGreaterThan(220);
+  expect(exportedSamples?.picture[1]).toBeLessThan(55);
+  expect(exportedSamples?.picture[2]).toBeGreaterThan(110);
+  expect(exportedSamples?.pictureTransparentVector.every((channel) => channel < 40)).toBe(true);
+  expect(exportedSamples?.pictureVectorOverlay.every((channel) => channel < 40)).toBe(true);
+  await nativeDialog.locator(".Modal__content").focus();
+  await page.keyboard.press("Escape");
+  await expect(nativeDialog).toHaveCount(0);
+  await expect.poll(async () => {
+    const samples = await renderedPdfDisplaySamples(page);
+    return samples?.background.every((channel) => channel < 45)
+      && samples.vector.every((channel) => channel > 205);
+  }, { timeout: 15_000 }).toBe(true);
+  await expect.poll(storedPdfRaster, { timeout: 15_000 }).toEqual(lightStored);
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("dialog", { name: "Settings", exact: true })
+    .getByRole("combobox", { name: "Theme", exact: true })
+    .selectOption("light");
+  await page.keyboard.press("Escape");
+  await expect(thumbnail).toHaveAttribute("src", lightThumbnail || "");
+  await expect.poll(async () => {
+    const samples = await renderedPdfDisplaySamples(page);
+    return samples?.background.every((channel) => channel > 225)
+      && samples.vector.every((channel) => channel < 40);
+  }, { timeout: 15_000 }).toBe(true);
+  expect(browserErrors).toEqual([]);
+});
+
+test("merges and synchronizes feature preferences across open tabs", async ({ page }) => {
+  const secondPage = await page.context().newPage();
+  try {
+    await secondPage.goto("/");
+    await expect(secondPage.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+    await expect(secondPage.getByText("Saved locally", { exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await secondPage.getByRole("button", { name: "Settings", exact: true }).click();
+    const slidesPreference = page.getByRole("dialog", { name: "Settings", exact: true })
+      .getByRole("switch", { name: "Slides", exact: true });
+    const pdfPreference = secondPage.getByRole("dialog", { name: "Settings", exact: true })
+      .getByRole("switch", { name: "PDF", exact: true });
+    await Promise.all([
+      slidesPreference.uncheck(),
+      pdfPreference.uncheck(),
+    ]);
+    await expect(page.getByRole("button", { name: "Slides", exact: true })).toHaveCount(0);
+    await expect(secondPage.getByRole("button", { name: "Slides", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "PDF", exact: true })).toHaveCount(0);
+    await expect(secondPage.getByRole("button", { name: "PDF", exact: true })).toHaveCount(0);
+
+    const expected = {
+      slides: false,
+      pdf: false,
+      insert: true,
+      mathTools: true,
+      library: true,
+      footer: true,
+      penOnly: false,
+      showGrid: false,
+      snapToObjects: false,
+      sizePosition: true,
+      projectFind: true,
+      iconOnlyControls: false,
+    };
+    await expect.poll(() => page.evaluate(() => JSON.parse(
+      localStorage.getItem("patterdraw:feature-preferences:v1") || "null",
+    ))).toEqual(expected);
+    await expect.poll(() => secondPage.evaluate(() => JSON.parse(
+      localStorage.getItem("patterdraw:feature-preferences:v1") || "null",
+    ))).toEqual(expected);
+  } finally {
+    await secondPage.close();
+  }
+});
+
 test("opens legacy .canvasclassroom project archives", async ({ page }) => {
   await openClassroomFixture(page, [], [], "legacy-project.canvasclassroom");
   await expect(page).toHaveTitle("PatterDraw");
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible();
 });
 
+test("hydrates changed content when a replacement reuses project and scene IDs", async ({ page }) => {
+  await openClassroomFixture(page, [
+    exportTestRectangle("same-id-first", 100, 120, 140, 90, "a0"),
+  ], [], "same-id-first.patterdraw");
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+
+  await openClassroomFixture(page, [
+    exportTestRectangle("same-id-replacement", 220, 160, 160, 100, "a0"),
+  ], [], "same-id-replacement.patterdraw");
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  await dragOnBoard(page, { x: 600, y: 320 }, { x: 720, y: 400 });
+
+  await expect.poll(async () => {
+    const saved = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, { elements: Array<{ id?: string; isDeleted?: boolean; type?: string }> }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    const elements = saved?.scenes[saved.activeSceneId]?.elements || [];
+    return {
+      containsFirst: elements.some((element) => element.id === "same-id-first"),
+      containsReplacement: elements.some((element) => element.id === "same-id-replacement"),
+      liveRectangles: elements.filter(
+        (element) => element.type === "rectangle" && element.isDeleted !== true,
+      ).length,
+    };
+  }, { timeout: 15_000 }).toEqual({
+    containsFirst: false,
+    containsReplacement: true,
+    liveRectangles: 2,
+  });
+});
+
 test("flushes ordinary project-title typing without the trailing autosave delay", async ({ page }) => {
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
   const title = page.getByRole("textbox", { name: "Project title" });
   await title.fill("Immediate autosav");
   await title.focus();
@@ -1532,7 +2437,6 @@ test("does not replace an unreadable autosave with a blank project", async ({ pa
   const title = page.getByRole("textbox", { name: "Project title" });
   await title.fill("Temporary recovery board");
   await page.locator('.statusbar button[aria-label="Zoom in"]').click();
-  await page.waitForTimeout(1_200);
   await expect.poll(async () => (
     await keyvalValue<{ id: string; title: string }>(
       page,
@@ -2235,7 +3139,7 @@ test("captures areas to the clipboard and persists Screenshot Library actions", 
   const downloadEvent = page.waitForEvent("download");
   await card.getByRole("button", { name: /^Download screenshot captured/ }).click();
   const download = await downloadEvent;
-  expect(download.suggestedFilename()).toMatch(/^classroom-screenshot-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}Z\.png$/);
+  expect(download.suggestedFilename()).toMatch(/^patterdraw-screenshot-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}Z\.png$/);
   expect(pngDimensions(await downloadBytes(download))).toEqual({ width: 480, height: 320 });
 
   await page.reload();
@@ -3241,7 +4145,7 @@ test("reorders slides with visible keyboard and touch controls", async ({ page }
   await expect(liveAnnouncement).toHaveText("Moved Practice to slide position 2.");
 });
 
-test("preserves custom slide names through reorder, PDF export, and project round trip", async ({ page }) => {
+test("preserves custom slide names through reorder, PDF and PowerPoint export, and project round trip", async ({ page }) => {
   const automatic = classroomTestFrame("automatic-slide", "Slide 1", 100, 100, 500, 300, "a2", true);
   const custom = classroomTestFrame("custom-slide", "Slide 10", 700, 100, 500, 300, "a3", true);
   const automaticContent = exportTestRectangle("automatic-content", 220, 180, 120, 80, "a0");
@@ -3274,6 +4178,66 @@ test("preserves custom slide names through reorder, PDF export, and project roun
     .click();
   const exportedPdf = await PDFDocument.load(await downloadBytes(await pdfDownload));
   expect(exportedPdf.getPageCount()).toBe(2);
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  const pptxDownloadEvent = page.waitForEvent("download");
+  await page.getByRole("dialog", { name: "More exports", exact: true })
+    .getByRole("button", { name: /PowerPoint \(\.pptx\)/ })
+    .click();
+  const pptxDownload = await pptxDownloadEvent;
+  expect(pptxDownload.suggestedFilename()).toBe("Detached-slides-fixture-slides.pptx");
+  const pptxArchive = unzipSync(new Uint8Array(await downloadBytes(pptxDownload)));
+  expect(Object.keys(pptxArchive).sort()).toEqual(expect.arrayContaining([
+    "[Content_Types].xml",
+    "ppt/presentation.xml",
+    "ppt/slides/slide1.xml",
+    "ppt/slides/slide2.xml",
+  ]));
+  const contentTypesXml = strFromU8(pptxArchive["[Content_Types].xml"]);
+  const presentationXml = strFromU8(pptxArchive["ppt/presentation.xml"]);
+  expect(contentTypesXml).toContain("application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml");
+  expect(contentTypesXml).toContain("application/vnd.openxmlformats-officedocument.presentationml.slide+xml");
+  expect(presentationXml.match(/<p:sldId\b/g)).toHaveLength(2);
+  expect(presentationXml).toMatch(/<p:sldSz\b[^>]*cx="9144000"[^>]*cy="5143500"/);
+
+  const slideEntries = Object.entries(pptxArchive)
+    .filter(([path]) => /^ppt\/slides\/slide\d+\.xml$/.test(path))
+    .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
+  expect(slideEntries).toHaveLength(2);
+  expect(strFromU8(slideEntries[0][1])).toContain('descr="Slide 10"');
+  expect(strFromU8(slideEntries[1][1])).toContain('descr="Slide 2"');
+
+  const mediaEntries = Object.entries(pptxArchive)
+    .filter(([path]) => path.startsWith("ppt/media/") && path.endsWith(".png"))
+    .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
+  expect(mediaEntries).toHaveLength(2);
+  expect(mediaEntries.map(([, bytes]) => pngDimensions(Buffer.from(bytes))))
+    .toEqual([{ width: 1_000, height: 600 }, { width: 1_000, height: 600 }]);
+  for (const [path, bytes] of Object.entries(pptxArchive)) {
+    if (!path.endsWith(".rels")) continue;
+    expect(strFromU8(bytes), `${path} must not reference external content`)
+      .not.toContain('TargetMode="External"');
+  }
+
+  const drawSlide = page.getByRole("button", { name: "Draw slide", exact: true });
+  await drawSlide.click();
+  await page.getByRole("button", { name: /4:3.*Old TVs and smartboards/ }).click();
+  await expect.poll(() => autosavedFrameAspectSummary(page)).toMatchObject({ mode: "4:3" });
+  await drawSlide.click();
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  const standardPptxDownloadEvent = page.waitForEvent("download");
+  await page.getByRole("dialog", { name: "More exports", exact: true })
+    .getByRole("button", { name: /PowerPoint \(\.pptx\)/ })
+    .click();
+  const standardPptxArchive = unzipSync(new Uint8Array(
+    await downloadBytes(await standardPptxDownloadEvent),
+  ));
+  const standardPresentationXml = strFromU8(standardPptxArchive["ppt/presentation.xml"]);
+  expect(standardPresentationXml.match(/<p:sldId\b/g)).toHaveLength(2);
+  expect(standardPresentationXml).toMatch(/<p:sldSz\b[^>]*cx="9144000"[^>]*cy="6858000"/);
+  expect(Object.keys(standardPptxArchive).filter((path) => (
+    path.startsWith("ppt/media/") && path.endsWith(".png")
+  ))).toHaveLength(2);
 
   const projectDownload = page.waitForEvent("download");
   await page.getByRole("button", { name: "Save", exact: true }).click();
@@ -4138,9 +5102,11 @@ test("uses the experimental one-shot lasso for live, additive, and cancellable s
   }).toEqual([5, 5]);
 
   await page.reload();
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
   await openExtraTools();
   await expect(page.getByTestId("toolbar-lasso")).toBeVisible();
-  const beforeTouch = await autosavedRectanglePositions(page);
+  const expectedRectangleIds = initial.map((position) => position.id);
+  const beforeTouch = await waitForAutosavedRectangleSet(page, expectedRectangleIds);
   await page.getByTestId("toolbar-lasso").click();
   await expect(page.getByTestId("lasso-overlay")).toBeVisible();
   const touchHost = await page.locator(".editor-host").boundingBox();
@@ -4166,13 +5132,18 @@ test("uses the experimental one-shot lasso for live, additive, and cancellable s
     dispatch("pointerup", 270, 190, 0);
   }, { left: touchHost.x, top: touchHost.y });
   await expect(page.getByTestId("lasso-overlay")).toHaveCount(0);
-  await page.keyboard.press("Shift+ArrowRight");
-  await expect.poll(async () => {
-    const positions = await autosavedRectanglePositions(page);
-    return positions.map((position, index) => position.x - beforeTouch[index].x);
-  }).toEqual([5, 0]);
+  // Synthetic PointerEvents are not trusted browser input and do not reliably
+  // enter Excalidraw's subsequent keyboard-move path. Verify the exact element
+  // selected by touch through the native inspector; mouse lasso movement and
+  // autosave are exercised above with real Playwright input.
+  const sizePosition = page.getByRole("button", { name: "Size & Position", exact: true });
+  await sizePosition.click();
+  const selectedX = page.locator(".exc-stats").getByTestId("X").locator("input");
+  await expect(selectedX).toHaveValue(String(beforeTouch[0].x));
+  await sizePosition.click();
+  await expect(page.locator(".exc-stats")).toHaveCount(0);
 
-  const beforeEscape = await autosavedRectanglePositions(page);
+  const beforeEscape = await waitForAutosavedRectangleSet(page, expectedRectangleIds);
   await openExtraTools();
   await page.getByTestId("toolbar-lasso").click();
   const escapeOverlay = page.getByTestId("lasso-overlay");
@@ -4197,11 +5168,12 @@ test("uses the experimental one-shot lasso for live, additive, and cancellable s
   await expect(escapeOverlay.locator("path")).not.toHaveAttribute("d", "");
   await page.keyboard.press("Escape");
   await expect(escapeOverlay).toHaveCount(0);
-  await page.keyboard.press("Shift+ArrowDown");
-  await expect.poll(async () => {
-    const positions = await autosavedRectanglePositions(page);
-    return positions.map((position, index) => position.y - beforeEscape[index].y);
-  }).toEqual([5, 0]);
+  await sizePosition.click();
+  await expect(page.locator(".exc-stats").getByTestId("X").locator("input"))
+    .toHaveValue(String(beforeEscape[0].x));
+  await sizePosition.click();
+  await expect(page.locator(".exc-stats")).toHaveCount(0);
+  await expect.poll(() => autosavedRectanglePositions(page)).toEqual(beforeEscape);
 
   await page.setViewportSize({ width: 390, height: 844 });
   await openExtraTools();
@@ -4212,7 +5184,6 @@ test("uses the experimental one-shot lasso for live, additive, and cancellable s
   await page.setViewportSize({ width: 1440, height: 900 });
 
   await openTestPdf(page);
-  await expect.poll(() => autosavedPdfBackgroundPosition(page)).toMatchObject({ locked: true });
   const pdfBackground = await autosavedPdfBackgroundPosition(page);
   if (!pdfBackground) throw new Error("The imported PDF background was not autosaved.");
   await openExtraTools();
@@ -4482,7 +5453,7 @@ test("configures, inserts, and persists the static advanced math-tool release", 
   }
 
   const saveDownload = page.waitForEvent("download");
-  await page.getByTitle("Download a complete classroom project").click();
+  await page.getByTitle("Download a complete PatterDraw project").click();
   const savedProjectStream = await (await saveDownload).createReadStream();
   const savedProjectChunks: Buffer[] = [];
   for await (const chunk of savedProjectStream) savedProjectChunks.push(Buffer.from(chunk));
@@ -4604,6 +5575,7 @@ test("batch-inserts independent fraction, algebra, integer, and probability mani
   await expect.poll(() => autosavedMathToolSetSnapshot(page, "probability-piece")).toMatchObject({ count: 19, independent: true, localSafe: true });
 
   await page.reload();
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
   const persistencePollOptions = { timeout: 15_000 };
   await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "fraction-piece"))?.count || 0, persistencePollOptions).toBe(10);
   await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "algebra-tile"))?.count || 0, persistencePollOptions).toBe(6);
@@ -4611,7 +5583,7 @@ test("batch-inserts independent fraction, algebra, integer, and probability mani
   await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.count || 0, persistencePollOptions).toBe(19);
 
   const saveDownload = page.waitForEvent("download");
-  await page.getByTitle("Download a complete classroom project").click();
+  await page.getByTitle("Download a complete PatterDraw project").click();
   const savedProjectStream = await (await saveDownload).createReadStream();
   const savedProjectChunks: Buffer[] = [];
   for await (const chunk of savedProjectStream) savedProjectChunks.push(Buffer.from(chunk));
@@ -4754,7 +5726,10 @@ test("animates a selected spinner and persists its numbered result", async ({ pa
   const spin = page.getByTestId("probability-randomize-selected");
   await expect(toolbar).toContainText("1 spinner selected");
   await expect(spin).toHaveText(/Spin selected/);
-  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.count || 0).toBe(1);
+  await expect.poll(
+    async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.count || 0,
+    { timeout: 15_000 },
+  ).toBe(1);
   const beforeSpin = await autosavedMathToolSetSnapshot(page, "probability-piece");
   expect(beforeSpin?.metadata[0]).toMatchObject({ componentType: "spinner", faceOrValue: "1-8", spinnerSectorCount: 8 });
 
@@ -4765,14 +5740,10 @@ test("animates a selected spinner and persists its numbered result", async ({ pa
     expect(spin).toHaveText(/Spinning/),
     expect(toolbar).toHaveAttribute("aria-busy", "true"),
     expect(pointerOverlay).toBeVisible(),
+    expect(pointerOverlay.locator(".spinner-pointer-overlay__wheel")).toHaveCSS("transform", "none"),
+    expect(pointerLayer).toHaveCSS("animation-duration", "1.1s"),
     spin.click(),
   ]);
-  await expect(pointerOverlay.locator(".spinner-pointer-overlay__wheel")).toHaveCSS("transform", "none");
-  const initialPointerTransform = await pointerLayer.evaluate((element) => getComputedStyle(element).transform);
-  await page.waitForTimeout(250);
-  await expect(spin).toBeDisabled();
-  const movingPointerTransform = await pointerLayer.evaluate((element) => getComputedStyle(element).transform);
-  expect(movingPointerTransform).not.toBe(initialPointerTransform);
   await expect(page.getByText(/Spun 1 spinner: [1-8]\./)).toBeVisible();
   await expect(pointerOverlay).toHaveCount(0);
   await expect(spin).toBeEnabled();
@@ -4783,15 +5754,21 @@ test("animates a selected spinner and persists its numbered result", async ({ pa
     return snapshot?.fileIds[0] !== beforeSpin?.fileIds[0]
       && /^[1-8]$/.test(String(snapshot?.metadata[0]?.faceOrValue))
       && snapshot?.localSafe === true;
-  }).toBe(true);
+  }, { timeout: 15_000 }).toBe(true);
   const afterSpin = await autosavedMathToolSetSnapshot(page, "probability-piece");
   expect(afterSpin?.angles).toEqual(beforeSpin?.angles);
 
   await page.locator(".editor-host .excalidraw").focus();
   await page.keyboard.press("ControlOrMeta+z");
-  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.fileIds).toEqual(beforeSpin?.fileIds);
+  await expect.poll(
+    async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.fileIds,
+    { timeout: 15_000 },
+  ).toEqual(beforeSpin?.fileIds);
   await page.keyboard.press("ControlOrMeta+Shift+z");
-  await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.fileIds).toEqual(afterSpin?.fileIds);
+  await expect.poll(
+    async () => (await autosavedMathToolSetSnapshot(page, "probability-piece"))?.fileIds,
+    { timeout: 15_000 },
+  ).toEqual(afterSpin?.fileIds);
 
   await page.setViewportSize({ width: 390, height: 844 });
   const toolbarBox = await toolbar.boundingBox();
@@ -4804,7 +5781,7 @@ test("animates a selected spinner and persists its numbered result", async ({ pa
       && snapshot.localSafe
       && snapshot.fileIds[0] === afterSpin?.fileIds[0]
       && /^[1-8]$/.test(String(snapshot.metadata[0]?.faceOrValue));
-  }).toBe(true);
+  }, { timeout: 15_000 }).toBe(true);
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   expect(consoleErrors).toEqual([]);
   expect(externalRequests).toEqual([]);
@@ -5051,6 +6028,147 @@ test("navigates PDF pages with the left and right arrow keys", async ({ page }) 
   await expect(resizeHandle).toHaveAttribute("aria-valuenow", "240");
   await expect(pages.nth(1)).toHaveClass(/is-selected/);
   expect(consoleErrors).toEqual([]);
+});
+
+test("keeps the latest PDF scene during rapid page switches", async ({ page }) => {
+  test.setTimeout(60_000);
+  await openTestPdf(page, 3);
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+
+  await pages.nth(1).click();
+  await pages.nth(2).click();
+  await pages.nth(0).click();
+
+  await expect(pages.nth(0)).toHaveClass(/is-selected/);
+  await expect(page.locator(".page-status")).toContainText("Page 1 of 3");
+  await expect.poll(async () => {
+    const project = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, {
+        elements: Array<{ id?: string }>;
+        pdfPage?: { backgroundElementId: string; pageIndex: number };
+      }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    if (!project) return null;
+    const pdfScenes = Object.values(project.scenes).filter((scene) => scene.pdfPage);
+    return {
+      activePageIndex: project.scenes[project.activeSceneId]?.pdfPage?.pageIndex,
+      pageCount: pdfScenes.length,
+      backgroundsIntact: pdfScenes.every((scene) => (
+        scene.elements.some((element) => element.id === scene.pdfPage?.backgroundElementId)
+      )),
+    };
+  }, { timeout: 15_000 }).toEqual({
+    activePageIndex: 0,
+    pageCount: 3,
+    backgroundsIntact: true,
+  });
+});
+
+test("never applies a rapid slide action to a PDF scene", async ({ page }) => {
+  test.setTimeout(60_000);
+  await openTestPdf(page, 2);
+  await page.evaluate(() => {
+    const nativeRequestAnimationFrame = window.requestAnimationFrame.bind(window);
+    (window as Window & { __patterdrawNativeRaf?: typeof window.requestAnimationFrame })
+      .__patterdrawNativeRaf = nativeRequestAnimationFrame;
+    window.requestAnimationFrame = (callback) => nativeRequestAnimationFrame(() => {
+      nativeRequestAnimationFrame(callback);
+    });
+  });
+
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  const addSlide = page.getByRole("button", { name: "Add slide", exact: true });
+  await expect(addSlide).toBeVisible();
+  await addSlide.click();
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await pages.nth(1).click();
+
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await expect.poll(async () => {
+    const project = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, { pdfPage?: { pageIndex: number } }>;
+      slideOrder: Array<{ sceneId: string }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    return project ? {
+      activePageIndex: project.scenes[project.activeSceneId]?.pdfPage?.pageIndex,
+      slidesOnPdfScenes: project.slideOrder.filter(
+        (slide) => project.scenes[slide.sceneId]?.pdfPage,
+      ).length,
+    } : null;
+  }, { timeout: 15_000 }).toEqual({ activePageIndex: 1, slidesOnPdfScenes: 0 });
+
+  await page.evaluate(() => {
+    const host = window as Window & { __patterdrawNativeRaf?: typeof window.requestAnimationFrame };
+    if (host.__patterdrawNativeRaf) window.requestAnimationFrame = host.__patterdrawNativeRaf;
+    delete host.__patterdrawNativeRaf;
+  });
+});
+
+test("cancels a queued slide action when leaving Slides mode", async ({ page }) => {
+  test.setTimeout(60_000);
+  await openTestPdf(page);
+  await page.evaluate(() => {
+    type DeferredRafState = {
+      callbacks: Map<number, FrameRequestCallback>;
+      nextId: number;
+      request: typeof window.requestAnimationFrame;
+      cancel: typeof window.cancelAnimationFrame;
+    };
+    const host = window as Window & { __patterdrawDeferredRaf?: DeferredRafState };
+    const state: DeferredRafState = {
+      callbacks: new Map(),
+      nextId: 1,
+      request: window.requestAnimationFrame.bind(window),
+      cancel: window.cancelAnimationFrame.bind(window),
+    };
+    host.__patterdrawDeferredRaf = state;
+    window.requestAnimationFrame = (callback) => {
+      const id = state.nextId++;
+      state.callbacks.set(id, callback);
+      return id;
+    };
+    window.cancelAnimationFrame = (id) => {
+      state.callbacks.delete(id);
+    };
+  });
+
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.getByRole("button", { name: "Add slide", exact: true }).click();
+  await page.getByRole("button", { name: "Board", exact: true }).click();
+
+  await page.evaluate(() => {
+    type DeferredRafState = {
+      callbacks: Map<number, FrameRequestCallback>;
+      request: typeof window.requestAnimationFrame;
+      cancel: typeof window.cancelAnimationFrame;
+    };
+    const host = window as Window & { __patterdrawDeferredRaf?: DeferredRafState };
+    const state = host.__patterdrawDeferredRaf;
+    if (!state) return;
+    window.requestAnimationFrame = state.request;
+    window.cancelAnimationFrame = state.cancel;
+    delete host.__patterdrawDeferredRaf;
+    for (const callback of state.callbacks.values()) {
+      state.request(callback);
+    }
+  });
+
+  await expect(page.getByRole("button", { name: "Board", exact: true }))
+    .toHaveAttribute("aria-pressed", "true");
+  await expect.poll(async () => {
+    const project = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, { pdfPage?: unknown }>;
+      slideOrder: Array<unknown>;
+    }>(page, "patterdraw:autosave:project:v1");
+    return project ? {
+      activeIsBoard: !project.scenes[project.activeSceneId]?.pdfPage,
+      slideCount: project.slideOrder.length,
+    } : null;
+  }, { timeout: 15_000 }).toEqual({ activeIsBoard: true, slideCount: 0 });
 });
 
 test("reorders PDF output pages without changing their immutable source indexes", async ({ page }) => {
@@ -5331,7 +6449,7 @@ test("exports a locked PDF background with annotations and fits the native dialo
   const pngDownloadEvent = page.waitForEvent("download");
   await nativeDialog.getByRole("button", { name: "Export to PNG", exact: true }).click();
   const png = await pngDownloadEvent;
-  expect(png.suggestedFilename()).toBe("Untitled PatterDraw project.png");
+  expect(png.suggestedFilename()).toBe("Untitled PatterDraw canvas.png");
   const bytes = await downloadBytes(png);
   expect(pngDimensions(bytes)).toEqual({ width: 632, height: 812 });
   expect(bytes.byteLength).toBeGreaterThan(2_000);

@@ -4,7 +4,7 @@ The implementation-ready expansion plan for classroom instruments, graphs, manip
 
 ## Phase 1 — standalone hardening
 
-- Board-first editor, toggleable slide rail, OpenBoard-style PDF page rail/reordering, local LaTeX equation insertion/editing, no-AI Mermaid insertion/editing, and embedded full-board PNG export are implemented.
+- Board-first editor, toggleable slide rail, ordered Presentation PDF and visual-snapshot PowerPoint export, OpenBoard-style PDF page rail/reordering, local LaTeX equation insertion/editing, no-AI Mermaid insertion/editing, and embedded full-board PNG export are implemented.
 - Complete automated browser smoke coverage for offline requests, LaTeX edit round trips, scene-embedded PNG reopening, local file round trips, touch/pen input, frame ordering, presentation keyboard behavior, and both PDF export modes.
 - Add fixture PDFs covering mixed sizes, rotations, non-zero crop boxes, scanned/vector pages, malformed files, and annotations beyond all four edges.
 - Add decoded-pixel and maximum-export-dimension limits plus cancellable PDF worker jobs.

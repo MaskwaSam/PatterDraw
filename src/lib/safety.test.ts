@@ -55,6 +55,51 @@ const pdfScene = (id: string, pageIndex: number): SerializedScene => ({
 });
 
 describe("student safety", () => {
+  it.each([
+    "Untitled classroom canvas",
+    "Untitled PatterDraw project",
+  ])("renames the legacy default title %s", (title) => {
+    const project = createBlankProject();
+    project.title = title;
+    delete project.titleMode;
+
+    expect(sanitizeProject(project)).toMatchObject({
+      title: "Untitled PatterDraw canvas",
+      titleMode: "default",
+    });
+  });
+
+  it("preserves user-chosen project titles while normalizing branding", () => {
+    const project = createBlankProject();
+    project.title = "My classroom canvas";
+    project.titleMode = "custom";
+
+    expect(sanitizeProject(project)).toMatchObject({
+      title: "My classroom canvas",
+      titleMode: "custom",
+    });
+  });
+
+  it("preserves a user-chosen title that matches a legacy default", () => {
+    const project = createBlankProject();
+    project.title = "Untitled classroom canvas";
+    project.titleMode = "custom";
+
+    expect(sanitizeProject(project)).toMatchObject({
+      title: "Untitled classroom canvas",
+      titleMode: "custom",
+    });
+  });
+
+  it("rejects malformed project titles before they reach filename generation", () => {
+    const project = createBlankProject();
+
+    expect(() => assertSafeProject({ ...project, title: null } as unknown as ClassroomProject))
+      .toThrow(/project title must be text/i);
+    expect(() => assertSafeProject({ ...project, titleMode: "legacy" } as unknown as ClassroomProject))
+      .toThrow(/project title mode/i);
+  });
+
   it("removes iframe, embeddable, and linked elements from imported scenes", () => {
     const safe = sanitizeScene(scene([
       { id: "shape", type: "rectangle", link: "https://example.com/lesson" },

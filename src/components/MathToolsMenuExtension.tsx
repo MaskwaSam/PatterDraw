@@ -64,7 +64,7 @@ export function MathToolsMenuExtension({ editorHost, onOpen, onPrepareLasso, onS
         }}
       >
         <div className="dropdown-menu-item__icon"><MathToolsIcon /></div>
-        <div className="dropdown-menu-item__text">Math tools</div>
+        <div className="dropdown-menu-item__text icon-label">Math tools</div>
       </button>
       {experimentalFeaturesEnabled ? (
         <button
@@ -85,7 +85,7 @@ export function MathToolsMenuExtension({ editorHost, onOpen, onPrepareLasso, onS
           }}
         >
           <div className="dropdown-menu-item__icon"><LassoIcon /></div>
-          <div className="dropdown-menu-item__text">Lasso selection</div>
+          <div className="dropdown-menu-item__text icon-label">Lasso selection</div>
         </button>
       ) : null}
     </>,

@@ -74,6 +74,7 @@ describe("full-board export dimensions", () => {
       exportBackground: true,
       exportEmbedScene: true,
       exportWithDarkMode: false,
+      viewBackgroundColor: "#ffffff",
       frameRendering: { clip: false },
     });
     expect(request?.getDimensions?.(20_000, 10_000)).toMatchObject({
@@ -90,5 +91,27 @@ describe("full-board export dimensions", () => {
     } as unknown as ExcalidrawImperativeAPI;
     await expect(exportFullBoardPng(api)).rejects.toThrow(/before exporting/);
     expect(exportToBlob).not.toHaveBeenCalled();
+  });
+
+  it("accepts a canonical source override for transient display-only files", async () => {
+    const liveElements = [{ id: "dark-pdf", type: "image", isDeleted: false }];
+    const lightElements = [{ id: "light-pdf", type: "image", isDeleted: false }];
+    const liveFiles = { dark: { id: "dark" } };
+    const lightFiles = { light: { id: "light" } };
+    const api = {
+      getSceneElements: () => liveElements,
+      getFiles: () => liveFiles,
+      getAppState: () => ({ frameRendering: {} }),
+    } as unknown as ExcalidrawImperativeAPI;
+    vi.mocked(exportToBlob).mockResolvedValueOnce(new Blob(["png"], { type: "image/png" }));
+
+    await exportFullBoardPng(api, {
+      elements: lightElements as never,
+      files: lightFiles as never,
+    });
+
+    const request = vi.mocked(exportToBlob).mock.calls.at(-1)?.[0];
+    expect(request?.elements).toEqual(lightElements);
+    expect(request?.files).toBe(lightFiles);
   });
 });

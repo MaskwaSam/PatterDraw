@@ -1,5 +1,5 @@
 import { exportToBlob } from "@excalidraw/excalidraw";
-import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
+import type { BinaryFiles, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type {
   ExcalidrawElement,
   NonDeletedExcalidrawElement,
@@ -12,6 +12,11 @@ const PREFERRED_EXPORT_SCALE = 2;
 export interface FullBoardExport {
   blob: Blob;
   scale: number;
+}
+
+export interface FullBoardExportSource {
+  elements?: readonly ExcalidrawElement[];
+  files?: BinaryFiles;
 }
 
 export function getBoardExportDimensions(width: number, height: number): {
@@ -45,15 +50,16 @@ function isExportableElement(
 
 export async function exportFullBoardPng(
   api: ExcalidrawImperativeAPI,
+  source: FullBoardExportSource = {},
 ): Promise<FullBoardExport> {
-  const elements = api.getSceneElements().filter(isExportableElement);
+  const elements = (source.elements || api.getSceneElements()).filter(isExportableElement);
   if (!elements.length) throw new Error("Add something to the board before exporting it.");
 
   const appState = api.getAppState();
   let actualScale = 1;
   const blob = await exportToBlob({
     elements,
-    files: api.getFiles(),
+    files: source.files || api.getFiles(),
     mimeType: "image/png",
     exportPadding: 32,
     appState: {
@@ -61,6 +67,7 @@ export async function exportFullBoardPng(
       exportBackground: true,
       exportEmbedScene: true,
       exportWithDarkMode: false,
+      viewBackgroundColor: "#ffffff",
       frameRendering: {
         ...appState.frameRendering,
         clip: false,

@@ -116,6 +116,23 @@ describe("PDF background invariants", () => {
     expect(repaired[1]).toBe(annotation);
   });
 
+  it("allows a display-only file while retaining every background invariant", () => {
+    const scene = pdfScene();
+    const displayed = canonicalizePdfBackground(scene, scene.elements, "dark-page-image");
+
+    expect(displayed[0]).toMatchObject({
+      id: "background",
+      fileId: "dark-page-image",
+      locked: true,
+      x: 0,
+      y: 0,
+      width: 600,
+      height: 800,
+    });
+    expect(canonicalizePdfBackground(scene, displayed, "dark-page-image")).toBe(displayed);
+    expect(canonicalizePdfBackground(scene, displayed)[0].fileId).toBe("page-image");
+  });
+
   it("removes extra background metadata once and remains idempotent", () => {
     const scene = pdfScene();
     scene.elements = [{

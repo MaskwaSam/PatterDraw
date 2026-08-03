@@ -16,6 +16,18 @@ export const OpenIcon = (props: IconProps) => (
 export const SaveIcon = (props: IconProps) => (
   <IconBase {...props}><path d="M5 3.5h12l2 2V20H5z"/><path d="M8 3.5v6h8v-6M8 20v-7h8v7"/></IconBase>
 );
+export const SettingsIcon = (props: IconProps) => (
+  <IconBase {...props}>
+    <circle cx="12" cy="12" r="3" />
+    <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5v.1a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9L4.2 7A2 2 0 1 1 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.1a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
+  </IconBase>
+);
+export const SearchIcon = (props: IconProps) => (
+  <IconBase {...props}><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></IconBase>
+);
+export const SizePositionIcon = (props: IconProps) => (
+  <IconBase {...props}><rect x="7" y="7" width="10" height="10" rx="1"/><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></IconBase>
+);
 export const LibraryIcon = (props: IconProps) => (
   <IconBase {...props}>
     <g strokeWidth="1.25">

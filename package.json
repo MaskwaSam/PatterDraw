@@ -28,6 +28,7 @@
     "pdf-lib": "1.17.1",
     "pdfjs-dist": "6.1.200",
     "points-on-curve": "1.0.1",
+    "pptxgenjs": "4.0.1",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },
@@ -50,6 +51,7 @@
     "@excalidraw/mermaid-to-excalidraw": {
       "nanoid": "5.0.9"
     },
-    "lodash-es": "4.18.1"
+    "lodash-es": "4.18.1",
+    "postcss": "8.5.25"
   }
 }
