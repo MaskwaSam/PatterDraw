@@ -23,6 +23,12 @@ let mutationQueue: Promise<void> = Promise.resolve();
 type MutationOperation = (hasCrossContextLock: boolean) => Promise<void>;
 interface SaveAutosaveOptions {
   prepared?: boolean;
+  /**
+   * Rewrite every referenced PDF blob as part of this save. Recovery and
+   * project-replacement saves use this to repair a blob whose manifest still
+   * happens to carry the same byte length and hash.
+   */
+  replacePdfBlobs?: boolean;
 }
 
 export function getStaleAutosaveKeys(
@@ -44,7 +50,12 @@ export function getAutosaveWriteEntries(
   pdfBytes: Record<PdfDocumentId, Uint8Array>,
   storedProject: ClassroomProject | undefined,
   storedKeys: readonly IDBValidKey[],
+  replacePdfBlobs = false,
 ): [string, ClassroomProject | Uint8Array][] {
+  // Ordinary saves trust the manifest identity so large immutable PDF blobs
+  // are not read or rewritten. A deliberate replacement save cannot make
+  // that assumption: the stored blob may be corrupt while its manifest still
+  // has matching metadata, so it must be included in the atomic write.
   const entries: [string, ClassroomProject | Uint8Array][] = [
     [PROJECT_KEY, verifiedProject],
   ];
@@ -57,7 +68,8 @@ export function getAutosaveWriteEntries(
     const key = `${PDF_KEY_PREFIX}${id}`;
     const storedSource = storedProject?.pdfDocuments?.[id];
     if (
-      !existingKeySet.has(key)
+      replacePdfBlobs
+      || !existingKeySet.has(key)
       || storedSource?.byteLength !== source.byteLength
       || storedSource?.sha256 !== source.sha256
     ) {
@@ -72,6 +84,7 @@ export function commitAutosaveTransaction(
   verifiedProject: ClassroomProject,
   pdfBytes: Record<PdfDocumentId, Uint8Array>,
   referencedPdfKeys: ReadonlySet<string>,
+  replacePdfBlobs = false,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const transaction = store.transaction;
@@ -101,6 +114,7 @@ export function commitAutosaveTransaction(
           pdfBytes,
           storedProject,
           storedKeys,
+          replacePdfBlobs,
         )) {
           store.put(value, key);
         }
@@ -392,6 +406,7 @@ async function setManyAndDeleteStaleAtomically(
   verifiedProject: ClassroomProject,
   pdfBytes: Record<PdfDocumentId, Uint8Array>,
   referencedPdfKeys: ReadonlySet<string>,
+  replacePdfBlobs = false,
 ): Promise<void> {
   // Unit environments can replace createStore with an unavailable test
   // double. Production browsers always use this single readwrite transaction,
@@ -402,6 +417,7 @@ async function setManyAndDeleteStaleAtomically(
       pdfBytes,
       undefined,
       [],
+      replacePdfBlobs,
     ));
     return;
   }
@@ -412,6 +428,7 @@ async function setManyAndDeleteStaleAtomically(
       verifiedProject,
       pdfBytes,
       referencedPdfKeys,
+      replacePdfBlobs,
     ),
   );
 }
@@ -483,6 +500,7 @@ export async function saveAutosave(
         verifiedProject,
         pdfBytes,
         referencedKeys,
+        options.replacePdfBlobs,
       );
       return;
     }
@@ -496,6 +514,7 @@ export async function saveAutosave(
       pdfBytes,
       storedProject,
       existingKeys,
+      options.replacePdfBlobs,
     ));
 
     const staleKeys = getStaleAutosaveKeys(existingKeys, referencedKeys);

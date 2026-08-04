@@ -195,6 +195,32 @@ describe("PatterDraw autosave persistence", () => {
     ]);
   });
 
+  it("rewrites matching PDF bytes when a replacement save is requested", () => {
+    const project = createBlankProject();
+    const pdfBytes = new Uint8Array([1, 2, 3, 4]);
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "worksheet.pdf",
+      mimeType: "application/pdf",
+      byteLength: pdfBytes.byteLength,
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+      sha256: PDF_SHA256,
+    };
+    const storedProject = structuredClone(project);
+
+    expect(getAutosaveWriteEntries(
+      project,
+      { pdf: pdfBytes },
+      storedProject,
+      ["patterdraw:autosave:pdf:v1:pdf"],
+      true,
+    )).toEqual([
+      ["patterdraw:autosave:project:v1", project],
+      ["patterdraw:autosave:pdf:v1:pdf", pdfBytes],
+    ]);
+  });
+
   it("includes changed or missing PDF bytes in an atomic autosave transaction", () => {
     const project = createBlankProject();
     const pdfBytes = new Uint8Array([1, 2, 3, 4]);
@@ -266,6 +292,41 @@ describe("PatterDraw autosave persistence", () => {
     expect(transaction.committed.get(pdfKey)).toBe(pdfBytes);
     expect(transaction.committed.get(staleKey)).toBeUndefined();
     expect(transaction.committed.get(unrelatedKey)).toBe("keep");
+    expect(transaction.transaction.abort).not.toHaveBeenCalled();
+  });
+
+  it("atomically rewrites a matching PDF during a no-lock replacement save", async () => {
+    const project = createBlankProject();
+    const pdfBytes = new Uint8Array([1, 2, 3, 4]);
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "worksheet.pdf",
+      mimeType: "application/pdf",
+      byteLength: pdfBytes.byteLength,
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+      sha256: PDF_SHA256,
+    };
+    const pdfKey = "patterdraw:autosave:pdf:v1:pdf";
+    const corruptBytes = new Uint8Array([4, 3, 2, 1]);
+    const transaction = fakeTransactionStore([
+      ["patterdraw:autosave:project:v1", structuredClone(project)],
+      [pdfKey, corruptBytes],
+    ]);
+
+    await commitAutosaveTransaction(
+      transaction.store,
+      project,
+      { pdf: pdfBytes },
+      new Set([pdfKey]),
+      true,
+    );
+
+    expect(transaction.puts).toEqual([
+      "patterdraw:autosave:project:v1",
+      pdfKey,
+    ]);
+    expect(transaction.committed.get(pdfKey)).toBe(pdfBytes);
     expect(transaction.transaction.abort).not.toHaveBeenCalled();
   });
 
@@ -480,6 +541,64 @@ describe("PatterDraw autosave persistence", () => {
     expect(getMock).toHaveBeenCalledTimes(1);
     expect(getMock).toHaveBeenCalledWith("patterdraw:autosave:project:v1");
     expect(getMock).not.toHaveBeenCalledWith("patterdraw:autosave:pdf:v1:pdf");
+  });
+
+  it("repairs a corrupt same-length PDF during a browser-wide replacement save", async () => {
+    const project = createBlankProject();
+    const replacementPdfBytes = new Uint8Array([1, 2, 3, 4]);
+    const corruptPdfBytes = new Uint8Array([4, 3, 2, 1]);
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "worksheet.pdf",
+      mimeType: "application/pdf",
+      byteLength: replacementPdfBytes.byteLength,
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+    };
+    const storedProject = structuredClone(project);
+    storedProject.pdfDocuments.pdf.sha256 = PDF_SHA256;
+    const store = new Map<string, ClassroomProject | Uint8Array>([
+      ["patterdraw:autosave:project:v1", storedProject],
+      ["patterdraw:autosave:pdf:v1:pdf", corruptPdfBytes],
+    ]);
+    getMock.mockImplementation(async (key: string) => store.get(key));
+    keysMock.mockImplementation(async () => [...store.keys()]);
+    setManyMock.mockImplementation(async (
+      entries: [string, ClassroomProject | Uint8Array][],
+    ) => {
+      for (const [key, value] of entries) store.set(key, value);
+    });
+    const request = vi.fn(async (_name: string, operation: () => Promise<unknown>) => operation());
+    const originalLocks = navigator.locks;
+    Object.defineProperty(navigator, "locks", {
+      configurable: true,
+      value: { request },
+    });
+
+    try {
+      await saveAutosave(
+        project,
+        { pdf: replacementPdfBytes },
+        { replacePdfBlobs: true },
+      );
+      await expect(loadAutosave()).resolves.toMatchObject({
+        project: { id: project.id },
+        pdfBytes: { pdf: replacementPdfBytes },
+      });
+    } finally {
+      Object.defineProperty(navigator, "locks", {
+        configurable: true,
+        value: originalLocks,
+      });
+    }
+
+    expect(store.get("patterdraw:autosave:pdf:v1:pdf")).toBe(replacementPdfBytes);
+    expect(setManyMock).toHaveBeenNthCalledWith(1, [
+      ["patterdraw:autosave:project:v1", expect.objectContaining({
+        pdfDocuments: { pdf: expect.objectContaining({ sha256: PDF_SHA256 }) },
+      })],
+      ["patterdraw:autosave:pdf:v1:pdf", replacementPdfBytes],
+    ]);
   });
 
   it("rewrites same-length PDF bytes when their content differs", async () => {

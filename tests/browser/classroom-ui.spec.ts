@@ -473,6 +473,14 @@ function pngDimensions(bytes: Buffer): { width: number; height: number } {
   };
 }
 
+function solidPngDataUrl(colour: string): string {
+  const canvas = createCanvas(12, 12);
+  const context = canvas.getContext("2d");
+  context.fillStyle = colour;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/png");
+}
+
 function exportTestRectangle(
   id: string,
   x: number,
@@ -585,6 +593,7 @@ async function openClassroomFixture(
   slideOrder: Array<{ id: string; frameId: string; title: string; titleMode?: "automatic" | "custom" }>,
   fileName = "detached-slides.patterdraw",
   whileOpening?: () => Promise<void>,
+  files: Record<string, Record<string, unknown>> = {},
 ) {
   const sceneId = "scene";
   const project = {
@@ -600,7 +609,7 @@ async function openClassroomFixture(
         name: "Board",
         elements,
         appState: { scrollX: 0, scrollY: 0, zoom: { value: 1 }, viewBackgroundColor: "#ffffff" },
-        files: {},
+        files,
       },
     },
     slideOrder: slideOrder.map((slide) => ({ ...slide, sceneId })),
@@ -678,6 +687,29 @@ async function scenePointInViewport(
     x: (point.x + (appState.scrollX || 0)) * zoom + (appState.offsetLeft ?? editor.x),
     y: (point.y + (appState.scrollY || 0)) * zoom + (appState.offsetTop ?? editor.y),
   };
+}
+
+async function liveScenePointInViewport(
+  page: import("@playwright/test").Page,
+  point: { x: number; y: number },
+): Promise<{ x: number; y: number }> {
+  return page.evaluate((scenePoint) => {
+    const appState = (window as unknown as {
+      h?: { app?: { state?: {
+        offsetLeft?: number;
+        offsetTop?: number;
+        scrollX?: number;
+        scrollY?: number;
+        zoom?: { value?: number };
+      } } };
+    }).h?.app?.state;
+    if (!appState) throw new Error("Live Excalidraw app state is unavailable.");
+    const zoom = appState.zoom?.value || 1;
+    return {
+      x: (scenePoint.x + (appState.scrollX || 0)) * zoom + (appState.offsetLeft || 0),
+      y: (scenePoint.y + (appState.scrollY || 0)) * zoom + (appState.offsetTop || 0),
+    };
+  }, point);
 }
 
 type StoredLibraryItem = {
@@ -1948,6 +1980,21 @@ test("applies pen-only, grid, and object-snapping preferences to the live editor
   await expect(penOnly).toBeChecked();
   await expect(showGrid).not.toBeChecked();
   await expect(snapToObjects).toBeChecked();
+  await dialog.getByRole("button", { name: "Restore defaults", exact: true }).click();
+  await dialog.getByRole("combobox", { name: "Theme", exact: true }).selectOption("dark");
+  await expect(penOnly).not.toBeChecked();
+  await expect(showGrid).not.toBeChecked();
+  await expect(snapToObjects).not.toBeChecked();
+  await expect.poll(() => page.evaluate(() => {
+    const stored = JSON.parse(
+      localStorage.getItem("patterdraw:feature-preferences:v1") || "null",
+    ) as { penOnly?: boolean; showGrid?: boolean; snapToObjects?: boolean } | null;
+    return stored && {
+      penOnly: stored.penOnly,
+      showGrid: stored.showGrid,
+      snapToObjects: stored.snapToObjects,
+    };
+  })).toEqual({ penOnly: false, showGrid: false, snapToObjects: false });
 });
 
 test("edits exact geometry through the optional Size & Position inspector", async ({ page }) => {
@@ -2028,6 +2075,8 @@ test("finds and activates text across Board, Slides, and PDF pages", async ({ pa
       : false;
   }).toBe(true);
 
+  // Excalidraw uses non-modal role=dialog surfaces for the selected-text
+  // property controls. Those must not suppress PatterDraw's project search.
   await page.keyboard.press("ControlOrMeta+f");
   const query = page.getByRole("searchbox", { name: "Find text across project", exact: true });
   await expect(query).toBeVisible();
@@ -2060,6 +2109,65 @@ test("finds and activates text across Board, Slides, and PDF pages", async ({ pa
   await expect(query).toBeFocused();
 });
 
+test("does not open Project Find behind an active math interaction", async ({ page }) => {
+  await page.getByRole("button", { name: "Insert", exact: true }).click();
+  const insertMenu = page.locator('.topbar-menu-popover[role="menu"]');
+  await expect(insertMenu).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+f");
+  await expect(insertMenu).toBeVisible();
+  await expect(page.getByRole("searchbox", {
+    name: "Find text across project",
+    exact: true,
+  })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(insertMenu).toHaveCount(0);
+
+  const extraToolsTrigger = page.locator(".App-toolbar__extra-tools-trigger");
+  await extraToolsTrigger.click();
+  const extraToolsMenu = page.locator(".App-toolbar__extra-tools-dropdown");
+  await expect(extraToolsMenu).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+f");
+  await expect(extraToolsMenu).toBeVisible();
+  await expect(page.getByRole("searchbox", {
+    name: "Find text across project",
+    exact: true,
+  })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(extraToolsMenu).toHaveCount(0);
+
+  await page.locator(".editor-host").click({
+    button: "right",
+    position: { x: 500, y: 350 },
+  });
+  const contextMenu = page.locator(".editor-host .excalidraw .context-menu");
+  await expect(contextMenu).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+f");
+  await expect(contextMenu).toBeVisible();
+  await expect(page.getByRole("searchbox", {
+    name: "Find text across project",
+    exact: true,
+  })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(contextMenu).toHaveCount(0);
+
+  await page.locator(".App-toolbar__extra-tools-trigger").click();
+  await page.getByTestId("toolbar-math-tools").click();
+  await enableExperimentalMathTools(page);
+  await page.getByTestId("math-tool-compass").click();
+  const compass = page.getByRole("dialog", { name: "Compass construction", exact: true });
+  await expect(compass).toBeVisible();
+
+  await page.keyboard.press("ControlOrMeta+f");
+
+  await expect(compass).toBeVisible();
+  await expect(page.getByRole("searchbox", {
+    name: "Find text across project",
+    exact: true,
+  })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(compass).toBeHidden();
+});
+
 test("switches between light, dark, and live system themes", async ({ page }) => {
   const settings = page.getByRole("button", { name: "Settings", exact: true });
   await settings.click();
@@ -2071,6 +2179,30 @@ test("switches between light, dark, and live system themes", async ({ page }) =>
   expect(await page.evaluate(() => localStorage.getItem("patterdraw:theme-preference:v1"))).toBe("dark");
 
   await page.keyboard.press("Escape");
+  await page.locator(".App-toolbar__extra-tools-trigger").click();
+  await page.getByTestId("toolbar-math-tools").click();
+  const mathToolsDialog = page.getByRole("dialog", { name: "Math tools", exact: true });
+  const mathToolCard = mathToolsDialog.locator(".math-tool-card").nth(1);
+  await expect(mathToolsDialog).toBeVisible();
+  await expect(mathToolCard).toHaveCSS("background-color", "rgb(32, 43, 62)");
+  await expect(mathToolCard).toHaveCSS("color", "rgb(224, 232, 245)");
+  await expect(mathToolsDialog.locator(".math-tools-experimental-toggle"))
+    .toHaveCSS("background-color", "rgb(32, 43, 62)");
+  await mathToolsDialog.getByRole("switch", { name: "Experimental features", exact: true }).check();
+  const inactiveMathTab = mathToolsDialog.getByRole("tab", { name: "Graphs", exact: true });
+  await expect(inactiveMathTab).toHaveCSS("color", "rgb(192, 203, 219)");
+  await inactiveMathTab.click();
+  await mathToolsDialog.getByRole("button", { name: /Cartesian plane/ }).click();
+  const xMinimum = mathToolsDialog.getByLabel("x minimum", { exact: true });
+  await expect(xMinimum).toHaveCSS("background-color", "rgb(17, 26, 40)");
+  await expect(xMinimum).toHaveCSS("color", "rgb(231, 237, 247)");
+  await expect(xMinimum.locator("xpath=..")).toHaveCSS("color", "rgb(192, 203, 219)");
+  await expect(mathToolsDialog.locator(".math-tool-config-preview"))
+    .toHaveCSS("background-color", "rgb(17, 26, 40)");
+  await xMinimum.fill("20");
+  await expect(mathToolsDialog.getByRole("alert")).toHaveCSS("color", "rgb(255, 180, 180)");
+  await mathToolsDialog.getByRole("button", { name: "Close math tools", exact: true }).click();
+
   const insert = page.getByRole("button", { name: "Insert", exact: true });
   await insert.click();
   await page.getByRole("menuitem", { name: /Equation/ }).click();
@@ -2082,6 +2214,8 @@ test("switches between light, dark, and live system themes", async ({ page }) =>
   const equationSource = equationDialog.getByLabel("LaTeX", { exact: true });
   await expect(equationSource).toHaveCSS("background-color", "rgb(13, 21, 33)");
   await expect(equationSource).toHaveCSS("color", "rgb(231, 237, 247)");
+  await expect(equationDialog.locator(".dialog-primary"))
+    .toHaveCSS("background-color", "rgb(40, 89, 197)");
   await page.keyboard.press("Escape");
 
   await insert.click();
@@ -2186,6 +2320,31 @@ test("darkens PDF content while preserving embedded picture colours and canonica
   await expect.poll(() => unvisitedThumbnail.getAttribute("src"), { timeout: 30_000 })
     .not.toBe(lightUnvisitedThumbnail);
   await expect(unvisitedThumbnail).toHaveClass(/pdf-page-dark-thumbnail/);
+  await expect(page.locator(".pdf-output-position").first()).toHaveCSS("color", "rgb(192, 203, 219)");
+  await expect(page.locator(".pdf-page-label").first()).toHaveCSS("color", "rgb(192, 203, 219)");
+  await expect(page.locator(".pdf-page-actions button").first()).toHaveCSS("color", "rgb(185, 197, 215)");
+  await expect(page.getByRole("button", { name: "Add page", exact: true }))
+    .toHaveCSS("background-color", "rgb(40, 89, 197)");
+  await expect(page.getByRole("button", { name: "Add page", exact: true }))
+    .toHaveCSS("color", "rgb(255, 255, 255)");
+  await page.getByRole("button", { name: "Hide PDF pages", exact: true }).click();
+  const showPdfPages = page.getByRole("button", { name: "Show PDF pages", exact: true });
+  await expect(showPdfPages).toHaveCSS("background-color", "rgb(32, 43, 62)");
+  await expect(showPdfPages).toHaveCSS("color", "rgb(231, 237, 247)");
+  await showPdfPages.hover();
+  await expect(showPdfPages).toHaveCSS("background-color", "rgb(42, 56, 80)");
+  await expect(showPdfPages).toHaveCSS("color", "rgb(238, 243, 250)");
+  await showPdfPages.click();
+  await expect(page.locator("#pdf-page-rail")).toBeVisible();
+  const darkThumbnailDimensions = async () => thumbnails.evaluateAll((images) => images.map((node) => {
+    const image = node as HTMLImageElement;
+    return { height: image.naturalHeight, width: image.naturalWidth };
+  }));
+  await expect.poll(async () => {
+    const dimensions = await darkThumbnailDimensions();
+    return dimensions.length === 2
+      && dimensions.every(({ height, width }) => Math.max(height, width) <= 256);
+  }, { timeout: 30_000 }).toBe(true);
 
   await expect.poll(async () => {
     const samples = await renderedPdfDisplaySamples(page);
@@ -2206,6 +2365,39 @@ test("darkens PDF content while preserving embedded picture colours and canonica
   expect(darkSamples?.pictureTransparentVector.every((channel) => channel > 205)).toBe(true);
   expect(darkSamples?.pictureVectorOverlay.every((channel) => channel > 205)).toBe(true);
   await expect.poll(storedPdfRaster, { timeout: 15_000 }).toEqual(lightStored);
+
+  await page.getByRole("button", { name: /Open output page 2:/ }).click();
+  await expect(page.locator("#pdf-page-rail .pdf-page-item").nth(1)).toHaveClass(/is-selected/);
+  await expect.poll(async () => {
+    const samples = await renderedPdfDisplaySamples(page);
+    return samples?.background.every((channel) => channel < 45)
+      && samples.vector.every((channel) => channel > 205);
+  }, { timeout: 30_000 }).toBe(true);
+  await expect.poll(async () => {
+    const dimensions = await darkThumbnailDimensions();
+    return dimensions.length === 2
+      && dimensions.every(({ height, width }) => Math.max(height, width) <= 256);
+  }, { timeout: 30_000 }).toBe(true);
+  const readTransientDarkFiles = () => page.evaluate(() => {
+    const app = (window as unknown as {
+      h?: { app?: { files?: Record<string, unknown>; imageCache?: Map<string, unknown> } };
+    }).h?.app;
+    const fileIds = Object.keys(app?.files || {}).filter((id) => id.startsWith("patterdraw-dark-pdf"));
+    const cachedIds = [...(app?.imageCache?.keys() || [])]
+      .filter((id) => id.startsWith("patterdraw-dark-pdf"));
+    return { cachedIds, fileIds };
+  });
+  await expect.poll(async () => {
+    const value = await readTransientDarkFiles();
+    return {
+      cachedCount: value.cachedIds.length,
+      fileCount: value.fileIds.length,
+      sameId: value.cachedIds[0] === value.fileIds[0],
+    };
+  }).toEqual({ cachedCount: 1, fileCount: 1, sameId: true });
+  const transientDarkFiles = await readTransientDarkFiles();
+  expect(transientDarkFiles.cachedIds).toEqual(transientDarkFiles.fileIds);
+  expect(transientDarkFiles.fileIds[0]).toMatch(/^patterdraw-dark-pdf-[0-9a-f-]{36}$/);
 
   await page.getByRole("button", { name: "More export options", exact: true }).click();
   await page.getByRole("dialog", { name: "More exports", exact: true })
@@ -2293,6 +2485,48 @@ test("merges and synchronizes feature preferences across open tabs", async ({ pa
     await expect.poll(() => secondPage.evaluate(() => JSON.parse(
       localStorage.getItem("patterdraw:feature-preferences:v1") || "null",
     ))).toEqual(expected);
+
+    const firstDialog = page.getByRole("dialog", { name: "Settings", exact: true });
+    const secondDialog = secondPage.getByRole("dialog", { name: "Settings", exact: true });
+    const gridPreference = firstDialog.getByRole("switch", { name: "Show grid", exact: true });
+    const snapPreference = secondDialog.getByRole("switch", { name: "Snap to objects", exact: true });
+    await Promise.all([
+      gridPreference.click(),
+      snapPreference.click(),
+    ]);
+    const readSnappingState = (target: import("@playwright/test").Page) => target.evaluate(() => {
+      const aggregate = JSON.parse(
+        localStorage.getItem("patterdraw:feature-preferences:v1") || "null",
+      ) as { showGrid?: boolean; snapToObjects?: boolean } | null;
+      return {
+        aggregate,
+        grid: localStorage.getItem("patterdraw:feature-preference:v1:showGrid"),
+        snap: localStorage.getItem("patterdraw:feature-preference:v1:snapToObjects"),
+      };
+    });
+    await expect.poll(async () => {
+      const [first, second] = await Promise.all([
+        readSnappingState(page),
+        readSnappingState(secondPage),
+      ]);
+      const firstExclusive = first.aggregate
+        && first.aggregate.showGrid !== first.aggregate.snapToObjects
+        && first.grid === String(first.aggregate.showGrid)
+        && first.snap === String(first.aggregate.snapToObjects);
+      return firstExclusive && JSON.stringify(first) === JSON.stringify(second);
+    }).toBe(true);
+    const snapping = await readSnappingState(page);
+    await expect.poll(async () => ({
+      firstGrid: await gridPreference.isChecked(),
+      firstSnap: await firstDialog.getByRole("switch", { name: "Snap to objects", exact: true }).isChecked(),
+      secondGrid: await secondDialog.getByRole("switch", { name: "Show grid", exact: true }).isChecked(),
+      secondSnap: await snapPreference.isChecked(),
+    })).toEqual({
+      firstGrid: snapping.aggregate?.showGrid,
+      firstSnap: snapping.aggregate?.snapToObjects,
+      secondGrid: snapping.aggregate?.showGrid,
+      secondSnap: snapping.aggregate?.snapToObjects,
+    });
   } finally {
     await secondPage.close();
   }
@@ -2336,6 +2570,67 @@ test("hydrates changed content when a replacement reuses project and scene IDs",
     containsReplacement: true,
     liveRectangles: 2,
   });
+});
+
+test("replaces live image bytes when a project reuses its scene and file IDs", async ({ page }) => {
+  const fileId = "same-id-image-file";
+  const image = {
+    ...exportTestRectangle("same-id-image", 180, 150, 260, 180, "a0"),
+    type: "image",
+    fileId,
+    status: "saved",
+    scale: [1, 1],
+  };
+  const redDataURL = solidPngDataUrl("#ff0000");
+  const blueDataURL = solidPngDataUrl("#0000ff");
+  const importColour = (dataURL: string, name: string) => openClassroomFixture(
+    page,
+    [image],
+    [],
+    name,
+    undefined,
+    {
+      [fileId]: {
+        id: fileId,
+        mimeType: "image/png",
+        dataURL,
+        created: 1,
+      },
+    },
+  );
+  const visibleColourPixels = async () => {
+    const screenshot = await page.locator(".editor-host").screenshot();
+    const rendered = await loadImage(screenshot);
+    const canvas = createCanvas(rendered.width, rendered.height);
+    const context = canvas.getContext("2d");
+    context.drawImage(rendered, 0, 0);
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let red = 0;
+    let blue = 0;
+    for (let offset = 0; offset < pixels.length; offset += 4) {
+      if (pixels[offset] > 220 && pixels[offset + 1] < 35 && pixels[offset + 2] < 35) red += 1;
+      if (pixels[offset] < 35 && pixels[offset + 1] < 35 && pixels[offset + 2] > 220) blue += 1;
+    }
+    return { red, blue };
+  };
+
+  await importColour(redDataURL, "same-id-red.patterdraw");
+  await expect.poll(async () => (await visibleColourPixels()).red, {
+    timeout: 15_000,
+  }).toBeGreaterThan(5_000);
+
+  await importColour(blueDataURL, "same-id-blue.patterdraw");
+  await expect.poll(async () => {
+    const colours = await visibleColourPixels();
+    return colours.blue > 5_000 && colours.red < 500;
+  }, { timeout: 15_000 }).toBe(true);
+  await expect.poll(async () => {
+    const saved = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, { files: Record<string, { dataURL?: string }> }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    return saved?.scenes[saved.activeSceneId]?.files[fileId]?.dataURL;
+  }).toBe(blueDataURL);
 });
 
 test("flushes ordinary project-title typing without the trailing autosave delay", async ({ page }) => {
@@ -2653,6 +2948,12 @@ test("keeps a newly opened project ahead of an older slow autosave", async ({ pa
       await expect(page.locator(".busy-overlay")).toContainText(
         "Saving replacement-after-slow-save.patterdraw locally",
       );
+      await page.keyboard.press("ControlOrMeta+f");
+      await expect(page.locator(".busy-overlay")).toBeVisible();
+      await expect(page.getByRole("searchbox", {
+        name: "Find text across project",
+        exact: true,
+      })).toHaveCount(0);
       await page.evaluate(() => (
         window as Window & {
           __openAutosaveRace?: { release: () => void };
@@ -2850,6 +3151,53 @@ test("rejects imported relative image sources without issuing a request", async 
   }).toBe(false);
   await page.waitForTimeout(250);
   expect(probeRequests).toEqual([]);
+});
+
+test("preserves a legitimate image that uses the former dark-preview file ID", async ({ page }) => {
+  const legacyFileId = "patterdraw-dark-pdf-active-v1";
+  const image = {
+    ...exportTestRectangle("legacy-dark-id-image", 100, 100, 80, 80, "a0"),
+    type: "image",
+    fileId: legacyFileId,
+    status: "saved",
+    scale: [1, 1],
+  };
+  const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl8sAAAAASUVORK5CYII=";
+
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "legacy-dark-preview-id.excalidraw",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({
+      type: "excalidraw",
+      version: 2,
+      source: "local",
+      elements: [image],
+      appState: {},
+      files: {
+        [legacyFileId]: {
+          id: legacyFileId,
+          mimeType: "image/png",
+          dataURL,
+          created: 1,
+        },
+      },
+    })),
+  });
+
+  await expect.poll(async () => {
+    const autosave = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, {
+        elements: Array<{ fileId?: string; id?: string }>;
+        files: Record<string, { dataURL?: string }>;
+      }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    const scene = autosave?.scenes[autosave.activeSceneId];
+    return {
+      elementFileId: scene?.elements.find((element) => element.id === image.id)?.fileId,
+      storedDataURL: scene?.files[legacyFileId]?.dataURL,
+    };
+  }).toEqual({ elementFileId: legacyFileId, storedDataURL: dataURL });
 });
 
 test("imports and exports standard Excalidraw libraries without online controls", async ({ page }) => {
@@ -3104,6 +3452,12 @@ test("captures areas to the clipboard and persists Screenshot Library actions", 
   await panel.getByRole("button", { name: "Capture area", exact: true }).click();
   await expect(page.getByTestId("screenshot-capture-overlay")).toBeVisible();
   await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  await page.keyboard.press("ControlOrMeta+f");
+  await expect(page.getByTestId("screenshot-capture-overlay")).toBeVisible();
+  await expect(page.getByRole("searchbox", {
+    name: "Find text across project",
+    exact: true,
+  })).toHaveCount(0);
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("screenshot-capture-overlay")).toBeHidden();
   await trigger.click();
@@ -3680,6 +4034,12 @@ test("cancels Draw slide when leaving Slides mode", async ({ page }) => {
   await page.getByRole("button", { name: "Slides", exact: true }).click();
   await page.getByRole("button", { name: "Draw slide", exact: true }).click();
   await expect(page.getByTestId("slide-frame-draw-overlay")).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+f");
+  await expect(page.getByTestId("slide-frame-draw-overlay")).toBeVisible();
+  await expect(page.getByRole("searchbox", {
+    name: "Find text across project",
+    exact: true,
+  })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Board", exact: true }).click();
   await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
@@ -4105,6 +4465,72 @@ test("rail deletion removes a grouped slide boundary but preserves and ungroups 
       slideExists: Boolean(state.slide),
     };
   }).toEqual({ contentDeleted: false, contentFrameId: null, contentGroups: [], slideExists: false });
+});
+
+test("commits a pending keyboard edit before deleting its slide boundary", async ({ page }) => {
+  const slide = classroomTestFrame("pending-slide", "Pending slide", 100, 100, 500, 300, "a1", true);
+  const content = exportTestRectangle("pending-content", 250, 200, 100, 70, "a0");
+  await openClassroomFixture(page, [content, slide], [
+    { id: "pending-slide-record", frameId: slide.id, title: "Pending slide" },
+  ]);
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.locator(".slide-thumbnail").click();
+  // focusSlide animates the viewport. Recalculate from the live editor state
+  // until the intended shape is selected instead of relying on stale IDB
+  // appState while the animation is still moving.
+  await expect(async () => {
+    const contentPoint = await liveScenePointInViewport(page, {
+      x: content.x + content.width / 2,
+      y: content.y + content.height / 2,
+    });
+    await page.mouse.click(contentPoint.x, contentPoint.y);
+    expect(await page.evaluate((elementId) => {
+      const app = (window as unknown as {
+        h?: {
+          app?: {
+            state?: { selectedElementIds?: Record<string, boolean> };
+          };
+        };
+      }).h?.app;
+      return Boolean(app?.state?.selectedElementIds?.[elementId]);
+    }, content.id)).toBe(true);
+  }).toPass({ timeout: 5_000 });
+  await page.evaluate(() => {
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    window.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]) => (
+      nativeSetTimeout(handler, delay === 150 ? 5_000 : delay, ...args)
+    )) as typeof window.setTimeout;
+  });
+
+  await page.keyboard.down("ArrowRight");
+  await expect.poll(() => page.evaluate((elementId) => {
+    const app = (window as unknown as {
+      h?: {
+        app?: {
+          scene?: {
+            getNonDeletedElement?: (id: string) => { x?: number } | null;
+          };
+        };
+      };
+    }).h?.app;
+    return app?.scene?.getNonDeletedElement?.(elementId)?.x;
+  }, content.id)).toBe(content.x + 1);
+  const slideDelete = page.getByRole("button", { name: "Delete selected slide", exact: true });
+  page.once("dialog", (dialog) => void dialog.accept());
+  await slideDelete.evaluate((button: HTMLButtonElement) => button.click());
+  await page.keyboard.up("ArrowRight");
+
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(0);
+  await expect.poll(async () => {
+    const state = await autosavedElementsById(page, ["pending-slide", "pending-content"]);
+    return {
+      contentX: state["pending-content"]?.x,
+      slideExists: Boolean(state["pending-slide"]),
+    };
+  }, { timeout: 15_000 }).toEqual({
+    contentX: content.x + 1,
+    slideExists: false,
+  });
 });
 
 test("reorders slides with visible keyboard and touch controls", async ({ page }) => {
@@ -4592,6 +5018,93 @@ test("keeps presentation navigation keys active after toolbar controls receive f
   await expect(page.locator(".presentation-count")).toHaveText("1 / 3");
 });
 
+test("commits pending edits before presentation switches between project scenes", async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.evaluate(() => {
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    window.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]) => (
+      nativeSetTimeout(handler, delay === 150 ? 5_000 : delay, ...args)
+    )) as typeof window.setTimeout;
+  });
+
+  const frameA = classroomTestFrame("frame-a", "Scene A", 0, 0, 960, 540, "a0", true);
+  const frameB = classroomTestFrame("frame-b", "Scene B", 0, 0, 960, 540, "a0", true);
+  const scene = (id: string, name: string, frame: Record<string, unknown>) => ({
+    id,
+    name,
+    elements: [frame],
+    appState: { scrollX: 0, scrollY: 0, zoom: { value: 1 }, viewBackgroundColor: "#ffffff" },
+    files: {},
+  });
+  const project = {
+    schemaVersion: 1,
+    id: "presentation-scene-boundary",
+    title: "Presentation scene boundary",
+    createdAt: "2026-08-03T00:00:00.000Z",
+    updatedAt: "2026-08-03T00:00:00.000Z",
+    activeSceneId: "scene-a",
+    scenes: {
+      "scene-a": scene("scene-a", "Scene A", frameA),
+      "scene-b": scene("scene-b", "Scene B", frameB),
+    },
+    slideOrder: [
+      { id: "slide-a", frameId: "frame-a", sceneId: "scene-a", title: "Scene A", titleMode: "custom" },
+      { id: "slide-b", frameId: "frame-b", sceneId: "scene-b", title: "Scene B", titleMode: "custom" },
+    ],
+    slideFramesVisible: true,
+    slideFrameAspectRatio: "16:9",
+    slideMorphEnabled: false,
+    pdfPageOrder: [],
+    pdfDocuments: {},
+  };
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "presentation-scene-boundary.patterdraw",
+    mimeType: "application/vnd.patterdraw+zip",
+    buffer: Buffer.from(zipSync({ "project.json": strToU8(JSON.stringify(project)) })),
+  });
+  await expect.poll(async () => (
+    await keyvalValue<{ id: string }>(page, "patterdraw:autosave:project:v1")
+  )?.id).toBe(project.id);
+  await expect(page.locator(".busy-overlay")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(2);
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 2");
+  await page.getByRole("button", { name: "Ink", exact: true }).click();
+  const bounds = await page.locator(".editor-host").boundingBox();
+  if (!bounds) throw new Error("Editor host has no visible bounds.");
+  const drawStroke = async (xRatio: number) => {
+    await page.mouse.move(bounds.x + bounds.width * xRatio, bounds.y + bounds.height * 0.45);
+    await page.mouse.down();
+    await page.mouse.move(
+      bounds.x + bounds.width * xRatio,
+      bounds.y + bounds.height * 0.58,
+      { steps: 6 },
+    );
+    await page.mouse.up();
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    }));
+  };
+
+  await drawStroke(0.4);
+  await page.keyboard.down("ArrowRight");
+  await expect(page.locator(".presentation-count")).toHaveText("2 / 2");
+  await drawStroke(0.6);
+  await page.keyboard.up("ArrowRight");
+
+  await expect.poll(async () => {
+    const saved = await keyvalValue<{
+      scenes: Record<string, { elements: Array<{ type?: string }> }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    return saved ? {
+      sceneAInk: saved.scenes["scene-a"].elements.filter((element) => element.type === "freedraw").length,
+      sceneBInk: saved.scenes["scene-b"].elements.filter((element) => element.type === "freedraw").length,
+    } : null;
+  }, { timeout: 15_000 }).toEqual({ sceneAInk: 1, sceneBInk: 1 });
+});
+
 test("exits presentation when Escape ends its native fullscreen session", async ({ page }) => {
   await page.getByRole("button", { name: "Slides", exact: true }).click();
   await page.getByRole("button", { name: "Add slide", exact: true }).click();
@@ -5053,6 +5566,12 @@ test("uses the experimental one-shot lasso for live, additive, and cancellable s
   await lasso.click();
   const overlay = page.getByTestId("lasso-overlay");
   await expect(overlay).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+f");
+  await expect(overlay).toBeVisible();
+  await expect(page.getByRole("searchbox", {
+    name: "Find text across project",
+    exact: true,
+  })).toHaveCount(0);
   const host = await page.locator(".editor-host").boundingBox();
   if (!host) throw new Error("Editor host has no visible bounds.");
   await page.mouse.move(host.x + 270, host.y + 190);
@@ -6033,6 +6552,11 @@ test("navigates PDF pages with the left and right arrow keys", async ({ page }) 
 test("keeps the latest PDF scene during rapid page switches", async ({ page }) => {
   test.setTimeout(60_000);
   await openTestPdf(page, 3);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("dialog", { name: "Settings", exact: true })
+    .getByRole("combobox", { name: "Theme", exact: true })
+    .selectOption("dark");
+  await page.keyboard.press("Escape");
   const pages = page.locator("#pdf-page-rail .pdf-page-item");
 
   await pages.nth(1).click();
@@ -6041,6 +6565,10 @@ test("keeps the latest PDF scene during rapid page switches", async ({ page }) =
 
   await expect(pages.nth(0)).toHaveClass(/is-selected/);
   await expect(page.locator(".page-status")).toContainText("Page 1 of 3");
+  await expect.poll(() => pages.nth(0).locator("img").getAttribute("class"), { timeout: 30_000 })
+    .toContain("pdf-page-dark-thumbnail");
+  await expect(page.getByText("This PDF page could not be shown in dark mode.", { exact: true }))
+    .toHaveCount(0);
   await expect.poll(async () => {
     const project = await keyvalValue<{
       activeSceneId: string;
@@ -6330,6 +6858,11 @@ test("opens the official image export dialog with native controls and export sem
   await expect(nativeDialog.locator(".ImageExportModal__preview__filename input")).toHaveValue("Native Image Export");
   await expect(nativeDialog.getByRole("button", { name: "Export to PNG", exact: true })).toBeVisible();
   await expect(nativeDialog.getByRole("button", { name: "Export to SVG", exact: true })).toBeVisible();
+  await nativeDialog.locator(".Modal__content").focus();
+  await page.keyboard.press("ControlOrMeta+f");
+  await expect(nativeDialog).toBeVisible();
+  await expect(page.getByRole("searchbox", { name: "Find text across project", exact: true }))
+    .toHaveCount(0);
 
   const selectedPngDownload = page.waitForEvent("download");
   await nativeDialog.getByRole("button", { name: "Export to PNG", exact: true }).click();
@@ -6737,6 +7270,11 @@ test("adds a blank slide with a live preview without remounting or covering the 
   await expect(page.locator(".slide-thumbnail")).toHaveCount(1);
   await expect(editor).toHaveAttribute("data-browser-instance", "original");
 
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("dialog", { name: "Settings", exact: true })
+    .getByRole("combobox", { name: "Theme", exact: true })
+    .selectOption("dark");
+  await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Present", exact: true }).click();
   const inkColours = page.locator(".presentation-colour-swatch");
   await expect(inkColours).toHaveCount(6);
@@ -6744,6 +7282,10 @@ test("adds a blank slide with a live preview without remounting or covering the 
   await expect(page.getByRole("group", { name: "Ink widths" })).toBeVisible();
   await expect(page.locator(".presentation-width-button")).toHaveCount(3);
   await expect(page.getByRole("button", { name: "Regular ink width", exact: true })).toHaveAttribute("aria-pressed", "true");
+  const orangeInk = page.getByRole("button", { name: "Orange ink", exact: true });
+  await expect(orangeInk).toHaveCSS("background-color", "rgb(232, 89, 12)");
+  await orangeInk.hover();
+  await expect(orangeInk).toHaveCSS("background-color", "rgb(232, 89, 12)");
   await page.getByRole("button", { name: "Blue ink", exact: true }).focus();
   await page.getByRole("button", { name: "Blue ink", exact: true }).press("Space");
   await expect(page.getByRole("button", { name: "Blue ink", exact: true })).toHaveAttribute("aria-pressed", "true");

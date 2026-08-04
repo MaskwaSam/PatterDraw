@@ -49,6 +49,48 @@ const baseElement = {
   isDeleted: false,
 };
 
+function blankPdfProjectForIntegrity(
+  byteLength: number,
+  sha256?: string,
+): ClassroomProject {
+  const scene = {
+    id: "page",
+    name: "Blank page",
+    elements: [baseElement],
+    appState: {},
+    files: {},
+    pdfPage: {
+      documentId: "pdf",
+      pageIndex: 0,
+      width: 600,
+      height: 800,
+      rotation: 0,
+      backgroundElementId: "background",
+    },
+  } satisfies SerializedScene;
+  return {
+    schemaVersion: 1,
+    id: "project",
+    title: "Blank worksheet",
+    createdAt: "2026-07-12T00:00:00.000Z",
+    updatedAt: "2026-07-12T00:00:00.000Z",
+    activeSceneId: "page",
+    scenes: { page: scene },
+    slideOrder: [],
+    pdfDocuments: {
+      pdf: {
+        id: "pdf",
+        name: "blank.pdf",
+        mimeType: "application/pdf",
+        byteLength,
+        pageCount: 1,
+        archivePath: "documents/pdf.pdf",
+        ...(sha256 ? { sha256 } : {}),
+      },
+    },
+  };
+}
+
 const standardFontDataUrl = decodeURIComponent(new URL(
   "./standard_fonts/",
   import.meta.resolve("pdfjs-dist/package.json"),
@@ -875,6 +917,26 @@ describe("PDF export bounds", () => {
     const output = await PDFDocument.load(await outputBlob.arrayBuffer());
     expect(output.getPageCount()).toBe(1);
     expect(output.getPage(0).getSize()).toEqual({ width: 600, height: 800 });
+  });
+
+  it("rejects source PDF bytes whose length no longer matches project metadata", async () => {
+    const source = await PDFDocument.create();
+    source.addPage([600, 800]);
+    const sourceBytes = await source.save();
+    const project = blankPdfProjectForIntegrity(sourceBytes.byteLength + 1);
+
+    await expect(exportAnnotatedPdf(project, { pdf: sourceBytes }))
+      .rejects.toThrow(/source PDF data no longer matches.*blank\.pdf/i);
+  });
+
+  it("rejects valid source PDF bytes whose digest no longer matches project metadata", async () => {
+    const source = await PDFDocument.create();
+    source.addPage([600, 800]);
+    const sourceBytes = await source.save();
+    const project = blankPdfProjectForIntegrity(sourceBytes.byteLength, "0".repeat(64));
+
+    await expect(exportAnnotatedPdf(project, { pdf: sourceBytes }))
+      .rejects.toThrow(/source PDF data no longer matches.*blank\.pdf/i);
   });
 
   it("validates source geometry even when the PDF page has no content stream", async () => {

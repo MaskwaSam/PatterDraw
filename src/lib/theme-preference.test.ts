@@ -64,4 +64,19 @@ describe("theme preference", () => {
     expect(listener).toHaveBeenLastCalledWith("system");
     unsubscribe();
   });
+
+  it("delivers a same-page theme update when storage rejects the write", () => {
+    const storage = {
+      getItem: () => null,
+      setItem: () => { throw new Error("quota"); },
+      removeItem: () => { throw new Error("quota"); },
+    };
+    const listener = vi.fn();
+    const unsubscribe = subscribeToThemePreference(listener, storage);
+
+    persistThemePreference("dark", storage);
+
+    expect(listener).toHaveBeenLastCalledWith("dark");
+    unsubscribe();
+  });
 });

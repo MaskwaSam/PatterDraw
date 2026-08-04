@@ -15,6 +15,7 @@ import type {
   SerializedScene,
 } from "../../types";
 import { bytesForBlob } from "../blob-bytes";
+import { sha256Hex } from "../sha256";
 import { getSlideRenderData } from "../slide-render";
 import { orderedPdfScenes } from "./page-order";
 import {
@@ -296,6 +297,14 @@ export async function exportAnnotatedPdf(
   for (const [id, documentTargets] of targetsByDocument) {
     const bytes = pdfBytes[id];
     if (!bytes) throw new Error("The project is missing source PDF data.");
+    const source = project.pdfDocuments[id];
+    if (!source) throw new Error("The project is missing source PDF metadata.");
+    if (bytes.byteLength !== source.byteLength) {
+      throw new Error(`The source PDF data no longer matches the saved project for ${source.name}.`);
+    }
+    if (source.sha256 && await sha256Hex(bytes) !== source.sha256) {
+      throw new Error(`The source PDF data no longer matches the saved project for ${source.name}.`);
+    }
     const sourceDocument = await PDFDocument.load(bytes, { updateMetadata: false });
     prepareSourcePdfForEmbedding(
       sourceDocument,

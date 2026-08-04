@@ -61,10 +61,13 @@ export function subscribeToThemePreference(
   storage: PreferenceStorage | null = browserStorage(),
 ): () => void {
   const handlePreferenceChange = (event: Event) => {
-    listener(storage
-      ? readThemePreference(storage)
-      : event instanceof CustomEvent
-        ? normalizeThemePreference(event.detail)
+    // Same-page writes carry the authoritative in-memory value even when
+    // localStorage is blocked or fails. Cross-tab StorageEvents still read the
+    // shared browser value below.
+    listener(event instanceof CustomEvent
+      ? normalizeThemePreference(event.detail)
+      : storage
+        ? readThemePreference(storage)
         : DEFAULT_THEME_PREFERENCE);
   };
   const handleStorage = (event: StorageEvent) => {

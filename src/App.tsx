@@ -88,7 +88,6 @@ import { bytesForBlob } from "./lib/blob-bytes";
 import { downloadBlob, safeFileStem } from "./lib/download";
 import { exportFullBoardPng } from "./lib/export-board";
 import { createLocalId } from "./lib/id";
-import { sha256Hex } from "./lib/sha256";
 import {
   beginPngClipboardWrite,
   exportScreenshotArea,
@@ -110,6 +109,13 @@ import {
   getPdfRasterDimensions,
   renderDarkPdfPreview,
 } from "./lib/pdf/dark-preview";
+import {
+  darkPdfThumbnailRenderSceneIds,
+  pruneDarkPdfThumbnails,
+  retainedDarkPdfThumbnailSceneIds,
+  storeDarkPdfThumbnail,
+  type DarkPdfThumbnailCacheEntry,
+} from "./lib/pdf/dark-thumbnail-cache";
 import {
   movePdfPage,
   orderedPdfScenes,
@@ -249,6 +255,28 @@ type ProjectFindShortcutBridge = {
 };
 const PROJECT_FIND_SHORTCUT_BRIDGE_KEY = "__patterdrawProjectFindShortcutBridgeV1";
 
+function hasVisibleModalSurface(): boolean {
+  if (typeof document === "undefined") return false;
+  return Array.from(document.querySelectorAll<HTMLElement>(
+    [
+      '.modal-backdrop [role="dialog"]',
+      '.settings-popover[role="dialog"]',
+      '.math-interaction-panel[role="dialog"]',
+      '.topbar-menu-popover[role="menu"]',
+      '.editor-host .excalidraw .dropdown-menu',
+      '.editor-host .excalidraw .context-menu',
+      '.screenshot-capture-overlay',
+      '.slide-frame-draw-overlay',
+      '.lasso-overlay',
+      '.busy-overlay',
+      '.Modal',
+    ].join(", "),
+  )).some((dialog) => (
+    !dialog.hidden
+    && dialog.getClientRects().length > 0
+  ));
+}
+
 function installProjectFindShortcutBridge(): ProjectFindShortcutBridge | null {
   if (typeof window === "undefined") return null;
   const browserWindow = window as Window & {
@@ -263,24 +291,20 @@ function installProjectFindShortcutBridge(): ProjectFindShortcutBridge | null {
   // mounted: it opens project-wide Find when enabled and suppresses the native
   // search when the user has turned the feature off.
   window.addEventListener("keydown", (event) => {
-    const visibleModal = Array.from(document.querySelectorAll<HTMLElement>(
-      '[role="dialog"][aria-modal="true"]',
-    )).some((dialog) => (
-      !dialog.closest(".editor-host .excalidraw")
-      && !dialog.hidden
-      && dialog.getClientRects().length > 0
-    ));
     if (
       !bridge.open
       || event.altKey
       || event.shiftKey
       || (!event.ctrlKey && !event.metaKey)
       || event.key.toLowerCase() !== "f"
-      || visibleModal
     ) return;
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
+    // PatterDraw owns this shortcut across the editor. While a modal is open,
+    // consume it without opening either project search or Excalidraw's
+    // canvas search behind the modal.
+    if (hasVisibleModalSurface()) return;
     if (bridge.enabled) bridge.open();
   }, true);
   return bridge;
@@ -302,6 +326,7 @@ const CLASSROOM_UI_OPTIONS: ExcalidrawProps["UIOptions"] = {
 };
 const SPINNER_ANIMATION_DURATION_MS = 1_100;
 const SCENE_PERSISTENCE_DELAY_MS = 150;
+const MAX_DARK_PDF_THUMBNAILS = 48;
 const PERSONAL_LIBRARY_SIDEBAR_TAB = "library";
 const PROJECT_FIND_SIDEBAR_TAB = "project-find";
 type LibrarySidebarTab = typeof PERSONAL_LIBRARY_SIDEBAR_TAB | typeof SCREENSHOT_SIDEBAR_TAB;
@@ -412,6 +437,25 @@ function persistentFilesForScene(
     : undefined;
   if (lightFileId && lightFile) files[lightFileId] = lightFile;
   return files;
+}
+
+function darkPdfSceneCacheKey(
+  projectId: string | undefined,
+  scene: SerializedScene,
+): string | null {
+  const workspace = scene.pdfPage;
+  const background = workspace
+    ? scene.elements.find((element) => element.id === workspace.backgroundElementId)
+    : undefined;
+  const lightFileId = typeof background?.fileId === "string" ? background.fileId : null;
+  if (!workspace || !lightFileId) return null;
+  return JSON.stringify([
+    projectId || "project",
+    scene.id,
+    workspace.documentId,
+    workspace.pageIndex,
+    lightFileId,
+  ]);
 }
 
 function serializedValuesEqual(left: unknown, right: unknown): boolean {
@@ -570,13 +614,8 @@ export default function App() {
   const pendingSlideFrameActionRef = useRef<PendingSlideFrameAction | null>(null);
   const setFeaturePreference = useCallback((key: FeaturePreferenceKey, enabled: boolean) => {
     if (key === "slides" && !enabled) pendingSlideFrameActionRef.current = null;
-    let next = featurePreferencesRef.current;
-    if (enabled && key === "showGrid" && next.snapToObjects) {
-      next = persistFeaturePreference(next, "snapToObjects", false);
-    } else if (enabled && key === "snapToObjects" && next.showGrid) {
-      next = persistFeaturePreference(next, "showGrid", false);
-    }
-    if (next[key] !== enabled) next = persistFeaturePreference(next, key, enabled);
+    if (featurePreferencesRef.current[key] === enabled) return;
+    const next = persistFeaturePreference(featurePreferencesRef.current, key, enabled);
     featurePreferencesRef.current = next;
     setFeaturePreferences(next);
   }, []);
@@ -594,6 +633,14 @@ export default function App() {
   }, []);
   const restoreFeaturePreferences = useCallback(() => {
     const defaults = { ...DEFAULT_FEATURE_PREFERENCES };
+    // Claim the editor-state transition synchronously. A rapid second setting
+    // change can otherwise make Excalidraw emit its previous pen/grid/snapping
+    // snapshot before the React effect below applies the restored defaults.
+    applyingEditorPreferencesRef.current = {
+      penOnly: defaults.penOnly,
+      showGrid: defaults.showGrid,
+      snapToObjects: defaults.snapToObjects,
+    };
     persistFeaturePreferences(defaults);
     persistThemePreference(DEFAULT_THEME_PREFERENCE);
     featurePreferencesRef.current = defaults;
@@ -602,6 +649,11 @@ export default function App() {
   }, []);
   useEffect(() => subscribeToFeaturePreferences((nextPreferences) => {
     if (!nextPreferences.slides) pendingSlideFrameActionRef.current = null;
+    applyingEditorPreferencesRef.current = {
+      penOnly: nextPreferences.penOnly,
+      showGrid: nextPreferences.showGrid,
+      snapToObjects: nextPreferences.snapToObjects,
+    };
     featurePreferencesRef.current = nextPreferences;
     setFeaturePreferences(nextPreferences);
   }), []);
@@ -648,14 +700,25 @@ export default function App() {
   const pdfBytesRef = useRef<Record<PdfDocumentId, Uint8Array>>(pdfBytes);
   const currentSceneRef = useRef<SerializedScene | null>(null);
   const activeSceneIdRef = useRef<string | null>(null);
-  const darkPdfPreviewCacheRef = useRef(new Map<string, Promise<BinaryFileData>>());
-  const darkPdfThumbnailCacheRef = useRef(new Map<string, Promise<DataURL>>());
+  // A per-mount ID prevents imported user files from colliding with the one
+  // transient full-page dark raster that is removed from saves and exports.
+  const darkPdfActiveFileIdRef = useRef(
+    `patterdraw-dark-pdf-${createLocalId()}` as FileId,
+  );
+  const darkPdfPreviewCacheRef = useRef(new Map<string, BinaryFileData>());
+  const darkPdfThumbnailCacheRef = useRef(
+    new Map<string, DarkPdfThumbnailCacheEntry<DataURL>>(),
+  );
   const darkPdfDisplayFileIdsRef = useRef(new Map<string, FileId>());
   const darkPdfPreviewErrorsRef = useRef(new Set<string>());
-  const transientDarkPdfFileIdsRef = useRef(new Set<string>());
+  const transientDarkPdfFileIdsRef = useRef(new Set<string>([darkPdfActiveFileIdRef.current]));
   const darkPdfPreviewGenerationRef = useRef(0);
   const suspendDarkPdfDisplayRef = useRef(false);
-  const getDarkPdfDisplayFile = useCallback((scene: SerializedScene): Promise<BinaryFileData> => {
+  const darkPdfRenderControllersRef = useRef(new Set<AbortController>());
+  const getDarkPdfDisplayFile = useCallback(async (
+    scene: SerializedScene,
+    signal?: AbortSignal,
+  ): Promise<BinaryFileData> => {
     const workspace = scene.pdfPage;
     const background = workspace
       ? scene.elements.find((element) => element.id === workspace.backgroundElementId)
@@ -666,50 +729,42 @@ export default function App() {
       : undefined;
     const lightDataUrl = typeof lightFile?.dataURL === "string" ? lightFile.dataURL : null;
     const sourceBytes = workspace ? pdfBytesRef.current[workspace.documentId] : undefined;
-    const recordedSourceSha256 = workspace
-      ? projectRef.current?.pdfDocuments[workspace.documentId]?.sha256
-      : undefined;
     if (!workspace || !lightFileId || !lightDataUrl || !sourceBytes) {
       return Promise.reject(new Error("The original PDF page is unavailable."));
     }
-    const cacheKey = `${projectRef.current?.id || "project"}:${scene.id}:${lightFileId}`;
+    const cacheKey = darkPdfSceneCacheKey(projectRef.current?.id, scene);
+    if (!cacheKey) throw new Error("The original PDF page is unavailable.");
     const cached = darkPdfPreviewCacheRef.current.get(cacheKey);
     if (cached) return cached;
 
-    const preview = getPdfRasterDimensions(lightDataUrl).then(async ({ width, height }) => {
-      const sourceSha256 = recordedSourceSha256 || await sha256Hex(sourceBytes);
-      const dataURL = await renderDarkPdfPreview({
-        bytes: sourceBytes,
-        pageIndex: workspace.pageIndex,
-        width,
-        height,
-      });
-      // Excalidraw's file API only merges. A content-derived ID lets an
-      // identical page preview reuse the existing entry after project
-      // hydration instead of retaining another full-size data URL.
-      const id = [
-        "patterdraw-dark-pdf-v1",
-        sourceSha256,
-        workspace.pageIndex,
-        `${width}x${height}`,
-      ].join("-") as FileId;
-      const file: BinaryFileData = {
-        id,
-        // Excalidraw applies an additional image-preservation filter to PNGs
-        // before its dark canvas filter. This display-only raster already
-        // compensates its picture regions, so opt out via the SVG MIME path;
-        // the browser still decodes the PNG data URL itself.
-        mimeType: "image/svg+xml",
-        dataURL,
-        created: Date.now(),
-      };
-      transientDarkPdfFileIdsRef.current.add(id);
-      return file;
+    // Retain at most the active full-resolution raster. Rail previews have a
+    // separate bounded cache, while scene navigation replaces this entry.
+    darkPdfPreviewCacheRef.current.clear();
+    const { width, height } = await getPdfRasterDimensions(lightDataUrl);
+    const dataURL = await renderDarkPdfPreview({
+      bytes: sourceBytes,
+      pageIndex: workspace.pageIndex,
+      width,
+      height,
+      signal,
     });
-    darkPdfPreviewCacheRef.current.set(cacheKey, preview);
-    return preview;
+    const file: BinaryFileData = {
+      id: darkPdfActiveFileIdRef.current,
+      // Excalidraw applies an additional image-preservation filter to PNGs
+      // before its dark canvas filter. This display-only raster already
+      // compensates its picture regions, so opt out via the SVG MIME path;
+      // the browser still decodes the PNG data URL itself.
+      mimeType: "image/svg+xml",
+      dataURL,
+      created: Date.now(),
+    };
+    if (!signal?.aborted) darkPdfPreviewCacheRef.current.set(cacheKey, file);
+    return file;
   }, []);
-  const getDarkPdfThumbnailUrl = useCallback((scene: SerializedScene): Promise<DataURL> => {
+  const getDarkPdfThumbnailUrl = useCallback((
+    scene: SerializedScene,
+    signal?: AbortSignal,
+  ): Promise<DataURL> => {
     const workspace = scene.pdfPage;
     const background = workspace
       ? scene.elements.find((element) => element.id === workspace.backgroundElementId)
@@ -723,21 +778,35 @@ export default function App() {
     if (!workspace || !lightFileId || !lightDataUrl || !sourceBytes) {
       return Promise.reject(new Error("The original PDF page is unavailable."));
     }
-    const cacheKey = `${projectRef.current?.id || "project"}:${scene.id}:${lightFileId}`;
+    const cacheKey = darkPdfSceneCacheKey(projectRef.current?.id, scene);
+    if (!cacheKey) return Promise.reject(new Error("The original PDF page is unavailable."));
     const cached = darkPdfThumbnailCacheRef.current.get(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      // Refresh insertion order so recently revisited pages survive the cap.
+      darkPdfThumbnailCacheRef.current.delete(cacheKey);
+      darkPdfThumbnailCacheRef.current.set(cacheKey, cached);
+      return Promise.resolve(cached.dataURL);
+    }
 
-    const preview = getPdfRasterDimensions(lightDataUrl).then(({ width, height }) => {
+    return getPdfRasterDimensions(lightDataUrl).then(async ({ width, height }) => {
       const scale = Math.min(1, 256 / Math.max(width, height));
-      return renderDarkPdfPreview({
+      const dataURL = await renderDarkPdfPreview({
         bytes: sourceBytes,
         pageIndex: workspace.pageIndex,
         width: Math.max(1, Math.round(width * scale)),
         height: Math.max(1, Math.round(height * scale)),
+        signal,
       });
+      if (!signal?.aborted) {
+        storeDarkPdfThumbnail(
+          darkPdfThumbnailCacheRef.current,
+          cacheKey,
+          { dataURL, sceneId: scene.id },
+          MAX_DARK_PDF_THUMBNAILS,
+        );
+      }
+      return dataURL;
     });
-    darkPdfThumbnailCacheRef.current.set(cacheKey, preview);
-    return preview;
   }, []);
   // Excalidraw can emit its initial blank scene after the API is ready but
   // before the asynchronously loaded classroom project reaches the editor.
@@ -809,10 +878,16 @@ export default function App() {
     cancelSceneHydrationFrames();
     switchingSceneRef.current = true;
     sceneHydrationGenerationRef.current += 1;
+    darkPdfPreviewGenerationRef.current += 1;
+    for (const controller of darkPdfRenderControllersRef.current) controller.abort();
+    darkPdfRenderControllersRef.current.clear();
     return sceneHydrationGenerationRef.current;
   }, [cancelSceneHydrationFrames]);
   useEffect(() => () => {
     sceneHydrationGenerationRef.current += 1;
+    darkPdfPreviewGenerationRef.current += 1;
+    for (const controller of darkPdfRenderControllersRef.current) controller.abort();
+    darkPdfRenderControllersRef.current.clear();
     cancelSceneHydrationFrames();
   }, [cancelSceneHydrationFrames]);
   useEffect(() => () => {
@@ -869,6 +944,27 @@ export default function App() {
     });
     return nextProject;
   }, []);
+  const commitLiveScenePersistence = useCallback((sceneId: string) => {
+    const committed = commitPendingScenePersistence();
+    if (!api || !committed || activeSceneIdRef.current !== sceneId) return committed;
+    const scene = committed.scenes[sceneId];
+    if (!scene) return committed;
+    // Destructive controls can run before Excalidraw's debounced onChange
+    // reaches pendingScenePersistenceRef. Capture the editor synchronously,
+    // but send it through the same canonicalization, slide detachment,
+    // serialization, and file filtering pipeline as an ordinary scene edit.
+    pendingScenePersistenceRef.current = {
+      sceneId,
+      elements: api.getSceneElements(),
+      appState: api.getAppState(),
+      files: persistentFilesForScene(
+        scene,
+        api.getFiles(),
+        transientDarkPdfFileIdsRef.current,
+      ),
+    };
+    return commitPendingScenePersistence();
+  }, [api, commitPendingScenePersistence]);
   const queueScenePersistence = useCallback((pending: PendingScenePersistence) => {
     pendingScenePersistenceRef.current = pending;
     if (!autosaveSuspendedRef.current) setSaveStatus("saving");
@@ -1111,7 +1207,7 @@ export default function App() {
       if (event.repeat || !event.shiftKey || (!event.ctrlKey && !event.metaKey)) return;
       const key = event.key.toLowerCase();
       if (key !== "h" && key !== "f") return;
-      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      if (hasVisibleModalSurface()) return;
       event.preventDefault();
       if (key === "h") setIsNavigationVisible((visible) => !visible);
       else toggleFooterPreference();
@@ -1304,10 +1400,20 @@ export default function App() {
     if (!api) return;
     const hydrationGeneration = beginSceneHydration();
     const sceneId = scene.id;
-    const files = scene.files as unknown as BinaryFiles;
+    // Snapshot first: a stored scene can intentionally share the same live
+    // BinaryFiles object returned by Excalidraw after persistence. Clearing
+    // that map below must not also erase the source files we are about to add.
+    const files = { ...scene.files } as unknown as BinaryFiles;
     const liveAppState = api.getAppState();
     const editorPreferences = featurePreferencesRef.current;
-    api.addFiles(Object.values(files));
+    // Excalidraw's addFiles() is merge-only and its decoded-image cache is
+    // keyed by file ID. Empty the live map before replacing the elements so
+    // reopening a project with the same scene/file IDs cannot keep stale
+    // image bytes or leak files from the previous scene. Adding after
+    // updateScene also lets Excalidraw invalidate image caches against the new
+    // elements that reference those IDs.
+    const liveFiles = api.getFiles();
+    for (const fileId of Object.keys(liveFiles)) delete liveFiles[fileId as FileId];
     api.updateScene({
       elements: scene.elements as unknown as readonly ExcalidrawElement[],
       appState: {
@@ -1322,6 +1428,7 @@ export default function App() {
       },
       captureUpdate: CaptureUpdateAction.NEVER,
     });
+    api.addFiles(Object.values(files));
     api.updateFrameRendering({ enabled: slideFramesVisibleRef.current, clip: false });
     api.history.clear();
     sceneHydrationOuterFrameRef.current = window.requestAnimationFrame(() => {
@@ -1791,7 +1898,7 @@ export default function App() {
     const replacementSave = saveAutosave(
       startupProject,
       loaded.pdfBytes,
-      { prepared: true },
+      { prepared: true, replacePdfBlobs: true },
     ).then((contentSize) => {
       autosaveContentBytesRef.current = contentSize.totalBytes;
     });
@@ -1956,7 +2063,7 @@ export default function App() {
       const replacementSave = saveAutosave(
         snapshot.project,
         snapshot.pdfBytes,
-        { prepared: true },
+        { prepared: true, replacePdfBlobs: true },
       ).then((contentSize) => {
         autosaveContentBytesRef.current = contentSize.totalBytes;
       });
@@ -2745,13 +2852,17 @@ export default function App() {
   }, [api, commitPendingScenePersistence, focusProjectSearchTarget, openScene]);
 
   const setPresentationIndex = useCallback((index: number, allowMorph = true) => {
-    if (!project?.slideOrder[index]) return;
-    const slide = project.slideOrder[index];
+    // Presentation navigation is also a scene-switch boundary. Commit the
+    // live editor state synchronously so a rapid edit on one slide cannot be
+    // replaced by the next slide before the normal debounce runs.
+    const currentProject = commitPendingScenePersistence();
+    if (!currentProject?.slideOrder[index]) return;
+    const slide = currentProject.slideOrder[index];
     const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     pendingPresentationTransitionRef.current = {
       frameId: slide.frameId,
-      animate: allowMorph && project.slideMorphEnabled === true && !prefersReducedMotion,
-      durationMs: normalizeSlideMorphDurationMs(project.slideMorphDurationMs),
+      animate: allowMorph && currentProject.slideMorphEnabled === true && !prefersReducedMotion,
+      durationMs: normalizeSlideMorphDurationMs(currentProject.slideMorphDurationMs),
     };
     setPresentation((current) => ({
       index,
@@ -2771,7 +2882,7 @@ export default function App() {
     setProject((current) => current && current.activeSceneId !== slide.sceneId
       ? { ...current, activeSceneId: slide.sceneId }
       : current);
-  }, [beginSceneHydration, project]);
+  }, [beginSceneHydration, commitPendingScenePersistence]);
 
   const startPresentation = useCallback(async () => {
     if (!project || !api || workspaceMode !== "slides") return;
@@ -2943,20 +3054,26 @@ export default function App() {
     darkPdfThumbnailCacheRef.current.clear();
     darkPdfDisplayFileIdsRef.current.clear();
     darkPdfPreviewErrorsRef.current.clear();
-    // Excalidraw's file API merges files and exposes no supported delete call.
-    // Keep every display-only ID for this mounted session so a stale preview
-    // left in the editor's file map can never enter a later project or export.
+    // The editor retains one stable display-only file for this mounted
+    // session. It is excluded from persistence and replaced in place below.
     suspendDarkPdfDisplayRef.current = false;
     setDarkPdfPreviewUrls({});
   }, [project?.id, projectHydrationRevision]);
 
   useEffect(() => {
     const scene = currentScene;
-    if (!api || !scene?.pdfPage) return;
+    if (!scene?.pdfPage) {
+      darkPdfDisplayFileIdsRef.current.clear();
+      darkPdfPreviewCacheRef.current.clear();
+      return;
+    }
+    if (!api) return;
     const generation = ++darkPdfPreviewGenerationRef.current;
+    const hydrationGeneration = sceneHydrationGenerationRef.current;
     const liveElements = api.getSceneElements();
     if (editorTheme !== "dark" || suspendDarkPdfDisplayRef.current) {
-      darkPdfDisplayFileIdsRef.current.delete(scene.id);
+      darkPdfDisplayFileIdsRef.current.clear();
+      darkPdfPreviewCacheRef.current.clear();
       const lightElements = canonicalizePdfBackground(
         scene,
         liveElements as unknown as readonly Record<string, unknown>[],
@@ -2971,19 +3088,20 @@ export default function App() {
     }
 
     let cancelled = false;
-    void getDarkPdfDisplayFile(scene).then((file) => {
+    const controller = new AbortController();
+    darkPdfRenderControllersRef.current.add(controller);
+    void getDarkPdfDisplayFile(scene, controller.signal).then((file) => {
       if (
         cancelled
         || generation !== darkPdfPreviewGenerationRef.current
+        || hydrationGeneration !== sceneHydrationGenerationRef.current
         || editorThemeRef.current !== "dark"
         || suspendDarkPdfDisplayRef.current
         || activeSceneIdRef.current !== scene.id
       ) return;
-      api.addFiles([file]);
+      darkPdfPreviewErrorsRef.current.delete(scene.id);
+      darkPdfDisplayFileIdsRef.current.clear();
       darkPdfDisplayFileIdsRef.current.set(scene.id, file.id);
-      setDarkPdfPreviewUrls((current) => current[scene.id] === file.dataURL
-        ? current
-        : { ...current, [scene.id]: file.dataURL });
       const currentElements = api.getSceneElements();
       const darkElements = canonicalizePdfBackground(
         scene,
@@ -2995,20 +3113,31 @@ export default function App() {
           elements: darkElements,
           captureUpdate: CaptureUpdateAction.NEVER,
         });
-      } else {
-        api.refresh();
       }
+      // Excalidraw's public addFiles API deliberately merges and its decoded
+      // image cache is keyed by file ID. The pinned component exposes its live
+      // file record through getFiles(), so remove the one transient ID only
+      // after the current background references it; addFiles can then replace
+      // the bytes and invalidate the matching decoded image/shape cache.
+      delete api.getFiles()[darkPdfActiveFileIdRef.current];
+      api.addFiles([file]);
     }).catch(() => {
       if (
         cancelled
+        || controller.signal.aborted
         || generation !== darkPdfPreviewGenerationRef.current
+        || hydrationGeneration !== sceneHydrationGenerationRef.current
         || darkPdfPreviewErrorsRef.current.has(scene.id)
       ) return;
       darkPdfPreviewErrorsRef.current.add(scene.id);
       api.setToast({ message: "This PDF page could not be shown in dark mode." });
+    }).finally(() => {
+      darkPdfRenderControllersRef.current.delete(controller);
     });
     return () => {
       cancelled = true;
+      controller.abort();
+      darkPdfRenderControllersRef.current.delete(controller);
     };
   }, [
     api,
@@ -3024,43 +3153,90 @@ export default function App() {
   const pdfScenes = useMemo(() => project
     ? orderedPdfScenes(project)
     : [], [project]);
+  const pdfThumbnailIdentity = useMemo(() => JSON.stringify(
+    pdfScenes.map((scene) => darkPdfSceneCacheKey(project?.id, scene)),
+  ), [pdfScenes, project?.id]);
+  const darkPdfThumbnailSceneIds = useMemo(() => darkPdfThumbnailRenderSceneIds(
+    pdfScenes.map((scene) => scene.id),
+    project?.activeSceneId,
+    MAX_DARK_PDF_THUMBNAILS,
+  ), [pdfScenes, project?.activeSceneId]);
+  const darkPdfThumbnailTargetIdentity = darkPdfThumbnailSceneIds.join("\u0000");
   useEffect(() => {
-    if (editorTheme !== "dark" || pdfScenes.length === 0) return;
+    const validSceneIds = new Set(pdfScenes.map((scene) => scene.id));
+    const validCacheKeys = new Set(
+      pdfScenes
+        .map((scene) => darkPdfSceneCacheKey(project?.id, scene))
+        .filter((key): key is string => !!key),
+    );
+    pruneDarkPdfThumbnails(darkPdfThumbnailCacheRef.current, validCacheKeys);
+    setDarkPdfPreviewUrls((current) => {
+      const entries = Object.entries(current).filter(([sceneId]) => validSceneIds.has(sceneId));
+      if (entries.length === Object.keys(current).length) return current;
+      return Object.fromEntries(entries);
+    });
+    if (editorTheme !== "dark" || pdfScenes.length === 0) {
+      darkPdfThumbnailCacheRef.current.clear();
+      setDarkPdfPreviewUrls({});
+      return;
+    }
     let cancelled = false;
     let nextIndex = 0;
+    const scenesById = new Map(pdfScenes.map((scene) => [scene.id, scene]));
+    const thumbnailScenes = darkPdfThumbnailSceneIds
+      .map((sceneId) => scenesById.get(sceneId))
+      .filter((scene): scene is SerializedScene => !!scene);
     const projectId = project?.id;
+    const controller = new AbortController();
     const renderNextThumbnail = async () => {
-      while (!cancelled && nextIndex < pdfScenes.length) {
-        const scene = pdfScenes[nextIndex];
+      while (!cancelled && nextIndex < thumbnailScenes.length) {
+        const scene = thumbnailScenes[nextIndex];
         nextIndex += 1;
-        if (darkPdfDisplayFileIdsRef.current.has(scene.id)) continue;
-        try {
-          const dataURL = await getDarkPdfThumbnailUrl(scene);
-          if (
-            cancelled
-            || editorThemeRef.current !== "dark"
-            || projectRef.current?.id !== projectId
-            || darkPdfDisplayFileIdsRef.current.has(scene.id)
-          ) continue;
-          setDarkPdfPreviewUrls((current) => current[scene.id] === dataURL
-            ? current
-            : { ...current, [scene.id]: dataURL });
-        } catch {
-          // The active-page renderer owns user-facing errors. A failed rail
-          // preview safely falls back to its canonical light thumbnail.
+        for (let attempt = 0; attempt < 2 && !cancelled; attempt += 1) {
+          try {
+            const dataURL = await getDarkPdfThumbnailUrl(scene, controller.signal);
+            if (
+              cancelled
+              || controller.signal.aborted
+              || editorThemeRef.current !== "dark"
+              || projectRef.current?.id !== projectId
+            ) break;
+            const retainedSceneIds = retainedDarkPdfThumbnailSceneIds(
+              darkPdfThumbnailCacheRef.current,
+            );
+            setDarkPdfPreviewUrls((current) => {
+              const next = Object.fromEntries(
+                Object.entries(current).filter(([sceneId]) => retainedSceneIds.has(sceneId)),
+              );
+              if (retainedSceneIds.has(scene.id)) next[scene.id] = dataURL;
+              return next;
+            });
+            break;
+          } catch {
+            if (controller.signal.aborted) break;
+            // Retry once for transient PDF.js/worker failures. The active-page
+            // renderer owns user-facing errors; the rail then falls back to
+            // its canonical light thumbnail if both attempts fail.
+          }
         }
       }
     };
     // Keep large classroom PDFs responsive while progressively darkening all
-    // rail thumbnails. Each thumbnail is capped at 256px on its longest edge.
+    // thumbnails in the active rail window. Each thumbnail is capped at 256px
+    // on its longest edge. This controller is intentionally local: scene
+    // hydration aborts the full-page renderer, but a thumbnail is keyed to its
+    // immutable source scene and remains valid across rapid page switches.
     void Promise.all([renderNextThumbnail(), renderNextThumbnail()]);
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [
     editorTheme,
+    darkPdfThumbnailTargetIdentity,
     getDarkPdfThumbnailUrl,
-    pdfScenes,
+    pdfThumbnailIdentity,
+    project?.activeSceneId,
     project?.id,
     projectHydrationRevision,
   ]);
@@ -3485,8 +3661,14 @@ export default function App() {
     if (!api || !project) return;
     if (!window.confirm(`Delete ${slide.title}? The frame will be removed, but its board content will stay.`)) return;
 
-    const slideIndex = project.slideOrder.findIndex((candidate) => candidate.id === slide.id);
-    const remainingSlides = removeSlide(project.slideOrder, slide.id);
+    // A keyboard/programmatic activation can reach this callback before the
+    // global pointerup/keyup autosave boundary. Commit first because the frame
+    // is deleted from stored scene data below while its content must survive.
+    const currentProject = commitLiveScenePersistence(slide.sceneId);
+    if (!currentProject) return;
+
+    const slideIndex = currentProject.slideOrder.findIndex((candidate) => candidate.id === slide.id);
+    const remainingSlides = removeSlide(currentProject.slideOrder, slide.id);
     const nextSlide = remainingSlides[Math.min(slideIndex, remainingSlides.length - 1)] || null;
     const isActiveScene = slide.sceneId === activeSceneIdRef.current;
     const ownsSuppression = isActiveScene && !switchingSceneRef.current;
@@ -3494,12 +3676,12 @@ export default function App() {
 
     if (isActiveScene) {
       if (ownsSuppression) switchingSceneRef.current = true;
-      const nextElements = syncSlideFrameNames(
+      const activeSceneElements = syncSlideFrameNames(
         deleteSlideBoundary(api.getSceneElements(), slide.frameId),
         remainingSlides,
       );
       api.updateScene({
-        elements: nextElements,
+        elements: activeSceneElements,
         appState: {
           selectedElementIds: {},
           selectedGroupIds: {},
@@ -3535,7 +3717,7 @@ export default function App() {
       }
       if (nextSlide) openSlide(nextSlide);
     });
-  }, [api, openSlide, project]);
+  }, [api, commitLiveScenePersistence, openSlide, project]);
 
   const reorderSlides = useCallback((slideId: string, targetId: string) => {
     if (!project) return;
@@ -3579,15 +3761,26 @@ export default function App() {
 
   const deletePdfPage = useCallback((sceneId: string) => {
     if (!project) return;
-    const scene = project.scenes[sceneId];
+    const initialScene = project.scenes[sceneId];
+    if (!initialScene?.pdfPage) return;
+    const initialOrder = reconcilePdfPageOrder(project);
+    const initialPageIndex = initialOrder.indexOf(sceneId);
+    if (initialPageIndex < 0) return;
+    if (!window.confirm(`Delete output page ${initialPageIndex + 1}? This removes the page and its annotations from the project.`)) return;
+
+    // Keep deletion as an explicit scene-persistence boundary, matching page
+    // addition and every other scene switch. This also prevents an unrelated
+    // pending update from being merged after the scene map has changed.
+    const currentProject = commitLiveScenePersistence(sceneId);
+    if (!currentProject) return;
+    const scene = currentProject.scenes[sceneId];
     if (!scene?.pdfPage) return;
-    const order = reconcilePdfPageOrder(project);
+    const order = reconcilePdfPageOrder(currentProject);
     const pageIndex = order.indexOf(sceneId);
     if (pageIndex < 0) return;
-    if (!window.confirm(`Delete output page ${pageIndex + 1}? This removes the page and its annotations from the project.`)) return;
 
     const remainingOrder = order.filter((candidate) => candidate !== sceneId);
-    let nextSceneId = remainingOrder[Math.min(pageIndex, remainingOrder.length - 1)] || boardSceneId(project);
+    let nextSceneId = remainingOrder[Math.min(pageIndex, remainingOrder.length - 1)] || boardSceneId(currentProject);
     let replacementScene: SerializedScene | null = null;
     if (!nextSceneId) {
       const blank = createBlankProject();
@@ -3595,11 +3788,11 @@ export default function App() {
       replacementScene = blank.scenes[blank.activeSceneId];
     }
     const documentId = scene.pdfPage.documentId;
-    const documentStillUsed = Object.values(project.scenes).some(
+    const documentStillUsed = Object.values(currentProject.scenes).some(
       (candidate) => candidate.id !== sceneId && candidate.pdfPage?.documentId === documentId,
     );
 
-    const activeSceneWillChange = nextSceneId !== project.activeSceneId;
+    const activeSceneWillChange = nextSceneId !== currentProject.activeSceneId;
     if (activeSceneWillChange) {
       beginSceneHydration();
       pendingFrameIdRef.current = null;
@@ -3619,6 +3812,7 @@ export default function App() {
         updatedAt: nowIso(),
         activeSceneId: nextSceneId,
         scenes,
+        slideOrder: current.slideOrder.filter((slide) => slide.sceneId !== sceneId),
         pdfPageOrder: remainingOrder,
         pdfDocuments,
       };
@@ -3631,7 +3825,7 @@ export default function App() {
       });
     }
     if (!remainingOrder.length) setWorkspaceMode("board");
-  }, [beginSceneHydration, project]);
+  }, [beginSceneHydration, commitLiveScenePersistence, project]);
 
   const addPdfPage = useCallback(async () => {
     const workspace = currentScene?.pdfPage;

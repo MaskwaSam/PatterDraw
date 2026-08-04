@@ -1714,7 +1714,16 @@ button { color: inherit; }
   .classroom-math-tools-menu-item,
   .classroom-lasso-menu-item
 ) {
+  display: grid;
+  grid-template-columns: 1fr;
   justify-content: center;
+  justify-items: center;
+}
+.app-shell.is-icon-only-controls .editor-host .excalidraw :is(
+  .classroom-math-tools-menu-item,
+  .classroom-lasso-menu-item
+) .dropdown-menu-item__icon {
+  margin-inline: 0;
 }
 
 .app-shell[data-theme="dark"] .pdf-page-dark-thumbnail {
@@ -1755,10 +1764,13 @@ button { color: inherit; }
 }
 .app-shell[data-theme="dark"] :is(
   .settings-heading h2,
+  .settings-heading > span,
   .settings-toggle strong,
   .settings-select strong,
   .document-title,
   .slide-caption,
+  .slide-number,
+  .rail-empty strong,
   .pdf-page-label strong,
   .page-status,
   .zoom-status,
@@ -1768,7 +1780,7 @@ button { color: inherit; }
 ) { color: #e7edf7; }
 .app-shell[data-theme="dark"] :is(
   .workspace-tabs,
-  .slide-frame-aspect,
+  .slide-frame-aspect-options,
   .math-tool-categories,
   .math-interaction-options,
   .equation-source,
@@ -1798,6 +1810,7 @@ button { color: inherit; }
   .slide-frame-aspect-buttons button,
   .rail-empty button,
   .rail-mode-switch,
+  .present-button,
   .fullscreen-button,
   .export-dialog > button:not(.dialog-cancel),
   .dialog-cancel,
@@ -1846,6 +1859,23 @@ button { color: inherit; }
 .app-shell[data-theme="dark"] .settings-toggle input:checked { border-color: var(--accent); background: #456fce; }
 .app-shell[data-theme="dark"] .settings-group,
 .app-shell[data-theme="dark"] .settings-footer { border-color: var(--border); }
+.app-shell[data-theme="dark"] .settings-group h3 { color: #b9c5d7; }
+.app-shell[data-theme="dark"] .settings-trigger { color: #d2dced; }
+.app-shell[data-theme="dark"] .save-state { color: #b9c5d7; }
+.app-shell[data-theme="dark"] .topbar-menu.is-open .topbar-menu-trigger {
+  border-color: #52617a;
+  background: #263248;
+  color: #eef3fa;
+}
+.app-shell[data-theme="dark"] .file-actions .topbar-tool.is-active {
+  border-color: #7196eb;
+  background: #29446f;
+  color: #c7d6ff;
+}
+.app-shell[data-theme="dark"] .file-actions .export-split button:hover {
+  background: #2a3850;
+  color: #eef3fa;
+}
 .app-shell[data-theme="dark"] .document-title:hover { background: #202b3e; }
 .app-shell[data-theme="dark"] .document-title:focus { background: #111a28; }
 .app-shell[data-theme="dark"] :is(.slide-thumbnail:hover, .pdf-page-item:hover) { background: #202b3e; }
@@ -1853,6 +1883,197 @@ button { color: inherit; }
   border-color: #648be1;
   background: #1c3158;
 }
+.app-shell[data-theme="dark"] .slide-count {
+  background: #263248;
+  color: #d9e2f0;
+}
+.app-shell[data-theme="dark"] .slide-frame-aspect-options {
+  border-color: var(--border);
+  background: #111a28;
+}
+.app-shell[data-theme="dark"] .slide-frame-aspect-heading { color: #dbe4f1; }
+.app-shell[data-theme="dark"] .slide-frame-aspect-heading > span {
+  background: #263248;
+  color: #c0cbdb;
+}
+.app-shell[data-theme="dark"] :is(
+  .slide-frame-aspect-buttons small,
+  .slide-frame-aspect-help,
+  .morph-duration-control,
+  .morph-duration-control output
+) { color: #b9c5d7; }
+.app-shell[data-theme="dark"] .toggle-morph-button.is-active {
+  border-color: #7196eb;
+  background: #29446f;
+  color: #c7d6ff;
+}
+.app-shell[data-theme="dark"] .slide-thumbnail-actions button { color: #c0cbdb; }
+.app-shell[data-theme="dark"] .slide-thumbnail-actions button:hover:not(:disabled) {
+  border-color: #617391;
+  background: #2a3850;
+  color: #eef3fa;
+}
+.app-shell[data-theme="dark"] .pdf-page-total {
+  background: #263248;
+  color: #d9e2f0;
+}
+.app-shell[data-theme="dark"] :is(.pdf-output-position, .pdf-page-label) { color: #c0cbdb; }
+.app-shell[data-theme="dark"] .page-sheet {
+  border-color: #45536b;
+  background: #111a28;
+  box-shadow: 0 2px 5px rgb(0 0 0 / 28%);
+}
+.app-shell[data-theme="dark"] .pdf-page-open .page-sheet img { background: #111a28; }
+.app-shell[data-theme="dark"] :is(.pdf-page-actions button, .pdf-drag-handle) { color: #b9c5d7; }
+.app-shell[data-theme="dark"] :is(
+  .pdf-page-actions button:hover:not(:disabled),
+  .pdf-drag-handle:hover
+) {
+  border-color: #617391;
+  background: #2a3850;
+  color: #eef3fa;
+}
+.app-shell[data-theme="dark"] .footer-zoom-controls {
+  border-color: #45536b;
+  background: #111a28;
+}
+.app-shell[data-theme="dark"] :is(
+  .footer-zoom-controls button,
+  .footer-history-button,
+  .pdf-toolbar-toggle,
+  .footer-hide
+) { color: #d2dced; }
+.app-shell[data-theme="dark"] :is(
+  .pdf-toolbar-toggle.is-active,
+  .fullscreen-button.is-active
+) {
+  background: #29446f;
+  color: #c7d6ff;
+}
+.app-shell[data-theme="dark"] .presentation-controls button:hover:not(:disabled),
+.app-shell[data-theme="dark"] .presentation-controls button.is-active {
+  border-color: #7196eb;
+  background: #29446f;
+  color: #dbe7ff;
+}
+.app-shell[data-theme="dark"] .presentation-controls button.presentation-colour-swatch:hover:not(:disabled),
+.app-shell[data-theme="dark"] .presentation-controls .presentation-colour-swatch:focus-visible {
+  border-color: white;
+  background: var(--swatch-colour);
+  box-shadow: 0 0 0 3px #9db8f4;
+}
+.app-shell[data-theme="dark"] .presentation-palette-label { color: #c0cbdb; }
+.app-shell[data-theme="dark"] :is(
+  .presentation-separator,
+  .presentation-ink-palette,
+  .presentation-width-picker
+) { border-color: #45536b; }
+.app-shell[data-theme="dark"] .presentation-separator { background: #45536b; }
+.app-shell[data-theme="dark"] .presentation-controls .presentation-width-button {
+  border-color: #52617a;
+  background: #202b3e;
+  color: #dbe5f5;
+}
+.app-shell[data-theme="dark"] .presentation-controls .presentation-width-button:hover:not(:disabled),
+.app-shell[data-theme="dark"] .presentation-controls .presentation-width-button:focus-visible,
+.app-shell[data-theme="dark"] .presentation-controls .presentation-width-button.is-selected {
+  border-color: #7196eb;
+  background: #29446f;
+  color: #dbe7ff;
+}
+.app-shell[data-theme="dark"] .page-status .pdf-rail-show {
+  border-color: #52617a;
+  background: #202b3e;
+  color: #e7edf7;
+}
+.app-shell[data-theme="dark"] .page-status .pdf-rail-show:hover:not(:disabled) {
+  border-color: #7196eb;
+  background: #2a3850;
+  color: #eef3fa;
+}
+.app-shell[data-theme="dark"] :is(
+  .screenshot-library-heading p,
+  .screenshot-library-empty p,
+  .screenshot-library-message,
+  .screenshot-card-dimensions,
+  .screenshot-card-meta time
+) { color: #b9c5d7; }
+.app-shell[data-theme="dark"] :is(.screenshot-library-empty, .screenshot-card) {
+  border-color: #45536b;
+  background: #111a28;
+}
+.app-shell[data-theme="dark"] .screenshot-card-thumbnail {
+  background: #202b3e;
+  color: #c0cbdb;
+}
+.app-shell[data-theme="dark"] .screenshot-card-image-placeholder {
+  background: #111a28;
+  color: #aeb9ca;
+}
+.app-shell[data-theme="dark"] .math-interaction-guides line { stroke: #8fb1ff; }
+.app-shell[data-theme="dark"] .math-interaction-guides circle {
+  fill: #101722;
+  stroke: #8fb1ff;
+}
+.app-shell[data-theme="dark"] .math-interaction-guides text { fill: #c7d6ff; }
+.app-shell[data-theme="dark"] :is(.math-tools-experimental-toggle, .math-tool-card) {
+  border-color: #45536b;
+  background: #202b3e;
+  color: #e0e8f5;
+}
+.app-shell[data-theme="dark"] .math-tools-experimental-toggle small { color: #b9c5d7; }
+.app-shell[data-theme="dark"] .math-tool-categories button { color: #c0cbdb; }
+.app-shell[data-theme="dark"] .math-tool-categories button:hover { color: #eef3fa; background: #202b3e; }
+.app-shell[data-theme="dark"] .math-tool-categories button[aria-selected="true"] { color: #a9c2ff; }
+.app-shell[data-theme="dark"] :is(
+  .math-tool-config label,
+  .math-interaction-options label
+) { color: #c0cbdb; }
+.app-shell[data-theme="dark"] :is(
+  .math-tool-config input[type="number"],
+  .math-tool-config input[type="text"],
+  .math-tool-config select,
+  .math-interaction-options input[type="number"],
+  .math-interaction-options select
+) {
+  border-color: #52617a;
+  background: #111a28;
+  color: #e7edf7;
+}
+.app-shell[data-theme="dark"] .math-tool-config-preview {
+  border-color: #45536b;
+  background: #111a28;
+}
+.app-shell[data-theme="dark"] .math-tool-error { color: #ffb4b4; }
+.app-shell[data-theme="dark"] .math-tool-card:hover,
+.app-shell[data-theme="dark"] .math-tool-card:focus-visible {
+  border-color: #7196eb;
+  background: #263248;
+  box-shadow: 0 0 0 3px rgb(127 167 255 / 24%);
+}
+.app-shell[data-theme="dark"] .math-tool-card-heading > span {
+  background: #243d70;
+  color: #c7d6ff;
+}
+.app-shell[data-theme="dark"] .math-tool-card-heading svg { color: #a9c2ff; }
+.app-shell[data-theme="dark"] :is(
+  .pdf-add-page,
+  .new-slide-button,
+  .draw-frame-button.is-active,
+  .draw-frame-button.is-active:hover,
+  .file-actions .topbar-library.is-active,
+  .dialog-primary
+) {
+  border-color: #204aa5;
+  background: #2859c5;
+  color: #fff;
+}
+.app-shell[data-theme="dark"] :is(
+  .pdf-add-page:hover,
+  .new-slide-button:hover,
+  .file-actions .topbar-library.is-active:hover,
+  .dialog-primary:hover:not(:disabled)
+) { border-color: #183f94; background: #204aa5; }
 .app-shell[data-theme="dark"] .brand-mark { background: #e7edf7; color: #172033; }
 .app-shell[data-theme="dark"] :is(.topbar-show, .footer-show) {
   border-color: #45536b;

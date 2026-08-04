@@ -34,3 +34,59 @@ python3 generate_transparency_group.py
 
 SHA-256:
 `295724b0db2caa526aef9c6b0a4827c178ca7409e379e78f769a976091961c70`.
+
+`type3-rgb-image.pdf` is generated with Python's standard library. It combines
+an ordinary red vector marker with a Type3 glyph whose nested character
+procedure paints a four-colour RGB image. The fixture exercises dark-preview
+handling for operator lists that PDF.js renders below the page's top-level
+`operationsFilter` callback.
+
+Regenerate it with:
+
+```sh
+python3 generate_type3_rgb_image.py
+```
+
+SHA-256:
+`1674bbe244c68e886806d447fa22d01e797f8eac503a0f14c7cb9ef8bd4b94a4`.
+
+`tiling-rgb-image.pdf` uses the same four-colour RGB image as a coloured
+tiling-pattern paint stream. It is useful when debugging pattern-canvas
+compositing separately from Type3 glyph execution.
+
+Regenerate it with:
+
+```sh
+python3 generate_tiling_rgb_image.py
+```
+
+SHA-256:
+`71be05c5b819667bf48d180f73ddd7f089ca1bd84f0aa2ccf77e21bbdc0049be`.
+
+`image-mask.pdf` is a standard-library-generated one-pixel stencil image
+painted with a red fill. It verifies that image-mask colour application still
+receives the dark vector filter after ordinary RGB `drawImage` composites are
+left natural.
+
+Regenerate it with:
+
+```sh
+python3 generate_image_mask.py
+```
+
+SHA-256:
+`e6d55f26264b087b50b37a637224e96aec27171ab0998c3263b98e0accd5eee4`.
+
+`tiling-vector-group.pdf` paints a red vector rectangle inside an isolated
+transparency-group Form XObject, then uses that form as a coloured tiling
+pattern. It verifies that a nested vector surface is not dark-filtered again
+when PDF.js composites it into its parent pattern canvas.
+
+Regenerate it with:
+
+```sh
+python3 generate_tiling_vector_group.py
+```
+
+SHA-256:
+`49ade18c5cad7179951d87226b6849481b652eb7b651f0825e3a4b8dc402d789`.
