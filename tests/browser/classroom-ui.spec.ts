@@ -635,6 +635,14 @@ async function openClassroomFixture(
   await expect(page.locator(".busy-overlay")).toHaveCount(0);
 }
 
+async function openSlideSettings(page: import("@playwright/test").Page) {
+  const trigger = page.getByRole("button", { name: "Slide settings", exact: true });
+  if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click();
+  const dialog = page.getByRole("dialog", { name: "Slide settings", exact: true });
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
 type AutosavedElementState = {
   customData?: { classroomSlide?: { kind?: string; version?: number } };
   frameId: string | null;
@@ -3927,14 +3935,56 @@ test("moves slide zoom and history controls into the footer", async ({ page }) =
 
   await page.setViewportSize({ width: 390, height: 844 });
   const phoneFooter = await page.locator(".statusbar").boundingBox();
-  const phoneZoom = await zoomControls.boundingBox();
   const phoneActions = await page.locator(".statusbar-actions").boundingBox();
   expect(phoneFooter).not.toBeNull();
-  expect(phoneZoom).not.toBeNull();
+  await expect(zoomControls).toBeHidden();
   expect(phoneActions).not.toBeNull();
-  expect((phoneZoom?.x || 0) + (phoneZoom?.width || 0)).toBeLessThanOrEqual(phoneActions?.x || 0);
   expect((phoneActions?.x || 0) + (phoneActions?.width || 0))
     .toBeLessThanOrEqual((phoneFooter?.x || 0) + (phoneFooter?.width || 0));
+});
+
+test("collapses the Slides navigator and uses it as a dismissible phone drawer", async ({ page }) => {
+  const opening = classroomTestFrame("opening-slide", "Opening", 100, 100, 500, 300, "a0", true);
+  const practice = classroomTestFrame("practice-slide", "Practice", 700, 100, 500, 300, "a1", true);
+  await openClassroomFixture(page, [opening, practice], [
+    { id: "opening-record", frameId: opening.id, title: "Opening", titleMode: "custom" },
+    { id: "practice-record", frameId: practice.id, title: "Practice", titleMode: "custom" },
+  ]);
+  const editor = page.locator(".editor-host .excalidraw");
+  await editor.evaluate((element) => element.setAttribute("data-slide-drawer-instance", "original"));
+
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect(page.getByTestId("slide-page-indicator")).toHaveText("Slide 1 of 2");
+  await expect(page.getByRole("button", { name: "Previous slide", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Next slide", exact: true }).click();
+  await expect(page.getByTestId("slide-page-indicator")).toHaveText("Slide 2 of 2");
+  await expect(page.getByRole("button", { name: "Next slide", exact: true })).toBeDisabled();
+
+  const expandedEditor = await page.locator(".editor-region").boundingBox();
+  await page.getByRole("button", { name: "Hide slide navigator", exact: true }).click();
+  await expect(page.locator("#slide-rail")).toHaveCount(0);
+  await expect(page.locator(".app-shell")).toHaveClass(/is-slide-rail-hidden/);
+  const collapsedEditor = await page.locator(".editor-region").boundingBox();
+  expect((collapsedEditor?.width || 0)).toBeGreaterThan((expandedEditor?.width || 0) + 150);
+  await expect(editor).toHaveAttribute("data-slide-drawer-instance", "original");
+
+  await page.getByRole("button", { name: "Show slide navigator", exact: true }).click();
+  await expect(page.locator(".slide-thumbnail[aria-current='page'] .slide-caption"))
+    .toHaveText("Practice");
+  await expect(page.getByRole("button", { name: "Open slide 2: Practice", exact: true }))
+    .toBeFocused();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("button", { name: "Close slide navigator", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /Open slide 1: Opening/ }).click();
+  await expect(page.locator("#slide-rail")).toHaveCount(0);
+  await expect(page.getByTestId("slide-page-indicator")).toHaveText("Slide 1 of 2");
+  await expect(page.locator(".slide-rail-backdrop")).toHaveCount(0);
+  await page.getByRole("button", { name: "Show slide navigator", exact: true }).click();
+  await page.getByRole("button", { name: "Close slide navigator", exact: true }).click();
+  await expect(page.locator("#slide-rail")).toHaveCount(0);
+  await expect(editor).toHaveAttribute("data-slide-drawer-instance", "original");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 });
 
 test("hides and restores the navigation by button or keyboard shortcut", async ({ page }) => {
@@ -4009,6 +4059,7 @@ test("keeps the Slides Present control contained at desktop and phone widths", a
 
 test("toggles and persists the Morph slide transition", async ({ page }) => {
   await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await openSlideSettings(page);
   const morph = page.getByRole("button", { name: "Morph", exact: true });
   await expect(morph).toBeVisible();
   await expect(morph).toHaveAttribute("aria-pressed", "false");
@@ -4025,6 +4076,7 @@ test("toggles and persists the Morph slide transition", async ({ page }) => {
   await page.reload();
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
   await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await openSlideSettings(page);
   await expect(page.getByRole("button", { name: "Morph", exact: true }))
     .toHaveAttribute("aria-pressed", "true");
   await expect(page.getByRole("slider", { name: "Morph duration", exact: true })).toHaveValue("5000");
@@ -4032,6 +4084,7 @@ test("toggles and persists the Morph slide transition", async ({ page }) => {
 
 test("cancels Draw slide when leaving Slides mode", async ({ page }) => {
   await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await openSlideSettings(page);
   await page.getByRole("button", { name: "Draw slide", exact: true }).click();
   await expect(page.getByTestId("slide-frame-draw-overlay")).toBeVisible();
   await page.keyboard.press("ControlOrMeta+f");
@@ -4056,6 +4109,7 @@ test("requires Draw slide for each 16:9, 4:3, freeform, and touch slide", async 
   const editor = page.locator(".editor-host .excalidraw");
   await editor.evaluate((node) => node.setAttribute("data-aspect-frame-instance", "original"));
   await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await openSlideSettings(page);
   const drawFrame = page.getByRole("button", { name: "Draw slide", exact: true });
   const aspectOptions = page.locator("#slide-frame-aspect-options");
   await expect(aspectOptions).toHaveCount(0);
@@ -4101,6 +4155,7 @@ test("requires Draw slide for each 16:9, 4:3, freeform, and touch slide", async 
   const constrained = await autosavedFrameAspectSummary(page);
   expect(constrained?.frames[0]?.width || 0).toBeGreaterThanOrEqual(300);
   expect(constrained?.frames[0]?.height || 0).toBeGreaterThanOrEqual(200);
+  await openSlideSettings(page);
   await expect(drawFrame).toHaveAttribute("aria-pressed", "false");
   await expect(aspectOptions).toHaveCount(0);
   await expect(page.getByTestId("toolbar-selection")).toBeChecked();
@@ -4115,6 +4170,7 @@ test("requires Draw slide for each 16:9, 4:3, freeform, and touch slide", async 
     (await autosavedFrameAspectSummary(page))?.frames.length || 0
   )).toBe(1);
 
+  await openSlideSettings(page);
   await drawFrame.click();
   await expect(drawFrame).toHaveAttribute("aria-pressed", "true");
   await expect(widescreen).toHaveAttribute("aria-pressed", "true");
@@ -4126,6 +4182,7 @@ test("requires Draw slide for each 16:9, 4:3, freeform, and touch slide", async 
   await expect.poll(async () => (
     (await autosavedFrameAspectSummary(page))?.frames[1]?.ratio || 0
   )).toBeCloseTo(16 / 9, 5);
+  await openSlideSettings(page);
   await expect(drawFrame).toHaveAttribute("aria-pressed", "false");
   await expect(editor).toHaveAttribute("data-aspect-frame-instance", "original");
   await page.locator('.statusbar .footer-history-button[aria-label="Undo"]').click();
@@ -4140,6 +4197,7 @@ test("requires Draw slide for each 16:9, 4:3, freeform, and touch slide", async 
   await page.reload();
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
   await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await openSlideSettings(page);
   await expect(page.locator("#slide-frame-aspect-options")).toHaveCount(0);
   await page.getByRole("button", { name: "Draw slide", exact: true }).click();
   const restoredWidescreen = page.getByRole("button", { name: /16:9.*1080p and 4K/ });
@@ -4171,6 +4229,7 @@ test("requires Draw slide for each 16:9, 4:3, freeform, and touch slide", async 
   }).toBe(3);
   const fourByThree = await autosavedFrameAspectSummary(page);
   expect(fourByThree?.frames[2]?.ratio || 0).toBeCloseTo(4 / 3, 5);
+  await openSlideSettings(page);
   await expect(drawFrame).toHaveAttribute("aria-pressed", "false");
 
   await drawFrame.click();
@@ -4190,10 +4249,14 @@ test("requires Draw slide for each 16:9, 4:3, freeform, and touch slide", async 
   const freeform = await autosavedFrameAspectSummary(page);
   expect(freeform?.frames[3]?.ratio || 0).not.toBeCloseTo(16 / 9, 2);
   expect(freeform?.frames[3]?.ratio || 0).not.toBeCloseTo(4 / 3, 2);
+  await openSlideSettings(page);
   await expect(drawFrame).toHaveAttribute("aria-pressed", "false");
 
   await page.setViewportSize({ width: 390, height: 844 });
   await drawFrame.click();
+  await expect(page.locator("#slide-rail")).toHaveCount(0);
+  await page.getByRole("button", { name: "Show slide navigator", exact: true }).click();
+  await openSlideSettings(page);
   await expect(page.locator("#slide-frame-aspect-options")).toBeVisible();
   const railBounds = await page.locator("#slide-rail").boundingBox();
   expect(railBounds).not.toBeNull();
@@ -4207,6 +4270,7 @@ test("requires Draw slide for each 16:9, 4:3, freeform, and touch slide", async 
   await mobileWidescreen.click();
   await expect(mobileWidescreen).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByText(/16:9 slide ready/i)).toBeVisible();
+  await page.getByRole("button", { name: "Hide slide navigator", exact: true }).click();
   const mobileEditorBounds = await page.locator(".editor-host").boundingBox();
   expect(mobileEditorBounds).not.toBeNull();
   const drawOverlay = page.getByTestId("slide-frame-draw-overlay");
@@ -4236,6 +4300,8 @@ test("requires Draw slide for each 16:9, 4:3, freeform, and touch slide", async 
   const mobileFrame = await autosavedFrameAspectSummary(page);
   expect(mobileFrame?.frames[4]?.ratio || 0).toBeCloseTo(16 / 9, 5);
 
+  await page.getByRole("button", { name: "Show slide navigator", exact: true }).click();
+  await openSlideSettings(page);
   await expect(drawFrame).toHaveAttribute("aria-pressed", "false");
   await expect(drawFrame).toHaveAttribute("aria-expanded", "false");
   await expect(page.locator("#slide-frame-aspect-options")).toHaveCount(0);
@@ -4453,8 +4519,9 @@ test("rail deletion removes a grouped slide boundary but preserves and ungroups 
   ]);
   await page.getByRole("button", { name: "Slides", exact: true }).click();
   await page.locator(".slide-thumbnail").click();
+  await page.getByRole("button", { name: /Slide 1 actions:/ }).click();
   page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "Delete selected slide", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Delete slide", exact: true }).click();
   await expect(page.locator(".slide-thumbnail")).toHaveCount(0);
   await expect.poll(async () => {
     const state = await autosavedElementsById(page, ["slide", "content"]);
@@ -4465,6 +4532,47 @@ test("rail deletion removes a grouped slide boundary but preserves and ungroups 
       slideExists: Boolean(state.slide),
     };
   }).toEqual({ contentDeleted: false, contentFrameId: null, contentGroups: [], slideExists: false });
+});
+
+test("deleting an unselected slide preserves the current slide and editor selection", async ({ page }) => {
+  const opening = classroomTestFrame("opening-slide", "Opening", 100, 100, 500, 300, "a1", true);
+  const practice = classroomTestFrame("practice-slide", "Practice", 700, 100, 500, 300, "a2", true);
+  const content = exportTestRectangle("opening-content", 220, 180, 120, 80, "a0");
+  await openClassroomFixture(page, [content, opening, practice], [
+    { id: "opening-record", frameId: opening.id, title: "Opening", titleMode: "custom" },
+    { id: "practice-record", frameId: practice.id, title: "Practice", titleMode: "custom" },
+  ]);
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.getByRole("button", { name: "Open slide 1: Opening", exact: true }).click();
+  await expect(async () => {
+    const contentPoint = await liveScenePointInViewport(page, {
+      x: content.x + content.width / 2,
+      y: content.y + content.height / 2,
+    });
+    await page.mouse.click(contentPoint.x, contentPoint.y);
+    expect(await page.evaluate((elementId) => {
+      const app = (window as unknown as {
+        h?: { app?: { state?: { selectedElementIds?: Record<string, boolean> } } };
+      }).h?.app;
+      return Boolean(app?.state?.selectedElementIds?.[elementId]);
+    }, content.id)).toBe(true);
+  }).toPass({ timeout: 5_000 });
+
+  await page.getByRole("button", { name: "Slide 2 actions: Practice", exact: true })
+    .evaluate((button: HTMLButtonElement) => button.click());
+  page.once("dialog", (dialog) => void dialog.accept());
+  await page.getByRole("menuitem", { name: "Delete slide", exact: true })
+    .evaluate((button: HTMLButtonElement) => button.click());
+
+  await expect(page.locator(".slide-thumbnail .slide-caption")).toHaveText(["Opening"]);
+  await expect(page.getByRole("button", { name: "Open slide 1: Opening", exact: true }))
+    .toHaveAttribute("aria-current", "page");
+  await expect.poll(() => page.evaluate((elementId) => {
+    const app = (window as unknown as {
+      h?: { app?: { state?: { selectedElementIds?: Record<string, boolean> } } };
+    }).h?.app;
+    return Boolean(app?.state?.selectedElementIds?.[elementId]);
+  }, content.id)).toBe(true);
 });
 
 test("commits a pending keyboard edit before deleting its slide boundary", async ({ page }) => {
@@ -4515,7 +4623,9 @@ test("commits a pending keyboard edit before deleting its slide boundary", async
     }).h?.app;
     return app?.scene?.getNonDeletedElement?.(elementId)?.x;
   }, content.id)).toBe(content.x + 1);
-  const slideDelete = page.getByRole("button", { name: "Delete selected slide", exact: true });
+  await page.getByRole("button", { name: /Slide 1 actions:/ })
+    .evaluate((button: HTMLButtonElement) => button.click());
+  const slideDelete = page.getByRole("menuitem", { name: "Delete slide", exact: true });
   page.once("dialog", (dialog) => void dialog.accept());
   await slideDelete.evaluate((button: HTMLButtonElement) => button.click());
   await page.keyboard.up("ArrowRight");
@@ -4546,29 +4656,63 @@ test("reorders slides with visible keyboard and touch controls", async ({ page }
   const captions = page.locator(".slide-thumbnail .slide-caption");
   const liveAnnouncement = page.locator("#slide-rail [aria-live='polite']");
   await expect(captions).toHaveText(["Opening", "Practice"]);
-  await expect(page.getByRole("button", { name: "Move slide 1 earlier: Opening", exact: true })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Move slide 2 later: Practice", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Slide 1 actions: Opening", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "Move earlier", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Slide 2 actions: Practice", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "Move later", exact: true })).toBeDisabled();
 
-  const movePracticeEarlier = page.getByRole("button", {
-    name: "Move slide 2 earlier: Practice",
-    exact: true,
-  });
+  const movePracticeEarlier = page.getByRole("menuitem", { name: "Move earlier", exact: true });
   await expect(movePracticeEarlier).toBeVisible();
   await movePracticeEarlier.focus();
   await movePracticeEarlier.press("Enter");
   await expect(captions).toHaveText(["Practice", "Opening"]);
   await expect(liveAnnouncement).toHaveText("Moved Practice to slide position 1.");
-  await expect(page.getByRole("button", { name: "Move slide 1 earlier: Practice", exact: true })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Move slide 2 later: Opening", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Slide 1 actions: Practice", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "Move earlier", exact: true })).toBeDisabled();
 
-  const movePracticeLater = page.getByRole("button", {
-    name: "Move slide 1 later: Practice",
-    exact: true,
-  });
+  const movePracticeLater = page.getByRole("menuitem", { name: "Move later", exact: true });
   await expect(movePracticeLater).toBeVisible();
   await movePracticeLater.click();
   await expect(captions).toHaveText(["Opening", "Practice"]);
   await expect(liveAnnouncement).toHaveText("Moved Practice to slide position 2.");
+});
+
+test("applies consecutive slide drops to the latest order", async ({ page }) => {
+  const opening = classroomTestFrame("rapid-opening", "Opening", 100, 100, 500, 300, "a0", true);
+  const practice = classroomTestFrame("rapid-practice", "Practice", 700, 100, 500, 300, "a1", true);
+  const review = classroomTestFrame("rapid-review", "Review", 1_300, 100, 500, 300, "a2", true);
+  await openClassroomFixture(page, [opening, practice, review], [
+    { id: "rapid-opening-record", frameId: opening.id, title: "Opening", titleMode: "custom" },
+    { id: "rapid-practice-record", frameId: practice.id, title: "Practice", titleMode: "custom" },
+    { id: "rapid-review-record", frameId: review.id, title: "Review", titleMode: "custom" },
+  ]);
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+
+  await page.locator(".slide-thumbnail").evaluateAll((cards) => {
+    const dispatchDrop = (target: Element, movingId: string) => {
+      const dataTransfer = new DataTransfer();
+      dataTransfer.setData("application/x-patterdraw-slide", movingId);
+      dataTransfer.setData("text/plain", movingId);
+      target.dispatchEvent(new DragEvent("drop", {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer,
+      }));
+    };
+    const [openingCard, practiceCard, reviewCard] = cards;
+    dispatchDrop(openingCard, "rapid-review-record");
+    dispatchDrop(reviewCard, "rapid-practice-record");
+  });
+
+  await expect(page.locator(".slide-thumbnail .slide-caption"))
+    .toHaveText(["Practice", "Review", "Opening"]);
+  await expect.poll(async () => {
+    const saved = await keyvalValue<{ slideOrder: Array<{ id: string }> }>(
+      page,
+      "patterdraw:autosave:project:v1",
+    );
+    return saved?.slideOrder.map((slide) => slide.id);
+  }).toEqual(["rapid-practice-record", "rapid-review-record", "rapid-opening-record"]);
 });
 
 test("preserves custom slide names through reorder, PDF and PowerPoint export, and project round trip", async ({ page }) => {
@@ -4645,6 +4789,7 @@ test("preserves custom slide names through reorder, PDF and PowerPoint export, a
       .not.toContain('TargetMode="External"');
   }
 
+  await openSlideSettings(page);
   const drawSlide = page.getByRole("button", { name: "Draw slide", exact: true });
   await drawSlide.click();
   await page.getByRole("button", { name: /4:3.*Old TVs and smartboards/ }).click();
@@ -4705,6 +4850,7 @@ test("toggles slide frames for a cleaner board without removing slides", async (
   await page.getByRole("button", { name: "Add slide", exact: true }).click();
   await expect(page.locator(".slide-thumbnail")).toHaveCount(1);
 
+  await openSlideSettings(page);
   const hideFrames = page.getByRole("button", { name: "Hide slide frames", exact: true });
   await expect(hideFrames).toHaveAttribute("aria-pressed", "true");
   await hideFrames.click();
@@ -4720,6 +4866,7 @@ test("toggles slide frames for a cleaner board without removing slides", async (
   await expect.poll(() => autosavedFrameVisibility(page)).toBe(false);
 
   await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await openSlideSettings(page);
   await page.getByRole("button", { name: "Show slide frames", exact: true }).click();
   await expect(page.getByRole("button", { name: "Hide slide frames", exact: true }))
     .toHaveAttribute("aria-pressed", "true");
@@ -4729,15 +4876,16 @@ test("toggles slide frames for a cleaner board without removing slides", async (
 
 test("deletes the selected slide frame while preserving its board content", async ({ page }) => {
   await page.getByRole("button", { name: "Slides", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Delete selected slide", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("menuitem", { name: "Delete slide", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Add slide", exact: true }).click();
   await expect(page.locator(".slide-thumbnail")).toHaveCount(1);
   const selectedSlideWrap = page.locator(".slide-thumbnail-wrap").filter({
     has: page.locator(".slide-thumbnail.is-selected"),
   });
-  const slideDelete = selectedSlideWrap.getByRole("button", { name: "Delete selected slide", exact: true });
+  await selectedSlideWrap.getByRole("button", { name: /Slide 1 actions:/ }).click();
+  const slideDelete = selectedSlideWrap.getByRole("menuitem", { name: "Delete slide", exact: true });
   await expect(slideDelete).toBeVisible();
-  await expect(slideDelete).toHaveText("");
+  await expect(slideDelete).toContainText("Delete slide");
   await expect(slideDelete.locator("svg")).toHaveCount(1);
 
   await page.getByTestId("toolbar-rectangle").check({ force: true });
@@ -4749,13 +4897,14 @@ test("deletes the selected slide frame while preserving its board content", asyn
     framedRectangleCount: 0,
   });
 
+  await selectedSlideWrap.getByRole("button", { name: /Slide 1 actions:/ }).click();
   page.once("dialog", async (dialog) => {
     expect(dialog.message()).toContain("The frame will be removed, but its board content will stay.");
     await dialog.accept();
   });
   await slideDelete.click();
   await expect(page.locator(".slide-thumbnail")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Delete selected slide", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("menuitem", { name: "Delete slide", exact: true })).toHaveCount(0);
   await expect.poll(() => autosavedSlideDeletion(page), { timeout: 8_000 }).toEqual({
     slideCount: 0,
     frameCount: 0,
@@ -4961,6 +5110,7 @@ test("fits the first slide after presentation layout opens", async ({ page }) =>
   });
 
   await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await openSlideSettings(page);
   const morph = page.getByRole("button", { name: "Morph", exact: true });
   await expect(morph).toHaveAttribute("aria-pressed", "false");
   await morph.click();
@@ -7504,9 +7654,11 @@ test("adds a blank slide with a live preview without remounting or covering the 
   await page.getByRole("button", { name: "Slides", exact: true }).click();
   await expect(page.locator(".app-shell")).toHaveClass(/is-slide-mode/);
   const addSlide = page.getByRole("button", { name: "Add slide", exact: true });
+  await openSlideSettings(page);
   const drawAroundContent = page.getByRole("button", { name: "Draw slide", exact: true });
   await expect(addSlide).toBeVisible();
   await expect(drawAroundContent).toBeVisible();
+  await page.getByRole("button", { name: "Slide settings", exact: true }).click();
 
   const railBounds = await page.locator("#slide-rail").boundingBox();
   const editorBounds = await page.locator(".editor-region").boundingBox();
@@ -7519,7 +7671,9 @@ test("adds a blank slide with a live preview without remounting or covering the 
   await expect(slideCards).toHaveCount(1);
   const activeSlide = slideCards.first();
   await expect(activeSlide).toHaveAttribute("aria-current", "page");
+  await openSlideSettings(page);
   await expect(drawAroundContent).toBeVisible();
+  await page.getByRole("button", { name: "Slide settings", exact: true }).click();
 
   const preview = activeSlide.locator(".slide-preview img");
   await expectLoadedPreview(preview);
@@ -7591,6 +7745,7 @@ test("adds a blank slide with a live preview without remounting or covering the 
   }
   await expect(page.locator(".presentation-controls")).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "Hide slide navigator", exact: true }).click();
   await page.locator(".present-button").click();
   await expect(page.locator(".presentation-controls")).toHaveCSS("flex-direction", "column");
   await expect(page.getByRole("group", { name: "Ink colours" })).toBeVisible();

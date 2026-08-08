@@ -272,8 +272,10 @@ function hasVisibleModalSurface(): boolean {
     [
       '.modal-backdrop [role="dialog"]',
       '.settings-popover[role="dialog"]',
+      '.slide-settings-popover[role="dialog"]',
       '.math-interaction-panel[role="dialog"]',
       '.topbar-menu-popover[role="menu"]',
+      '.slide-thumbnail-menu[role="menu"]',
       '.editor-host .excalidraw .dropdown-menu',
       '.editor-host .excalidraw .context-menu',
       '.screenshot-capture-overlay',
@@ -586,6 +588,7 @@ export default function App() {
   const [presentation, setPresentation] = useState<PresentationState | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("board");
+  const [isSlideRailVisible, setIsSlideRailVisible] = useState(true);
   const [pdfRailWidth, setPdfRailWidth] = useState(PDF_RAIL_DEFAULT_WIDTH);
   const [isPdfRailVisible, setIsPdfRailVisible] = useState(true);
   const [isPdfToolbarVisible, setIsPdfToolbarVisible] = useState(true);
@@ -707,6 +710,7 @@ export default function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const insertTriggerRef = useRef<HTMLButtonElement>(null);
   const exportOptionsTriggerRef = useRef<HTMLButtonElement>(null);
+  const slideRailShowButtonRef = useRef<HTMLButtonElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
   const editorHostRef = useRef<HTMLDivElement>(null);
   const projectRef = useRef<ClassroomProject | null>(project);
@@ -2932,6 +2936,29 @@ export default function App() {
     openScene(slide.sceneId, slide.frameId);
   }, [openScene]);
 
+  const hideSlideRail = useCallback(() => {
+    setIsSlideRailVisible(false);
+    window.requestAnimationFrame(() => slideRailShowButtonRef.current?.focus());
+  }, []);
+
+  const showSlideRail = useCallback(() => {
+    setIsSlideRailVisible(true);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const rail = shellRef.current?.querySelector<HTMLElement>("#slide-rail");
+        const focusTarget = rail?.querySelector<HTMLButtonElement>(
+          '.slide-thumbnail[aria-current="page"]',
+        ) || rail?.querySelector<HTMLButtonElement>(".slide-add-button");
+        focusTarget?.focus({ preventScroll: true });
+      });
+    });
+  }, []);
+
+  const openSlideFromRail = useCallback((slide: ClassroomSlide) => {
+    openSlide(slide);
+    if (window.matchMedia("(max-width: 640px)").matches) hideSlideRail();
+  }, [hideSlideRail, openSlide]);
+
   const activateProjectSearchResult = useCallback((result: ProjectSearchResult) => {
     if (!api) return;
     const latestProject = commitPendingScenePersistence();
@@ -2941,6 +2968,7 @@ export default function App() {
     }
     if (result.scope === "slide" && featurePreferencesRef.current.slides) {
       setWorkspaceMode("slides");
+      setIsSlideRailVisible(true);
       setActiveSlideId(result.slideId || null);
     } else if (result.scope === "pdf" && featurePreferencesRef.current.pdf) {
       setWorkspaceMode("pdf");
@@ -3350,6 +3378,7 @@ export default function App() {
   const pageIndex = currentScene?.pdfPage
     ? pdfScenes.findIndex((scene) => scene.id === currentScene.id)
     : -1;
+  const activeSlideIndex = project?.slideOrder.findIndex((slide) => slide.id === activeSlideId) ?? -1;
 
   const persistScreenshots = useCallback(async (items: StoredScreenshot[]) => {
     await saveScreenshotLibrary(items);
@@ -3594,6 +3623,15 @@ export default function App() {
   const changeWorkspaceMode = useCallback((mode: WorkspaceMode) => {
     pendingProjectSearchTargetRef.current = null;
     if (mode !== "slides") pendingSlideFrameActionRef.current = null;
+    if (mode === "slides") {
+      setIsSlideRailVisible(true);
+      setActiveSlideId((current) => {
+        if (project?.slideOrder.some((slide) => slide.id === current)) return current;
+        return project?.slideOrder.find((slide) => slide.sceneId === project.activeSceneId)?.id
+          || project?.slideOrder[0]?.id
+          || null;
+      });
+    }
     if (mode !== "pdf") {
       if (mode === "board") api?.setActiveTool({ type: "selection" });
       setWorkspaceMode(mode);
@@ -3635,6 +3673,7 @@ export default function App() {
 
   const beginSlideFrameAction = useCallback((action: SlideFrameAction) => {
     if (!api || !project) return;
+    setIsSlideRailVisible(true);
     setWorkspaceMode("slides");
     const targetSceneId = boardSceneId(project);
 
@@ -3777,6 +3816,7 @@ export default function App() {
     const slideIndex = currentProject.slideOrder.findIndex((candidate) => candidate.id === slide.id);
     const remainingSlides = removeSlide(currentProject.slideOrder, slide.id);
     const nextSlide = remainingSlides[Math.min(slideIndex, remainingSlides.length - 1)] || null;
+    const deletingActiveSlide = activeSlideId === slide.id;
     const isActiveScene = slide.sceneId === activeSceneIdRef.current;
     const ownsSuppression = isActiveScene && !switchingSceneRef.current;
     const suppressionGeneration = sceneHydrationGenerationRef.current;
@@ -3789,11 +3829,13 @@ export default function App() {
       );
       api.updateScene({
         elements: activeSceneElements,
-        appState: {
-          selectedElementIds: {},
-          selectedGroupIds: {},
-          editingFrame: null,
-        },
+        ...(deletingActiveSlide ? {
+          appState: {
+            selectedElementIds: {},
+            selectedGroupIds: {},
+            editingFrame: null,
+          },
+        } : {}),
         captureUpdate: CaptureUpdateAction.IMMEDIATELY,
       });
     }
@@ -3815,20 +3857,33 @@ export default function App() {
         slideOrder: remainingSlides,
       };
     });
-    setActiveSlideId(nextSlide?.id || null);
+    if (deletingActiveSlide) setActiveSlideId(nextSlide?.id || null);
     api.setToast({ message: "Slide deleted. Its content is still on the board." });
     window.requestAnimationFrame(() => {
       if (ownsSuppression) {
         if (sceneHydrationGenerationRef.current !== suppressionGeneration) return;
         switchingSceneRef.current = false;
       }
-      if (nextSlide) openSlide(nextSlide);
+      if (deletingActiveSlide && nextSlide) openSlide(nextSlide);
     });
-  }, [api, commitLiveScenePersistence, openSlide, project]);
+  }, [activeSlideId, api, commitLiveScenePersistence, openSlide, project]);
 
   const reorderSlides = useCallback((slideId: string, targetId: string) => {
-    if (!project) return;
-    const slideOrder = moveSlide(project.slideOrder, slideId, targetId);
+    const currentProject = projectRef.current;
+    if (!currentProject) return;
+    const slideOrder = moveSlide(currentProject.slideOrder, slideId, targetId);
+    const updatedAt = nowIso();
+    const projectWithSlideOrder = (source: ClassroomProject): ClassroomProject => {
+      const scenes = Object.fromEntries(Object.entries(source.scenes).map(([sceneId, scene]) => {
+        const elements = syncSlideFrameNames(
+          scene.elements as unknown as readonly ExcalidrawElement[],
+          slideOrder,
+        );
+        return [sceneId, { ...scene, elements: elements as unknown as readonly Record<string, unknown>[] }];
+      }));
+      return { ...source, updatedAt, scenes, slideOrder };
+    };
+    projectRef.current = projectWithSlideOrder(currentProject);
     const activeSceneId = activeSceneIdRef.current;
     if (api && activeSceneId) {
       const currentElements = api.getSceneElements();
@@ -3839,16 +3894,11 @@ export default function App() {
     }
     setProject((current) => {
       if (!current) return current;
-      const scenes = Object.fromEntries(Object.entries(current.scenes).map(([sceneId, scene]) => {
-        const elements = syncSlideFrameNames(
-          scene.elements as unknown as readonly ExcalidrawElement[],
-          slideOrder,
-        );
-        return [sceneId, { ...scene, elements: elements as unknown as readonly Record<string, unknown>[] }];
-      }));
-      return { ...current, updatedAt: nowIso(), scenes, slideOrder };
+      const next = projectWithSlideOrder(current);
+      projectRef.current = next;
+      return next;
     });
-  }, [api, project]);
+  }, [api]);
 
   const reorderPdfPage = useCallback((movingId: string, targetId: string, edge: PdfPageDropEdge) => {
     setProject((current) => current ? {
@@ -4195,7 +4245,7 @@ export default function App() {
   return (
     <div
       ref={shellRef}
-      className={`app-shell ${workspaceModeClassName(workspaceMode)} ${workspaceMode === "pdf" && !isPdfRailVisible ? "is-pdf-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfToolbarVisible ? "is-pdf-toolbar-hidden" : ""} ${!isNavigationVisible ? "is-nav-hidden" : ""} ${!isFooterVisible ? "is-footer-hidden" : ""} ${!featurePreferences.projectFind ? "is-project-find-disabled" : ""} ${!featurePreferences.library ? "is-library-disabled" : ""} ${featurePreferences.iconOnlyControls ? "is-icon-only-controls" : ""} ${presentation ? "is-presenting" : ""}`}
+      className={`app-shell ${workspaceModeClassName(workspaceMode)} ${workspaceMode === "slides" && !isSlideRailVisible ? "is-slide-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfRailVisible ? "is-pdf-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfToolbarVisible ? "is-pdf-toolbar-hidden" : ""} ${!isNavigationVisible ? "is-nav-hidden" : ""} ${!isFooterVisible ? "is-footer-hidden" : ""} ${!featurePreferences.projectFind ? "is-project-find-disabled" : ""} ${!featurePreferences.library ? "is-library-disabled" : ""} ${featurePreferences.iconOnlyControls ? "is-icon-only-controls" : ""} ${presentation ? "is-presenting" : ""}`}
       data-theme={editorTheme}
       style={{ "--pdf-rail-width": `${pdfRailWidth}px` } as CSSProperties}
     >
@@ -4261,16 +4311,25 @@ export default function App() {
           </div>
         </section>
       )}
-      {!presentation && workspaceMode === "slides" && (
+      {!presentation && workspaceMode === "slides" && isSlideRailVisible && (
+        <button
+          className="slide-rail-backdrop"
+          type="button"
+          aria-label="Close slide navigator"
+          onClick={hideSlideRail}
+        />
+      )}
+      {!presentation && workspaceMode === "slides" && isSlideRailVisible && (
         <SlideRail
           project={project}
           activeSlideId={activeSlideId}
           onAddSlide={addSlide}
           frameDrawingActive={isSlideFrameDrawingActive}
           onToggleFrameDrawing={toggleSlideFrameDrawing}
-          onOpenSlide={openSlide}
+          onOpenSlide={openSlideFromRail}
           onMoveSlide={reorderSlides}
           onDeleteSlide={deleteSlide}
+          onHide={hideSlideRail}
           framesVisible={areSlideFramesVisible}
           onToggleFrames={toggleSlideFrames}
           frameAspectRatio={project.slideFrameAspectRatio ?? "freeform"}
@@ -4326,6 +4385,20 @@ export default function App() {
             title="Show footer (Ctrl/⌘ + Shift + F)"
           >
             <ShowBottomBarIcon />
+          </button>
+        )}
+        {!presentation && workspaceMode === "slides" && !isSlideRailVisible && !isFooterVisible && (
+          <button
+            ref={slideRailShowButtonRef}
+            className="slide-rail-show-floating"
+            type="button"
+            onClick={showSlideRail}
+            aria-label="Show slide navigator"
+            aria-controls="slide-rail"
+            aria-expanded="false"
+            title="Show slide navigator"
+          >
+            <ShowPanelIcon />
           </button>
         )}
         <div
@@ -4468,15 +4541,52 @@ export default function App() {
                   <span className="icon-label">Pages</span>
                 </button>
               )}
+              {workspaceMode === "slides" && !isSlideRailVisible && (
+                <button
+                  ref={slideRailShowButtonRef}
+                  className="slide-rail-show"
+                  type="button"
+                  onClick={showSlideRail}
+                  aria-label="Show slide navigator"
+                  aria-controls="slide-rail"
+                  aria-expanded="false"
+                  title="Show slide navigator"
+                >
+                  <ShowPanelIcon />
+                  <span className="icon-label">Slides</span>
+                </button>
+              )}
               {pageIndex >= 0 ? (
                 <>
                   <button type="button" disabled={pageIndex === 0} onClick={() => openScene(pdfScenes[pageIndex - 1].id)} aria-label="Previous PDF page"><PreviousIcon /></button>
                   <span>Page {pageIndex + 1} of {pdfScenes.length}</span>
                   <button type="button" disabled={pageIndex >= pdfScenes.length - 1} onClick={() => openScene(pdfScenes[pageIndex + 1].id)} aria-label="Next PDF page"><NextIcon /></button>
                 </>
-              ) : workspaceMode === "slides"
-                ? <span>{project.slideOrder.length} slide{project.slideOrder.length === 1 ? "" : "s"}</span>
-                : <span>Board</span>}
+              ) : workspaceMode === "slides" ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={activeSlideIndex <= 0}
+                    onClick={() => openSlide(project.slideOrder[activeSlideIndex - 1])}
+                    aria-label="Previous slide"
+                  >
+                    <PreviousIcon />
+                  </button>
+                  <span data-testid="slide-page-indicator" aria-live="polite">
+                    {activeSlideIndex >= 0
+                      ? `Slide ${activeSlideIndex + 1} of ${project.slideOrder.length}`
+                      : `Overview · ${project.slideOrder.length} slide${project.slideOrder.length === 1 ? "" : "s"}`}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={project.slideOrder.length === 0 || activeSlideIndex >= project.slideOrder.length - 1}
+                    onClick={() => openSlide(project.slideOrder[activeSlideIndex + 1])}
+                    aria-label="Next slide"
+                  >
+                    <NextIcon />
+                  </button>
+                </>
+              ) : <span>Board</span>}
             </div>
             <div className="footer-zoom-controls" role="group" aria-label={`${workspaceMode === "pdf" ? "PDF" : workspaceMode === "slides" ? "Slides" : "Board"} zoom controls`}>
               <button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => clickEditorControl(".zoom-out-button")}><MinusIcon /></button>
