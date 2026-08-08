@@ -39,6 +39,11 @@ import {
   lassoSelectionSnapshot,
   type LassoInitialSelection,
 } from "./components/LassoOverlay";
+import { BucketFillMenuExtension } from "./components/BucketFillMenuExtension";
+import {
+  BucketFillOverlay,
+  CLASSROOM_BUCKET_FILL_TOOL,
+} from "./components/BucketFillOverlay";
 import { EquationDialog } from "./components/EquationDialog";
 import { MermaidDialog } from "./components/MermaidDialog";
 import { ProjectFindPanel } from "./components/ProjectFindPanel";
@@ -137,7 +142,13 @@ import {
   DEFAULT_SLIDE_MORPH_DURATION_MS,
   normalizeSlideMorphDurationMs,
 } from "./lib/slide-transition";
-import { MAX_PROJECT_BYTES, sanitizeProject, sanitizeScene } from "./lib/safety";
+import {
+  canonicalizePersistedWrapperTool,
+  isPersistedWrapperTool,
+  MAX_PROJECT_BYTES,
+  sanitizeProject,
+  sanitizeScene,
+} from "./lib/safety";
 import {
   assertProjectCanAcceptAdditionalBytes,
   assertProjectFitsContentBudget,
@@ -408,6 +419,7 @@ function serializedSceneFromChange(
   // such as the configured grid size and background colour.
   delete exported.appState.theme;
   delete exported.appState.gridModeEnabled;
+  canonicalizePersistedWrapperTool(exported.appState);
   return sanitizeScene({
     ...previous,
     elements: exported.elements,
@@ -604,6 +616,7 @@ export default function App() {
   const [mathToolEdit, setMathToolEdit] = useState<MathToolEditState | null>(null);
   const [mathInteraction, setMathInteraction] = useState<MathInteractionState | null>(null);
   const [isLassoActive, setIsLassoActive] = useState(false);
+  const [isBucketFillActive, setIsBucketFillActive] = useState(false);
   const [lassoGeometryFactory, setLassoGeometryFactory] = useState<
     ((elements: readonly ExcalidrawElement[]) => LassoGeometrySnapshot) | null
   >(null);
@@ -838,7 +851,15 @@ export default function App() {
   const restoreExportOptionsFocusRef = useRef(false);
   const probabilityRandomizingRef = useRef(false);
   const lassoActiveRef = useRef(false);
+  const bucketFillActiveRef = useRef(false);
   const preparedLassoSelectionRef = useRef<LassoInitialSelection | null>(null);
+  const resetTransientPointerTools = useCallback(() => {
+    preparedLassoSelectionRef.current = null;
+    lassoActiveRef.current = false;
+    bucketFillActiveRef.current = false;
+    setIsLassoActive(false);
+    setIsBucketFillActive(false);
+  }, []);
   const autosaveSnapshotRef = useRef<LoadedClassroomProject | null>(null);
   const autosaveDirtyRef = useRef(false);
   const autosaveSavingRef = useRef(false);
@@ -875,6 +896,10 @@ export default function App() {
     }
   }, []);
   const beginSceneHydration = useCallback(() => {
+    // Wrapper pointer overlays belong to the currently hydrated editor scene.
+    // Unmount them before replacing Excalidraw state so their visible controls
+    // and any armed pointer gesture cannot leak into the incoming scene/page.
+    resetTransientPointerTools();
     cancelSceneHydrationFrames();
     switchingSceneRef.current = true;
     sceneHydrationGenerationRef.current += 1;
@@ -882,7 +907,7 @@ export default function App() {
     for (const controller of darkPdfRenderControllersRef.current) controller.abort();
     darkPdfRenderControllersRef.current.clear();
     return sceneHydrationGenerationRef.current;
-  }, [cancelSceneHydrationFrames]);
+  }, [cancelSceneHydrationFrames, resetTransientPointerTools]);
   useEffect(() => () => {
     sceneHydrationGenerationRef.current += 1;
     darkPdfPreviewGenerationRef.current += 1;
@@ -1406,6 +1431,17 @@ export default function App() {
     const files = { ...scene.files } as unknown as BinaryFiles;
     const liveAppState = api.getAppState();
     const editorPreferences = featurePreferencesRef.current;
+    // Legacy projects may contain a wrapper-owned custom tool marker, but the
+    // corresponding pointer overlay is React state and is not persisted.
+    // Normalize a clone on read so hydration cannot revive a dead tool.
+    const hydratedAppState = { ...scene.appState };
+    // Some generated scenes (notably PDF pages) intentionally omit activeTool.
+    // Excalidraw merges absent app-state keys, so an outgoing wrapper custom
+    // tool would otherwise survive even though its React overlay was torn down.
+    if (!hydratedAppState.activeTool && isPersistedWrapperTool(liveAppState.activeTool)) {
+      hydratedAppState.activeTool = { ...liveAppState.activeTool };
+    }
+    canonicalizePersistedWrapperTool(hydratedAppState);
     // Excalidraw's addFiles() is merge-only and its decoded-image cache is
     // keyed by file ID. Empty the live map before replacing the elements so
     // reopening a project with the same scene/file IDs cannot keep stale
@@ -1417,7 +1453,7 @@ export default function App() {
     api.updateScene({
       elements: scene.elements as unknown as readonly ExcalidrawElement[],
       appState: {
-        ...(scene.appState as unknown as AppState),
+        ...(hydratedAppState as unknown as AppState),
         penMode: editorPreferences.penOnly,
         penDetected: true,
         gridModeEnabled: editorPreferences.showGrid,
@@ -1584,6 +1620,24 @@ export default function App() {
     ) {
       lassoActiveRef.current = false;
       setIsLassoActive(false);
+    }
+    if (
+      bucketFillActiveRef.current
+      && !(activeToolType === "custom" && appState.activeTool.customType === CLASSROOM_BUCKET_FILL_TOOL)
+    ) {
+      bucketFillActiveRef.current = false;
+      setIsBucketFillActive(false);
+      if (appState.activeTool.locked) {
+        // Bucket Fill locks its custom tool to remain repeatable. Native tools
+        // inherit that flag unless we explicitly release it at this boundary.
+        api?.updateScene({
+          appState: {
+            activeTool: { ...appState.activeTool, locked: false },
+          },
+          captureUpdate: CaptureUpdateAction.NEVER,
+        });
+        return;
+      }
     }
     const previousToolType = activeToolTypeRef.current;
     if (activeToolType === "line" && previousToolType !== "line") {
@@ -2281,6 +2335,59 @@ export default function App() {
     lassoActiveRef.current = false;
     setIsLassoActive(false);
   }, []);
+
+  const startBucketFill = useCallback(() => {
+    if (!api) return;
+    lassoActiveRef.current = false;
+    setIsLassoActive(false);
+    setMathInteraction(null);
+    setIsMathToolsOpen(false);
+    setMathToolEdit(null);
+    bucketFillActiveRef.current = true;
+    setIsBucketFillActive(true);
+    // Bucket fill is a repeatable mode. Lock the custom tool so Excalidraw's
+    // shared pointer lifecycle (including pinch gestures) does not reset it to
+    // selection after every pointer-up.
+    api.setActiveTool({ type: "custom", customType: CLASSROOM_BUCKET_FILL_TOOL, locked: true });
+    // The upstream planar-region implementation is intentionally code-split.
+    void import("./lib/bucket-fill/apply");
+  }, [api]);
+
+  const finishBucketFill = useCallback(() => {
+    bucketFillActiveRef.current = false;
+    setIsBucketFillActive(false);
+  }, []);
+
+  const fillBucketRegion = useCallback(async (point: { x: number; y: number }) => {
+    if (!api || !projectRef.current || switchingSceneRef.current) return;
+    const operation = {
+      projectId: projectRef.current.id,
+      sceneId: projectRef.current.activeSceneId,
+      hydrationGeneration: sceneHydrationGenerationRef.current,
+    };
+    try {
+      const { applyBucketFill } = await import("./lib/bucket-fill/apply");
+      const currentProject = projectRef.current;
+      if (
+        !bucketFillActiveRef.current
+        || !currentProject
+        || switchingSceneRef.current
+        || operation.projectId !== currentProject.id
+        || operation.sceneId !== currentProject.activeSceneId
+        || operation.hydrationGeneration !== sceneHydrationGenerationRef.current
+      ) return;
+      const result = applyBucketFill(api, point);
+      if (result.status !== "failed") return;
+      if (result.reason === "too_complex") {
+        api.setToast({ message: "This region is too complex to fill." });
+      } else if (result.reason !== "no_owner") {
+        api.setToast({ message: "No closed region was found here." });
+      }
+    } catch (error) {
+      console.error("Bucket fill could not be applied.", error);
+      api.setToast({ message: "Bucket fill could not be applied." });
+    }
+  }, [api]);
 
   const startMathInteraction = useCallback((kind: MathInteractionKind) => {
     const sourceElementIds = kind === "transformation" && api
@@ -3882,13 +3989,30 @@ export default function App() {
   }, [api]);
 
   const handleEditorKeyDownCapture = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (
+      !presentation
+      && !event.ctrlKey
+      && !event.metaKey
+      && !event.altKey
+      && !event.shiftKey
+      && event.key.toLowerCase() === "b"
+      && !target?.isContentEditable
+      && !target?.closest("input, textarea, select, [role='dialog']")
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+      event.nativeEvent.stopImmediatePropagation();
+      startBucketFill();
+      return;
+    }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
       event.stopPropagation();
       event.nativeEvent.stopImmediatePropagation();
       api?.setToast({ message: "External links are disabled in PatterDraw." });
     }
-  }, [api]);
+  }, [api, presentation, startBucketFill]);
 
   const handleLinkOpen = useCallback<NonNullable<ExcalidrawProps["onLinkOpen"]>>((_element, event) => {
     event.preventDefault();
@@ -4262,6 +4386,13 @@ export default function App() {
                 editorHost={editorHostRef.current}
                 strokeWidth={strokeWidth}
               />
+              {!presentation ? (
+                <BucketFillMenuExtension
+                  active={isBucketFillActive}
+                  editorHost={editorHostRef.current}
+                  onStart={startBucketFill}
+                />
+              ) : null}
               {featurePreferences.mathTools ? (
                 <MathToolsMenuExtension
                   editorHost={editorHostRef.current}
@@ -4286,6 +4417,14 @@ export default function App() {
               editorHost={editorHostRef.current}
               initialSelection={lassoInitialSelection}
               onExit={finishLasso}
+            />
+          ) : null}
+          {api && isBucketFillActive && editorHostRef.current ? (
+            <BucketFillOverlay
+              api={api}
+              editorHost={editorHostRef.current}
+              onExit={finishBucketFill}
+              onFill={fillBucketRegion}
             />
           ) : null}
           {mathInteraction && (

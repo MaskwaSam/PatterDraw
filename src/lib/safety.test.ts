@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { createBlankProject, type ClassroomProject, type SerializedScene } from "../types";
-import { assertSafeProject, isSafeLocalImageSource, sanitizeProject, sanitizeScene } from "./safety";
+import {
+  assertSafeProject,
+  isPersistedWrapperTool,
+  isSafeLocalImageSource,
+  sanitizeProject,
+  sanitizeScene,
+} from "./safety";
 import { MATH_TOOL_CATALOGUE } from "./math-tools/catalogue";
 
 const scene = (elements: readonly Record<string, unknown>[]): SerializedScene => ({
@@ -112,6 +118,39 @@ describe("student safety", () => {
       { id: "shape", type: "rectangle", link: null },
       { id: "unsafe", type: "rectangle", link: null },
     ]);
+  });
+
+  it.each(["classroom-bucket-fill", "classroom-lasso"])(
+    "normalizes the persisted wrapper-only %s tool",
+    (customType) => {
+      const safe = sanitizeScene({
+        ...scene([]),
+        appState: {
+          activeTool: {
+            type: "custom",
+            customType,
+          locked: true,
+            lastActiveTool: { type: "rectangle" },
+          },
+        },
+      });
+
+      expect(safe.appState.activeTool).toEqual({
+        type: "selection",
+        customType: null,
+        locked: false,
+        lastActiveTool: null,
+      });
+    },
+  );
+
+  it("ignores malformed persisted custom tool values", () => {
+    const tool = Object.create(null) as Record<string, unknown>;
+    tool.type = "custom";
+    tool.customType = Object.create(null);
+
+    expect(() => isPersistedWrapperTool(tool)).not.toThrow();
+    expect(isPersistedWrapperTool(tool)).toBe(false);
   });
 
   it("accepts only embedded base64 image data for persisted files", () => {

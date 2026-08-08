@@ -3,6 +3,7 @@ import type { ClassroomProject, LoadedClassroomProject, PdfDocumentId } from "..
 import {
   assertSafeProject,
   assertSanitizedProject,
+  isPersistedWrapperTool,
   sanitizeProject,
 } from "./safety";
 import { cachedSha256Hex, sha256Hex } from "./sha256";
@@ -567,6 +568,9 @@ async function loadAutosaveAttempt(
     const pdfEntries = loadedPdfEntries.map(({ bytes, id }) => [id, bytes] as const);
 
     const needsMigration = !currentProject
+      || Object.values(project.scenes).some((scene) => (
+        isPersistedWrapperTool(scene.appState?.activeTool)
+      ))
       || safeProject.title !== project.title
       || safeProject.titleMode !== project.titleMode
       || Object.values(safeProject.pdfDocuments).some((source) => !source.sha256);

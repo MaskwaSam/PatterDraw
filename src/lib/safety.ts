@@ -52,6 +52,42 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
+const WRAPPER_ONLY_TOOL_TYPES = new Set([
+  "classroom-bucket-fill",
+  "classroom-lasso",
+]);
+
+export function isPersistedWrapperTool(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const tool = value as Record<string, unknown>;
+  return (
+    tool.type === "custom" &&
+    typeof tool.customType === "string" &&
+    WRAPPER_ONLY_TOOL_TYPES.has(tool.customType)
+  );
+}
+
+/**
+ * Wrapper pointer overlays are React state, not portable Excalidraw scene
+ * state. Normalize their legacy custom markers whenever a project crosses a
+ * persistence boundary so every load path starts with a usable native tool.
+ */
+export function canonicalizePersistedWrapperTool(appState: Record<string, unknown>): void {
+  const activeTool = appState.activeTool;
+  if (!isPersistedWrapperTool(activeTool)) return;
+  const tool = activeTool as Record<string, unknown>;
+  appState.activeTool = {
+    ...tool,
+    type: "selection",
+    customType: null,
+    // Wrapper-only tools may lock themselves so repeated pointer gestures stay
+    // active. That transient lock must never leak into persisted native tools:
+    // Excalidraw inherits the previous value when a later tool omits `locked`.
+    locked: false,
+    lastActiveTool: null,
+  };
+}
+
 export function sanitizeScene(scene: SerializedScene): SerializedScene {
   const safe = clone(scene);
   safe.files = Object.fromEntries(
@@ -100,11 +136,13 @@ export function sanitizeScene(scene: SerializedScene): SerializedScene {
     elements.push(next);
   }
   safe.elements = elements;
-  safe.appState = {
+  const appState = {
     ...safe.appState,
     openMenu: null,
     openSidebar: null,
   };
+  canonicalizePersistedWrapperTool(appState);
+  safe.appState = appState;
   return safe;
 }
 

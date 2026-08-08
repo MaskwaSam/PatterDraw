@@ -5528,6 +5528,284 @@ test("inserts and persists a Letter-calibrated ruler from Math tools", async ({ 
   expect(consoleErrors).toEqual([]);
 });
 
+test("fills a closed region with a persistent, undoable local vector", async ({ page }) => {
+  test.setTimeout(60_000);
+  const consoleErrors: string[] = [];
+  const externalRequests: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== "http://127.0.0.1:5173") {
+      externalRequests.push(request.url());
+    }
+  });
+
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  await dragOnBoard(page, { x: 320, y: 220 }, { x: 560, y: 400 });
+
+  type BucketSceneElement = {
+    id: string;
+    type: string;
+    isDeleted?: boolean;
+    polygon?: boolean;
+    backgroundColor?: string;
+    strokeColor?: string;
+    points?: Array<[number, number]>;
+  };
+  const sceneElements = async () => {
+    const project = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, { elements: BucketSceneElement[] }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    return (project?.scenes[project.activeSceneId]?.elements || [])
+      .filter((element) => !element.isDeleted);
+  };
+  const bucketFills = async () => (await sceneElements()).filter((element) => (
+    element.type === "line"
+    && element.polygon === true
+    && element.strokeColor === "transparent"
+  ));
+  const persistedActiveTool = async () => {
+    const project = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, {
+        appState?: { activeTool?: { type?: string; customType?: string | null; locked?: boolean } };
+      }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    return project?.scenes[project.activeSceneId]?.appState?.activeTool;
+  };
+  const liveActiveTool = async () => page.evaluate(() => (window as unknown as {
+    h?: { app?: { state?: { activeTool?: { type?: string; customType?: string | null; locked?: boolean } } } };
+  }).h?.app?.state?.activeTool);
+
+  await expect.poll(async () => (await sceneElements()).filter((element) => element.type === "rectangle"))
+    .toHaveLength(1);
+  const rectangleId = (await sceneElements()).find((element) => element.type === "rectangle")?.id;
+  expect(rectangleId).toBeTruthy();
+
+  const openExtraTools = async () => {
+    await page.locator(".App-toolbar__extra-tools-trigger").click();
+    await expect(page.locator(".App-toolbar__extra-tools-dropdown")).toBeVisible();
+  };
+  await openExtraTools();
+  await expect(page.getByTestId("toolbar-bucket-fill")).toBeVisible();
+  await expect(page.getByTestId("toolbar-lasso")).toHaveCount(0);
+  await page.getByTestId("toolbar-bucket-fill").click();
+
+  const settings = page.getByTestId("bucket-fill-settings");
+  await expect(settings).toBeVisible();
+  await settings.getByRole("button", { name: "Use #ffec99" }).click();
+  await expect(settings.getByRole("button", { name: "Use #ffec99" })).toHaveAttribute("aria-pressed", "true");
+
+  const host = await page.locator(".editor-host").boundingBox();
+  if (!host) throw new Error("Editor host has no visible bounds.");
+
+  // Bucket mode must leave Excalidraw's native two-touch gesture stream
+  // intact. A trusted pinch should zoom the board and must not create paint.
+  const zoomBeforePinch = await page.evaluate(() => (window as unknown as {
+    h?: { app?: { state?: { zoom?: { value?: number } } } };
+  }).h?.app?.state?.zoom?.value || 1);
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [
+      { id: 71, x: Math.round(host.x + 410), y: Math.round(host.y + 310) },
+      { id: 72, x: Math.round(host.x + 470), y: Math.round(host.y + 310) },
+    ],
+  });
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchMove",
+    touchPoints: [
+      { id: 71, x: Math.round(host.x + 370), y: Math.round(host.y + 310) },
+      { id: 72, x: Math.round(host.x + 510), y: Math.round(host.y + 310) },
+    ],
+  });
+  await expect.poll(() => page.evaluate(() => (window as unknown as {
+    h?: { app?: { state?: { zoom?: { value?: number } } } };
+  }).h?.app?.state?.zoom?.value || 1)).not.toBe(zoomBeforePinch);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await expect.poll(bucketFills).toHaveLength(0);
+  await expect(settings).toBeVisible();
+  // Excalidraw's development build emits this React diagnostic during a
+  // synthetic CDP pinch; reject every other error and keep the rest of this
+  // flow's console assertion strict.
+  expect(consoleErrors.filter((error) => !error.startsWith(
+    "Warning: An update (setState, replaceState, or forceUpdate) was scheduled from inside an update function.",
+  ))).toEqual([]);
+  consoleErrors.length = 0;
+
+  await page.mouse.click(host.x + 440, host.y + 310);
+  await expect.poll(bucketFills).toHaveLength(1);
+  const initialFill = (await bucketFills())[0];
+  expect(initialFill).toMatchObject({
+    backgroundColor: "#ffec99",
+    polygon: true,
+    strokeColor: "transparent",
+  });
+  expect(initialFill.points?.length || 0).toBeGreaterThan(3);
+
+  const filledElements = await sceneElements();
+  expect(filledElements.findIndex((element) => element.id === initialFill.id))
+    .toBeLessThan(filledElements.findIndex((element) => element.id === rectangleId));
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+
+  await page.locator('.statusbar .footer-history-button[aria-label="Undo"]').click();
+  await expect.poll(bucketFills).toHaveLength(0);
+  await expect.poll(async () => (await sceneElements()).some((element) => element.id === rectangleId)).toBe(true);
+  await page.locator('.statusbar .footer-history-button[aria-label="Redo"]').click();
+  await expect.poll(bucketFills).toHaveLength(1);
+
+  await settings.getByRole("button", { name: "Use #ffc9c9" }).click();
+  await page.mouse.click(host.x + 440, host.y + 310);
+  await expect.poll(bucketFills).toHaveLength(1);
+  await expect.poll(async () => (await bucketFills())[0]?.backgroundColor).toBe("#ffc9c9");
+  expect((await bucketFills())[0]?.id).toBe(initialFill.id);
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  await expect.poll(async () => {
+    const tool = await persistedActiveTool();
+    return tool === undefined || (
+      tool.type === "selection"
+      && tool.customType === null
+      && tool.locked === false
+    );
+  }).toBe(true);
+
+  await page.reload();
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  await expect.poll(bucketFills).toHaveLength(1);
+  await expect(settings).toHaveCount(0);
+  await expect(page.getByTestId("toolbar-selection")).toBeChecked();
+  await expect.poll(liveActiveTool).toMatchObject({ type: "selection", locked: false });
+  await page.locator(".editor-host .excalidraw").focus();
+  await page.keyboard.press("b");
+  await expect(settings).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(settings).toHaveCount(0);
+  await expect(page.getByTestId("toolbar-selection")).toBeChecked();
+  await expect.poll(liveActiveTool).toMatchObject({ type: "selection", locked: false });
+
+  // Leaving Bucket Fill through a native toolbar choice must also release its
+  // repeat lock. The rectangle tool should return to Selection after one draw.
+  await page.keyboard.press("b");
+  await expect(settings).toBeVisible();
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  await expect(settings).toHaveCount(0);
+  await expect.poll(liveActiveTool).toMatchObject({ type: "rectangle", locked: false });
+  await dragOnBoard(page, { x: 700, y: 250 }, { x: 780, y: 320 });
+  await expect(page.getByTestId("toolbar-selection")).toBeChecked();
+
+  const legacyProject = await keyvalValue<{
+    activeSceneId: string;
+    scenes: Record<string, { appState?: Record<string, unknown> }>;
+  }>(page, "patterdraw:autosave:project:v1");
+  if (!legacyProject) throw new Error("Bucket-fill project was not autosaved.");
+  const legacyScene = legacyProject.scenes[legacyProject.activeSceneId];
+  if (!legacyScene) throw new Error("Active bucket-fill scene was not autosaved.");
+  legacyScene.appState = {
+    ...legacyScene.appState,
+    activeTool: {
+      type: "custom",
+      customType: "classroom-bucket-fill",
+      locked: false,
+      lastActiveTool: null,
+    },
+  };
+  await setKeyvalValue(page, "patterdraw:autosave:project:v1", legacyProject);
+  await page.reload();
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  await expect(settings).toHaveCount(0);
+  await expect(page.getByTestId("toolbar-selection")).toBeChecked();
+  await expect.poll(async () => {
+    const tool = await persistedActiveTool();
+    return `${tool?.type || ""}:${tool?.customType || ""}`;
+  }).not.toBe("custom:classroom-bucket-fill");
+
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(externalRequests).toEqual([]);
+  expect(consoleErrors).toEqual([]);
+});
+
+test("keeps bucket paint above the locked PDF background and exits on page navigation", async ({ page }) => {
+  test.setTimeout(60_000);
+  const consoleErrors: string[] = [];
+  const externalRequests: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== "http://127.0.0.1:5173") {
+      externalRequests.push(request.url());
+    }
+  });
+
+  await openTestPdf(page, 2);
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  const start = await liveScenePointInViewport(page, { x: 150, y: 200 });
+  const end = await liveScenePointInViewport(page, { x: 450, y: 500 });
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(end.x, end.y, { steps: 8 });
+  await page.mouse.up();
+
+  await page.locator(".App-toolbar__extra-tools-trigger").click();
+  await page.getByTestId("toolbar-bucket-fill").click();
+  const settings = page.getByTestId("bucket-fill-settings");
+  await settings.getByRole("button", { name: "Use #ffec99" }).click();
+  const center = await liveScenePointInViewport(page, { x: 300, y: 350 });
+  await page.mouse.click(center.x, center.y);
+
+  await expect.poll(() => page.evaluate(() => {
+    type LiveElement = {
+      backgroundColor?: string;
+      customData?: { classroomRole?: string };
+      id: string;
+      polygon?: boolean;
+      strokeColor?: string;
+      type: string;
+    };
+    const elements = (window as unknown as {
+      h?: { app?: { scene?: { getNonDeletedElements?: () => LiveElement[] } } };
+    }).h?.app?.scene?.getNonDeletedElements?.() || [];
+    const backgroundIndex = elements.findIndex((element) => (
+      element.customData?.classroomRole === "pdf-background"
+    ));
+    const fillIndex = elements.findIndex((element) => (
+      element.type === "line"
+      && element.polygon === true
+      && element.strokeColor === "transparent"
+      && element.backgroundColor === "#ffec99"
+    ));
+    const ownerIndex = elements.findIndex((element) => element.type === "rectangle");
+    return {
+      backgroundFound: backgroundIndex >= 0,
+      fillFound: fillIndex >= 0,
+      ownerFound: ownerIndex >= 0,
+      order: backgroundIndex < fillIndex && fillIndex < ownerIndex,
+    };
+  })).toEqual({
+    backgroundFound: true,
+    fillFound: true,
+    ownerFound: true,
+    order: true,
+  });
+
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await pages.nth(1).locator(".pdf-page-open").click();
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await expect(settings).toHaveCount(0);
+  await expect(page.getByTestId("toolbar-selection")).toBeChecked();
+  await expect.poll(() => page.evaluate(() => (window as unknown as {
+    h?: { app?: { state?: { activeTool?: { type?: string; locked?: boolean } } } };
+  }).h?.app?.state?.activeTool)).toMatchObject({ type: "selection", locked: false });
+
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(externalRequests).toEqual([]);
+  expect(consoleErrors).toEqual([]);
+});
+
 test("uses the experimental one-shot lasso for live, additive, and cancellable selection", async ({ page }) => {
   test.setTimeout(90_000);
   const consoleErrors: string[] = [];

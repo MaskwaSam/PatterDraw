@@ -56,6 +56,12 @@ export const MathToolsIcon = (props: IconProps) => (
 export const LassoIcon = (props: IconProps) => (
   <IconBase {...props}><path d="M19.5 10.5c0 3.6-3.5 6.5-8 6.5S4 14.8 4 11.5 7.1 6 11.5 6s8 1.9 8 4.5Z"/><path d="M11.5 17c0 2.1-1.2 3.5-3 3.5-1.4 0-2.5-.8-2.5-2 0-1 .8-1.7 1.8-1.7"/></IconBase>
 );
+export const BucketFillIcon = (props: IconProps) => (
+  <IconBase {...props}>
+    <path d="m5 13 7-7 6 6-7 7H5z" />
+    <path d="m9 9 6 6M18.5 16.5s-2 2.2-2 3.3a2 2 0 0 0 4 0c0-1.1-2-3.3-2-3.3Z" />
+  </IconBase>
+);
 export const RulerIcon = (props: IconProps) => (
   <IconBase {...props}><path d="M3.5 14.5 14.5 3.5l6 6-11 11z"/><path d="m8 13-2-2m5-1-2-2m5-1-2-2m3 5-2-2"/></IconBase>
 );

@@ -5,6 +5,7 @@ PatterDraw directly bundles these open-source packages. Production builds copy t
 | Package | Version | License | Project |
 |---|---:|---|---|
 | `@excalidraw/excalidraw` | 0.18.1 | MIT | <https://github.com/excalidraw/excalidraw> |
+| `@excalidraw/common` | 0.18.0-e9c856d | MIT | <https://github.com/excalidraw/excalidraw> |
 | `@excalidraw/element` | 0.18.0-e9c856d | MIT | <https://github.com/excalidraw/excalidraw> |
 | `@excalidraw/math` | 0.18.0-e9c856d | MIT | <https://github.com/excalidraw/excalidraw> |
 | `@excalidraw/mermaid-to-excalidraw` | 2.2.2 | MIT | <https://github.com/excalidraw/mermaid-to-excalidraw> |
@@ -21,6 +22,7 @@ PatterDraw directly bundles these open-source packages. Production builds copy t
 | `idb-keyval` | 6.3.0 | Apache-2.0 | <https://github.com/jakearchibald/idb-keyval> |
 | MathJax and MathJax New Computer Modern font data | 4.1.3 | Apache-2.0 | <https://github.com/mathjax/MathJax> |
 | `points-on-curve` | 1.0.1 | MIT | <https://github.com/pshihn/bezier-points> |
+| `perfect-freehand` | 1.2.0 | MIT | <https://github.com/steveruizok/perfect-freehand> |
 | React / React DOM | 18.3.1 | MIT | <https://github.com/facebook/react> |
 
 PDF.js standard-font data (Foxit/PDFium PFB data and Liberation Sans) is copied
