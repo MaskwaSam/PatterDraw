@@ -593,6 +593,19 @@ button { color: inherit; }
 .slide-thumbnail-menu button:disabled { opacity: .35; cursor: default; }
 .slide-thumbnail-menu button.is-danger { color: #9b2f2f; }
 .slide-thumbnail-menu svg { width: 15px; height: 15px; }
+:is(
+  .slide-rail-heading-actions .icon-button,
+  .draw-frame-button,
+  .slide-settings-toggle,
+  .slide-aspect-segments button,
+  .slide-draw-status button,
+  .slide-thumbnail-menu button,
+  .is-slide-mode .page-status > button
+):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.slide-rail-backdrop:focus-visible { outline: 3px solid var(--accent); outline-offset: -4px; }
 .page-thumbnail {
   width: 100%;
   display: grid;
@@ -1308,7 +1321,9 @@ button { color: inherit; }
 .footer-zoom-controls button:focus-visible,
 .footer-history-button:focus-visible,
 .pdf-toolbar-toggle:focus-visible,
-.footer-hide:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.footer-hide:focus-visible,
+.present-button:focus-visible,
+.fullscreen-button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .pdf-toolbar-toggle.is-active { color: #204aa5; background: var(--accent-soft); }
 .footer-zoom-controls .footer-reset-zoom { width: 52px; font-size: 12px; font-variant-numeric: tabular-nums; }
 .footer-zoom-controls svg,
@@ -1374,6 +1389,7 @@ button { color: inherit; }
   cursor: pointer;
 }
 .presentation-controls button:hover:not(:disabled), .presentation-controls button.is-active { background: var(--accent-soft); border-color: #b9cdfc; color: #204aa5; }
+.presentation-controls button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .presentation-controls button:disabled { opacity: .3; }
 .presentation-controls svg { width: 17px; height: 17px; }
 .presentation-count { min-width: 48px; text-align: center; font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -2069,6 +2085,12 @@ button { color: inherit; }
   background: #263248;
   color: #d9e2f0;
 }
+.app-shell[data-theme="dark"] #slide-rail .slide-settings-button.is-active,
+.app-shell[data-theme="dark"] #slide-rail .slide-settings-button.is-active:hover {
+  border-color: #7196eb;
+  background: #29446f;
+  color: #c7d6ff;
+}
 .app-shell[data-theme="dark"] .slide-settings-popover,
 .app-shell[data-theme="dark"] .slide-settings-section,
 .app-shell[data-theme="dark"] .slide-aspect-segments,
@@ -2121,6 +2143,26 @@ button { color: inherit; }
 .app-shell[data-theme="dark"] .slide-thumbnail-menu button { color: #dce5f2; }
 .app-shell[data-theme="dark"] .slide-thumbnail-menu button.is-danger { color: #ffb4bf; }
 .app-shell[data-theme="dark"] .slide-thumbnail-wrap.is-drop-target { background: #1c3158; outline-color: #7fa7ff; }
+.app-shell[data-theme="dark"] .slide-preview {
+  border-color: #52617a;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 36%);
+}
+.app-shell[data-theme="dark"] .slide-thumbnail.is-selected .slide-preview {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgb(127 167 255 / 30%), 0 2px 7px rgb(0 0 0 / 42%);
+}
+.app-shell[data-theme="dark"] .slide-preview-placeholder {
+  background: linear-gradient(145deg, #202b3e, #182131);
+  color: #9aa9bf;
+}
+.app-shell[data-theme="dark"] .slide-preview.is-loading::after {
+  background: linear-gradient(100deg, transparent 20%, rgb(255 255 255 / 14%) 48%, transparent 76%);
+}
+.app-shell[data-theme="dark"] :is(.drag-handle, .rail-empty-icon) { color: #a4b0c3; }
+.app-shell[data-theme="dark"] :is(.slide-settings-popover, .slide-thumbnail-menu) {
+  box-shadow: 0 14px 34px rgb(0 0 0 / 46%);
+}
+.app-shell[data-theme="dark"] .slide-rail-backdrop { background: rgb(4 9 18 / 56%); }
 .app-shell[data-theme="dark"] .pdf-page-total {
   background: #263248;
   color: #d9e2f0;
@@ -2288,6 +2330,13 @@ button { color: inherit; }
   background: rgb(24 33 49 / 96%);
   color: #e7edf7;
 }
+.app-shell[data-theme="dark"] .topbar-show:hover,
+.app-shell[data-theme="dark"] .footer-show:hover,
+.app-shell[data-theme="dark"] .page-status .slide-rail-show:hover:not(:disabled),
+.app-shell[data-theme="dark"] .slide-rail-show-floating:hover:not(:disabled) {
+  border-color: #617391;
+  background: #2a3850;
+}
 .app-shell[data-theme="dark"] .busy-overlay { background: rgb(16 23 34 / 84%); color: #e7edf7; }
 .app-shell[data-theme="dark"] .error-toast { border-color: #8f4b57; background: #351d26; color: #ffc5cd; }
 .app-shell[data-theme="dark"] .error-toast button { color: #ffb4bf; }
@@ -2400,6 +2449,7 @@ button { color: inherit; }
     cursor: default;
   }
   .is-nav-hidden .slide-rail-backdrop { top: 0; }
+  .app-shell[data-theme="dark"] #slide-rail { box-shadow: 8px 0 28px rgb(0 0 0 / 48%); }
   .is-pdf-mode .pdf-page-rail { width: min(var(--pdf-rail-width, 224px), 82vw); }
   .editor-region { grid-column: 1; grid-row: 2; }
   .is-slide-mode .editor-region,
