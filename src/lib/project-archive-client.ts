@@ -10,37 +10,103 @@ interface ArchiveWorkerResponse {
   entries?: Record<string, Uint8Array>;
 }
 
+/**
+ * Worker startup and transport failures are recoverable because the archive
+ * engine is also available synchronously. Keep this distinct from a response
+ * with `ok: false`: that response came from a running worker and represents a
+ * validation/semantic verdict that must not be retried with another engine.
+ */
+class ArchiveWorkerInfrastructureError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ArchiveWorkerInfrastructureError";
+  }
+}
+
 let nextRequestId = 1;
+
+function abortError(): Error {
+  if (typeof DOMException === "function") {
+    return new DOMException("The operation was aborted.", "AbortError");
+  }
+  const error = new Error("The operation was aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : abortError();
+  }
+}
 
 function canUseArchiveWorker(): boolean {
   return typeof window !== "undefined" && typeof Worker === "function";
 }
 
-function runArchiveWorker(operation: ArchiveOperation): Promise<ArchiveWorkerResponse> {
+function runArchiveWorker(
+  operation: ArchiveOperation,
+  signal?: AbortSignal,
+): Promise<ArchiveWorkerResponse> {
+  throwIfAborted(signal);
   return new Promise((resolve, reject) => {
     const requestId = nextRequestId;
     nextRequestId += 1;
-    const worker = new Worker(
-      new URL("./project-archive.worker.ts", import.meta.url),
-      { type: "module", name: "patterdraw-project-archive" },
-    );
-    const finish = () => worker.terminate();
-    worker.onmessage = (event: MessageEvent<ArchiveWorkerResponse>) => {
-      if (event.data.id !== requestId) return;
+    let worker: Worker;
+    try {
+      worker = new Worker(
+        new URL("./project-archive.worker.ts", import.meta.url),
+        { type: "module", name: "patterdraw-project-archive" },
+      );
+    } catch (error) {
+      reject(new ArchiveWorkerInfrastructureError(
+        error instanceof Error && error.message
+          ? error.message
+          : "Project archive worker could not be started.",
+      ));
+      return;
+    }
+    let settled = false;
+    const finish = () => {
+      signal?.removeEventListener("abort", onAbort);
+      worker.terminate();
+    };
+    const resolveOnce = (response: ArchiveWorkerResponse) => {
+      if (settled) return;
+      settled = true;
       finish();
-      if (!event.data.ok) {
-        reject(new Error(event.data.message || "Project archive processing failed."));
+      resolve(response);
+    };
+    const rejectOnce = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      finish();
+      reject(error);
+    };
+    const onAbort = () => {
+      rejectOnce(signal?.reason instanceof Error ? signal.reason : abortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    worker.onmessage = (event: MessageEvent<ArchiveWorkerResponse>) => {
+      const response = event.data;
+      if (!response || response.id !== requestId) return;
+      if (typeof response.ok !== "boolean") {
+        rejectOnce(new ArchiveWorkerInfrastructureError(
+          "Project archive worker returned an invalid response.",
+        ));
         return;
       }
-      resolve(event.data);
+      resolveOnce(response);
     };
     worker.onerror = (event) => {
-      finish();
-      reject(new Error(event.message || "Project archive worker failed."));
+      rejectOnce(new ArchiveWorkerInfrastructureError(
+        event.message || "Project archive worker failed.",
+      ));
     };
     worker.onmessageerror = () => {
-      finish();
-      reject(new Error("Project archive worker returned unreadable data."));
+      rejectOnce(new ArchiveWorkerInfrastructureError(
+        "Project archive worker returned unreadable data.",
+      ));
     };
 
     try {
@@ -60,10 +126,17 @@ function runArchiveWorker(operation: ArchiveOperation): Promise<ArchiveWorkerRes
         [transferableBytes.buffer as ArrayBuffer],
       );
     } catch (error) {
-      finish();
-      reject(error);
+      rejectOnce(new ArchiveWorkerInfrastructureError(
+        error instanceof Error && error.message
+          ? error.message
+          : "Project archive worker could not receive the request.",
+      ));
     }
   });
+}
+
+function isArchiveWorkerInfrastructureError(error: unknown): boolean {
+  return error instanceof ArchiveWorkerInfrastructureError;
 }
 
 export async function createProjectArchive(
@@ -74,20 +147,55 @@ export async function createProjectArchive(
     const { createProjectArchiveSync } = await import("./project-archive-engine");
     return createProjectArchiveSync(entries, maxBytes);
   }
-  const response = await runArchiveWorker({ operation: "zip", entries, maxBytes });
-  if (!response.archive) throw new Error("Project archive worker returned no data.");
-  return response.archive;
+  try {
+    const response = await runArchiveWorker({ operation: "zip", entries, maxBytes });
+    if (!response.ok) {
+      throw new Error(response.message || "Project archive processing failed.");
+    }
+    if (!response.archive) {
+      throw new ArchiveWorkerInfrastructureError("Project archive worker returned no data.");
+    }
+    return response.archive;
+  } catch (error) {
+    if (!isArchiveWorkerInfrastructureError(error)) throw error;
+    const { createProjectArchiveSync } = await import("./project-archive-engine");
+    return createProjectArchiveSync(entries, maxBytes);
+  }
 }
 
 export async function extractProjectArchive(
   bytes: Uint8Array,
   maxBytes: number,
+  signal?: AbortSignal,
 ): Promise<Record<string, Uint8Array>> {
+  throwIfAborted(signal);
   if (!canUseArchiveWorker()) {
     const { extractProjectArchiveSync } = await import("./project-archive-engine");
-    return extractProjectArchiveSync(bytes, maxBytes);
+    throwIfAborted(signal);
+    const entries = extractProjectArchiveSync(bytes, maxBytes);
+    throwIfAborted(signal);
+    return entries;
   }
-  const response = await runArchiveWorker({ operation: "unzip", bytes, maxBytes });
-  if (!response.entries) throw new Error("Project archive worker returned no entries.");
-  return response.entries;
+  try {
+    const response = await runArchiveWorker({ operation: "unzip", bytes, maxBytes }, signal);
+    throwIfAborted(signal);
+    if (!response.ok) {
+      throw new Error(response.message || "Project archive processing failed.");
+    }
+    if (!response.entries) {
+      throw new ArchiveWorkerInfrastructureError("Project archive worker returned no entries.");
+    }
+    return response.entries;
+  } catch (error) {
+    if (!isArchiveWorkerInfrastructureError(error)) throw error;
+    // Abort must win over recovery. The synchronous engine has the same
+    // pre/post-operation checks as the no-worker path, but cannot be
+    // interrupted while fflate is executing.
+    throwIfAborted(signal);
+    const { extractProjectArchiveSync } = await import("./project-archive-engine");
+    throwIfAborted(signal);
+    const entries = extractProjectArchiveSync(bytes, maxBytes);
+    throwIfAborted(signal);
+    return entries;
+  }
 }

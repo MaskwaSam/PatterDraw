@@ -19,13 +19,27 @@ import { MAX_PDF_BYTES, MAX_PDF_PAGES } from "../safety";
 import { sha256Hex } from "../sha256";
 import {
   getBrowserPdfRasterBudget,
+  encodedDataUrlByteLength,
+  getPdfImportEncodedByteBudget,
+  getPdfJsRasterOptions,
   getPdfImportRasterScale,
   pdfRasterCanvasToPngDataUrl,
   releasePdfRasterCanvas,
+  type PdfEncodedByteBudget,
+  type PdfRasterBudget,
   type PdfPageRasterSize,
 } from "./raster-limits";
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+
+// PDF.js 6.2.108 still consumes these legacy hardening flags at runtime, but
+// its public DocumentInitParameters type no longer declares them. Keep the
+// explicit values in the request while documenting the narrow compatibility
+// cast at this wrapper boundary.
+type SafePdfDocumentInitParameters = NonNullable<Parameters<typeof getDocument>[0]> & {
+  enableScripting?: boolean;
+  isEvalSupported?: boolean;
+};
 
 function localPdfStandardFontDataUrl(): string {
   // Keep the directory relative to the loaded application so both Vite dev
@@ -43,6 +57,77 @@ interface ParsedPdfPages {
   documentId: string;
   pageCount: number;
   scenes: SerializedScene[];
+  sourceSha256: string;
+}
+
+export interface ImportPdfOptions {
+  /** Abort an obsolete import when a newer open/navigation generation wins. */
+  signal?: AbortSignal;
+  /** Override the device-sensitive raster envelope in focused callers/tests. */
+  rasterBudget?: Readonly<PdfRasterBudget>;
+  /** Remaining project-content budget available for generated page PNGs. */
+  maxEncodedBytesPerDocument?: number;
+}
+
+interface PdfImportRasterState {
+  encodedBytes: number;
+  rasterPixels: number;
+}
+
+function abortError(): Error {
+  if (typeof DOMException === "function") return new DOMException("The operation was aborted.", "AbortError");
+  const error = new Error("The operation was aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : abortError();
+}
+
+async function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  throwIfAborted(signal);
+  let onAbort: (() => void) | undefined;
+  const abortPromise = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason instanceof Error ? signal.reason : abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, abortPromise]);
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
+function assertRenderedPageBudget(
+  canvasWidth: number,
+  canvasHeight: number,
+  dataURL: string,
+  rasterBudget: Readonly<PdfRasterBudget>,
+  encodedBudget: Readonly<PdfEncodedByteBudget>,
+  state: PdfImportRasterState,
+): void {
+  const pixels = canvasWidth * canvasHeight;
+  const encodedBytes = encodedDataUrlByteLength(dataURL);
+  const nextPixels = state.rasterPixels + pixels;
+  const nextEncodedBytes = state.encodedBytes + encodedBytes;
+  if (
+    !Number.isSafeInteger(pixels)
+    || pixels <= 0
+    || canvasWidth > rasterBudget.maxEdge
+    || canvasHeight > rasterBudget.maxEdge
+    || pixels > rasterBudget.maxPixelsPerPage
+    || encodedBytes > encodedBudget.maxBytesPerPage
+    || !Number.isSafeInteger(nextPixels)
+    || nextPixels > rasterBudget.maxPixelsPerDocument
+    || !Number.isSafeInteger(nextEncodedBytes)
+    || nextEncodedBytes > encodedBudget.maxBytesPerDocument
+  ) {
+    throw new Error("The PDF's rendered pages are too large to retain safely.");
+  }
+  state.rasterPixels = nextPixels;
+  state.encodedBytes = nextEncodedBytes;
 }
 
 function normalizedRotation(value: number): 0 | 90 | 180 | 270 {
@@ -57,9 +142,15 @@ async function renderPageScene(
   pageIndex: number,
   name: string,
   rasterScale: number,
+  rasterBudget: Readonly<PdfRasterBudget>,
+  encodedBudget: Readonly<PdfEncodedByteBudget>,
+  rasterState: PdfImportRasterState,
+  signal?: AbortSignal,
 ): Promise<SerializedScene> {
+  throwIfAborted(signal);
   const page = await pdfDocument.getPage(pageIndex + 1);
   try {
+    throwIfAborted(signal);
     const viewport = page.getViewport({ scale: 1 });
     const renderViewport = page.getViewport({ scale: rasterScale });
     const canvas = window.document.createElement("canvas");
@@ -69,7 +160,18 @@ async function renderPageScene(
       const context = canvas.getContext("2d", { alpha: false });
       if (!context) throw new Error("This browser cannot render PDF pages.");
 
-      await page.render({ canvas, canvasContext: context, viewport: renderViewport }).promise;
+      const renderTask = page.render({ canvas, canvasContext: context, viewport: renderViewport });
+      const onAbort = () => renderTask.cancel();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        await renderTask.promise;
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : abortError();
+        throw error;
+      } finally {
+        signal?.removeEventListener("abort", onAbort);
+      }
+      throwIfAborted(signal);
       const sceneId = createLocalId();
       const backgroundElementId = createLocalId();
       const fileId = createLocalId() as FileId;
@@ -82,6 +184,15 @@ async function renderPageScene(
         backgroundElementId,
       };
       const dataURL = pdfRasterCanvasToPngDataUrl(canvas) as DataURL;
+      assertRenderedPageBudget(
+        canvas.width || Math.ceil(renderViewport.width),
+        canvas.height || Math.ceil(renderViewport.height),
+        dataURL,
+        rasterBudget,
+        encodedBudget,
+        rasterState,
+      );
+      throwIfAborted(signal);
       const file: BinaryFileData = {
         id: fileId,
         mimeType: "image/png",
@@ -137,28 +248,60 @@ async function renderPageScene(
   }
 }
 
-async function parsePdfPages(file: File): Promise<ParsedPdfPages> {
+async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promise<ParsedPdfPages> {
+  throwIfAborted(options.signal);
+  const rasterBudget = options.rasterBudget ?? getBrowserPdfRasterBudget();
+  const encodedBudget = getPdfImportEncodedByteBudget(
+    rasterBudget,
+    options.maxEncodedBytesPerDocument,
+  );
+  const rasterOptions = getPdfJsRasterOptions(rasterBudget);
+  const parseBytes = new Uint8Array(await file.arrayBuffer());
+  throwIfAborted(options.signal);
+  const sourceSha256 = await sha256Hex(parseBytes);
+  const { assertPdfEmbeddedImageLimit } = await import("./embedded-image-limits");
+  await assertPdfEmbeddedImageLimit(parseBytes, rasterOptions.maxImageSize, {
+    immutableSha256: sourceSha256,
+    maxEdge: rasterBudget.maxEdge,
+    maxTotalPixels: rasterBudget.maxPixelsPerDocument,
+    maxTotalEncodedBytes: encodedBudget.maxBytesPerDocument,
+    signal: options.signal,
+  });
+  throwIfAborted(options.signal);
   const loadingTask = getDocument({
     // PDF.js may transfer this buffer to its worker. Do not keep a second
     // full-size copy alive just to preserve the immutable source; reread the
     // local File only after the parser and its canvases have been released.
-    data: new Uint8Array(await file.arrayBuffer()),
+    data: parseBytes,
+    enableScripting: false,
+    isEvalSupported: false,
     useSystemFonts: false,
     useWorkerFetch: false,
     useWasm: false,
     standardFontDataUrl: localPdfStandardFontDataUrl(),
-  });
+    ...rasterOptions,
+  } as SafePdfDocumentInitParameters);
+  let destroyPromise: Promise<unknown> | undefined;
+  const destroyLoadingTask = (): Promise<unknown> => {
+    destroyPromise ??= loadingTask.destroy();
+    return destroyPromise;
+  };
+  const onAbort = () => { void destroyLoadingTask().catch(() => undefined); };
+  options.signal?.addEventListener("abort", onAbort, { once: true });
 
   try {
-    const document = await loadingTask.promise;
+    const document = await awaitWithAbort(loadingTask.promise, options.signal);
+    throwIfAborted(options.signal);
     if (document.numPages > MAX_PDF_PAGES) {
       throw new Error(`The PDF has more than ${MAX_PDF_PAGES} pages.`);
     }
     const documentId = createLocalId();
     const pageSizes: PdfPageRasterSize[] = [];
     for (let pageIndex = 0; pageIndex < document.numPages; pageIndex += 1) {
+      throwIfAborted(options.signal);
       const page = await document.getPage(pageIndex + 1);
       try {
+        throwIfAborted(options.signal);
         const viewport = page.getViewport({ scale: 1 });
         pageSizes.push({ width: viewport.width, height: viewport.height });
       } finally {
@@ -168,29 +311,60 @@ async function parsePdfPages(file: File): Promise<ParsedPdfPages> {
     const rasterScale = getPdfImportRasterScale(
       pageSizes,
       window.devicePixelRatio || 1,
-      getBrowserPdfRasterBudget(),
+      rasterBudget,
     );
     const scenes: SerializedScene[] = [];
+    const rasterState: PdfImportRasterState = { encodedBytes: 0, rasterPixels: 0 };
     for (let pageIndex = 0; pageIndex < document.numPages; pageIndex += 1) {
-      scenes.push(await renderPageScene(document, documentId, pageIndex, file.name, rasterScale));
+      throwIfAborted(options.signal);
+      scenes.push(await renderPageScene(
+        document,
+        documentId,
+        pageIndex,
+        file.name,
+        rasterScale,
+        rasterBudget,
+        encodedBudget,
+        rasterState,
+        options.signal,
+      ));
     }
-    return { documentId, pageCount: document.numPages, scenes };
+    throwIfAborted(options.signal);
+    return { documentId, pageCount: document.numPages, scenes, sourceSha256 };
   } catch (error) {
+    if (options.signal?.aborted) {
+      throw options.signal.reason instanceof Error ? options.signal.reason : abortError();
+    }
     const message = error instanceof Error ? error.message : String(error);
     if (/password/i.test(message)) throw new Error("Password-protected PDFs are not supported.");
     throw error;
   } finally {
-    await loadingTask.destroy();
+    options.signal?.removeEventListener("abort", onAbort);
+    await destroyLoadingTask();
   }
 }
 
-export async function importPdf(file: File): Promise<ImportedPdf> {
+export async function importPdf(file: File, options: ImportPdfOptions = {}): Promise<ImportedPdf> {
+  throwIfAborted(options.signal);
   if (file.type && file.type !== "application/pdf") throw new Error("Choose a PDF file.");
   if (file.size > MAX_PDF_BYTES) throw new Error("The PDF is larger than the PatterDraw limit.");
+  if (
+    options.maxEncodedBytesPerDocument !== undefined
+    && (!Number.isSafeInteger(options.maxEncodedBytesPerDocument)
+      || options.maxEncodedBytesPerDocument < 0)
+  ) {
+    throw new Error("The PDF encoded-image byte limit is invalid.");
+  }
 
-  const parsed = await parsePdfPages(file);
+  const parsed = await parsePdfPages(file, options);
+  throwIfAborted(options.signal);
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (bytes.byteLength !== file.size) {
+    throw new Error("The local PDF changed while it was being imported.");
+  }
+  const sourceSha256 = await sha256Hex(bytes);
+  throwIfAborted(options.signal);
+  if (sourceSha256 !== parsed.sourceSha256) {
     throw new Error("The local PDF changed while it was being imported.");
   }
   return {
@@ -199,7 +373,7 @@ export async function importPdf(file: File): Promise<ImportedPdf> {
       name: file.name,
       mimeType: "application/pdf",
       byteLength: bytes.byteLength,
-      sha256: await sha256Hex(bytes),
+      sha256: sourceSha256,
       pageCount: parsed.pageCount,
       archivePath: `documents/${parsed.documentId}.pdf`,
     },

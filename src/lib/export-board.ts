@@ -4,6 +4,7 @@ import type {
   ExcalidrawElement,
   NonDeletedExcalidrawElement,
 } from "@excalidraw/excalidraw/element/types";
+import { isBlockedEmbeddedElementType } from "./embedded-content-policy";
 
 const MAX_EXPORT_EDGE = 8_192;
 const MAX_EXPORT_PIXELS = 16_000_000;
@@ -45,7 +46,7 @@ export function getBoardExportDimensions(width: number, height: number): {
 function isExportableElement(
   element: ExcalidrawElement,
 ): element is NonDeletedExcalidrawElement {
-  return !element.isDeleted && element.type !== "iframe" && element.type !== "embeddable";
+  return !element.isDeleted && !isBlockedEmbeddedElementType(element.type);
 }
 
 export async function exportFullBoardPng(

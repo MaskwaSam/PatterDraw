@@ -9,11 +9,11 @@ PatterDraw directly bundles these open-source packages. Production builds copy t
 | `@excalidraw/element` | 0.18.0-e9c856d | MIT | <https://github.com/excalidraw/excalidraw> |
 | `@excalidraw/math` | 0.18.0-e9c856d | MIT | <https://github.com/excalidraw/excalidraw> |
 | `@excalidraw/mermaid-to-excalidraw` | 2.2.2 | MIT | <https://github.com/excalidraw/mermaid-to-excalidraw> |
-| Mermaid | 11.16.0 | MIT | <https://github.com/mermaid-js/mermaid> |
+| Mermaid | 11.16.1 | MIT | <https://github.com/mermaid-js/mermaid> |
 | `@mermaid-js/parser` | 0.6.3 and 1.2.0 | MIT | <https://github.com/mermaid-js/mermaid> |
-| DOMPurify | 3.4.12 | MPL-2.0 OR Apache-2.0 | <https://github.com/cure53/DOMPurify> |
+| DOMPurify | 3.4.13 | MPL-2.0 OR Apache-2.0 | <https://github.com/cure53/DOMPurify> |
 | KaTeX | 0.16.47 | MIT | <https://github.com/KaTeX/KaTeX> |
-| `pdfjs-dist` | 6.1.200 | Apache-2.0 | <https://github.com/mozilla/pdf.js> |
+| `pdfjs-dist` | 6.2.108 | Apache-2.0 | <https://github.com/mozilla/pdf.js> |
 | `pdf-lib` | 1.17.1 | MIT | <https://github.com/Hopding/pdf-lib> |
 | `fflate` | 0.8.3 | MIT | <https://github.com/101arrowz/fflate> |
 | PptxGenJS | 4.0.1 | MIT | <https://github.com/gitbrent/PptxGenJS> |

@@ -1,1 +1,2 @@
 *.pdf binary
+vendor/pptxgenjs-browser/dist/pptxgen.es.js binary

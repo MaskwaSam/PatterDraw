@@ -8,16 +8,140 @@ on:
 permissions:
   contents: read
 
+env:
+  NODE_VERSION: 22.13.0
+
 jobs:
-  check:
+  audit-and-check:
+    name: Audit and check
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: 22.13.0
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
+      - run: npm install --global npm@11.12.1 --ignore-scripts --no-audit --no-fund
+      - run: test "$(npm --version)" = "11.12.1"
       - run: npm ci
+      - run: npm audit --audit-level=high
       - run: npm run check
+
+  browser-dev:
+    name: Development browser suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm install --global npm@11.12.1 --ignore-scripts --no-audit --no-fund
+      - run: test "$(npm --version)" = "11.12.1"
+      - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
+      - name: Upload development browser diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: patterdraw-browser-dev-${{ github.run_id }}
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: warn
+          retention-days: 14
+
+  browser-production:
+    name: Packaged production browser suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm install --global npm@11.12.1 --ignore-scripts --no-audit --no-fund
+      - run: test "$(npm --version)" = "11.12.1"
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium firefox webkit
+      - id: production-build
+        name: Build and record production manifest
+        run: |
+          set -o pipefail
+          production_diag_dir="$RUNNER_TEMP/patterdraw-production"
+          mkdir -p "$production_diag_dir"
+          npm run build 2>&1 | tee "$production_diag_dir/build.log"
+          if [ -d dist ]; then
+            find dist -type f -print | sort > "$production_diag_dir/dist-manifest.txt"
+            find dist -type f -print0 | sort -z | xargs -0 sha256sum > "$production_diag_dir/dist-sha256.txt"
+          else
+            : > "$production_diag_dir/dist-manifest.txt"
+            : > "$production_diag_dir/dist-sha256.txt"
+          fi
+      - id: production-package
+        name: Package and verify release artifact
+        if: ${{ always() && steps.production-build.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          production_diag_dir="$RUNNER_TEMP/patterdraw-production"
+          npm run release:package 2>&1 | tee "$production_diag_dir/package.log"
+          sha256sum dist/release/release-manifest.json dist/release/provenance.json dist/release/sbom.cdx.json dist/release/SHA256SUMS > "$production_diag_dir/release-first.sha256"
+          npm run release:package 2>&1 | tee "$production_diag_dir/package-repeat.log"
+          sha256sum dist/release/release-manifest.json dist/release/provenance.json dist/release/sbom.cdx.json dist/release/SHA256SUMS > "$production_diag_dir/release-second.sha256"
+          diff -u "$production_diag_dir/release-first.sha256" "$production_diag_dir/release-second.sha256"
+          npm run release:verify 2>&1 | tee "$production_diag_dir/package-verify.log"
+      - name: Prepare production diagnostics
+        if: ${{ always() }}
+        run: |
+          production_diag_dir="$RUNNER_TEMP/patterdraw-production"
+          mkdir -p artifacts/production
+          if [ -d "$production_diag_dir" ]; then
+            cp -f "$production_diag_dir"/* artifacts/production/ 2>/dev/null || true
+          fi
+          if [ -d dist/release ]; then
+            find dist/release -type f -print | sort > artifacts/production/release-manifest-files.txt
+          fi
+      - name: Start packaged release server
+        if: ${{ always() && steps.production-package.outcome == 'success' }}
+        run: |
+          node scripts/serve-production-dist.mjs --dist dist/release --host 127.0.0.1 --port 4174 > artifacts/production/server.log 2>&1 &
+          echo "$!" > artifacts/production/server.pid
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:4174/classroom/math/unit-01/patterdraw/ > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat artifacts/production/server.log
+          exit 1
+      - name: Run production browser evidence
+        if: ${{ always() && steps.production-package.outcome == 'success' }}
+        run: PW_PRODUCTION_REUSE_SERVER=1 npm run test:browser:production
+      - name: Stop packaged release server
+        if: ${{ always() }}
+        run: |
+          if [ -s artifacts/production/server.pid ]; then
+            kill "$(cat artifacts/production/server.pid)" 2>/dev/null || true
+          fi
+      - name: Upload production browser diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: patterdraw-browser-production-${{ github.run_id }}
+          path: |
+            test-results/production/
+            playwright-report/production/
+            artifacts/production/
+            dist/release/
+          if-no-files-found: warn
+          retention-days: 14

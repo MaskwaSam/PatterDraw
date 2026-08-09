@@ -130,6 +130,7 @@ describe("area screenshot export", () => {
       { id: "pdf-background", type: "image", locked: true, isDeleted: false },
       { id: "deleted", type: "ellipse", isDeleted: true },
       { id: "blocked", type: "iframe", isDeleted: false },
+      { id: "generated", type: "magicframe", isDeleted: false },
     ];
     const files = { pdf: { id: "pdf", mimeType: "image/png", dataURL: "data:image/png;base64,AA==" } };
     const api = {

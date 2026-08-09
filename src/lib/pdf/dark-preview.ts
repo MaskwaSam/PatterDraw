@@ -7,12 +7,23 @@ import {
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import {
   getBrowserPdfRasterBudget,
+  getPdfImportEncodedByteBudget,
+  getPdfJsRasterOptions,
   pdfRasterCanvasToPngDataUrl,
   releasePdfRasterCanvas,
   type PdfRasterBudget,
 } from "./raster-limits";
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+
+// PDF.js 6.2.108 still consumes these legacy hardening flags at runtime, but
+// its public DocumentInitParameters type no longer declares them. Keep the
+// explicit values in the request while documenting the narrow compatibility
+// cast at this wrapper boundary.
+type SafePdfDocumentInitParameters = NonNullable<Parameters<typeof getDocument>[0]> & {
+  enableScripting?: boolean;
+  isEvalSupported?: boolean;
+};
 
 /** Matches Excalidraw's dark-canvas transform used for page previews. */
 export const DARK_PDF_CANVAS_FILTER = "invert(93%) hue-rotate(180deg)";
@@ -61,6 +72,8 @@ export interface PdfRasterDimensions {
 
 export interface DarkPdfPreviewRequest extends PdfRasterDimensions {
   bytes: Uint8Array;
+  /** Verified hash for wrapper-owned immutable source bytes. */
+  immutableSha256?: string;
   pageIndex: number;
   rasterBudget?: Readonly<PdfRasterBudget>;
   signal?: AbortSignal;
@@ -82,8 +95,7 @@ export function assertDarkPdfRasterSize(
   height: number,
   rasterBudget: Readonly<PdfRasterBudget> = getBrowserPdfRasterBudget(),
 ): PdfRasterDimensions {
-  const safeWidth = safePixelDimension(width, "preview width");
-  const safeHeight = safePixelDimension(height, "preview height");
+  const { width: safeWidth, height: safeHeight } = assertPdfRasterDimensions(width, height);
   if (
     safeWidth > rasterBudget.maxEdge
     || safeHeight > rasterBudget.maxEdge
@@ -92,6 +104,44 @@ export function assertDarkPdfRasterSize(
     throw new Error("The PDF page preview is too large to render safely.");
   }
   return { width: safeWidth, height: safeHeight };
+}
+
+function assertPdfRasterDimensions(width: number, height: number): PdfRasterDimensions {
+  return {
+    width: safePixelDimension(width, "preview width"),
+    height: safePixelDimension(height, "preview height"),
+  };
+}
+
+/**
+ * Fits a source raster into the current PDF budget without ever upscaling it.
+ * The optional cap limits the longest output edge (thumbnail callers use 256).
+ */
+export function fitPdfRasterDimensions(
+  source: PdfRasterDimensions,
+  rasterBudget: Readonly<PdfRasterBudget> = getBrowserPdfRasterBudget(),
+  longestEdgeCap?: number,
+): PdfRasterDimensions {
+  const { width, height } = assertPdfRasterDimensions(source.width, source.height);
+  const edgeCap = longestEdgeCap === undefined
+    ? Number.POSITIVE_INFINITY
+    : safePixelDimension(longestEdgeCap, "preview edge cap");
+  const maximumPixels = Math.min(
+    rasterBudget.maxPixelsPerPage,
+    rasterBudget.maxPixelsPerDocument,
+  );
+  const scale = Math.min(
+    1,
+    rasterBudget.maxEdge / width,
+    rasterBudget.maxEdge / height,
+    Math.sqrt(maximumPixels) / Math.sqrt(width) / Math.sqrt(height),
+    edgeCap / Math.max(width, height),
+  );
+  return assertDarkPdfRasterSize(
+    Math.max(1, Math.floor(width * scale)),
+    Math.max(1, Math.floor(height * scale)),
+    rasterBudget,
+  );
 }
 
 function darkPdfAbortError(): Error {
@@ -126,25 +176,146 @@ function waitForDarkPdfTask<T>(
   });
 }
 
+const PNG_DATA_URL_PATTERN = /^data:image\/png;base64,/i;
+const PNG_DATA_URL_FULL_PATTERN = /^data:image\/png;base64,[a-z\d+/]*={0,2}$/i;
+const SVG_DATA_URL_PREFIX = "data:image/svg+xml;base64,";
+
+interface NormalizedPngDataUrl {
+  value: string;
+  payloadOffset: number;
+}
+
+/**
+ * Keep PNG data-url handling in step with image-safety's parser.  Canvas
+ * implementations normally return a lower-case prefix without whitespace,
+ * but persisted projects can contain either case and harmless surrounding
+ * whitespace.  Validate the alphabet without copying the (potentially very
+ * large) payload so dimension inspection remains header-only.
+ */
+function normalizePngDataUrl(dataURL: string): NormalizedPngDataUrl {
+  const normalized = dataURL.trim();
+  const prefix = PNG_DATA_URL_PATTERN.exec(normalized)?.[0];
+  if (!prefix || !PNG_DATA_URL_FULL_PATTERN.test(normalized)) {
+    throw new Error("The PDF page preview format is unsupported.");
+  }
+  const payloadOffset = prefix.length;
+  const payloadLength = normalized.length - payloadOffset;
+  if (payloadLength <= 0 || payloadLength % 4 !== 0) {
+    throw new Error("The PDF page preview format is unsupported.");
+  }
+  return { value: normalized, payloadOffset };
+}
+
+function base64PayloadByteLength(
+  dataURL: NormalizedPngDataUrl,
+): number {
+  const payloadLength = dataURL.value.length - dataURL.payloadOffset;
+  const padding = dataURL.value.endsWith("==") ? 2 : dataURL.value.endsWith("=") ? 1 : 0;
+  const bytes = Math.floor(payloadLength * 3 / 4) - padding;
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) {
+    throw new Error("The PDF page preview format is unsupported.");
+  }
+  return bytes;
+}
+
+function base64EncodedLength(byteLength: number): number {
+  if (!Number.isSafeInteger(byteLength) || byteLength < 0) return Number.POSITIVE_INFINITY;
+  return 4 * Math.ceil(byteLength / 3);
+}
+
+function darkPdfEncodedOutputLimit(
+  rasterBudget: Readonly<PdfRasterBudget>,
+): number {
+  const encodedBudget = getPdfImportEncodedByteBudget(rasterBudget);
+  return Math.min(encodedBudget.maxBytesPerPage, encodedBudget.maxBytesPerDocument);
+}
+
+function darkPdfSvgSourceLength(
+  pngDataURLLength: number,
+  width: number,
+  height: number,
+): number {
+  const svgPrefix = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><image width="${width}" height="${height}" href="`;
+  const svgSuffix = `"/></svg>`;
+  const sourceLength = svgPrefix.length + pngDataURLLength + svgSuffix.length;
+  return Number.isSafeInteger(sourceLength) ? sourceLength : Number.POSITIVE_INFINITY;
+}
+
+/**
+ * Reject a PNG before it is nested in a base64 SVG.  The SVG wrapper adds a
+ * second encoded copy of the PNG data URL, so checking only the PNG byte
+ * count would still allow a final string to exceed the selected device
+ * budget.  This estimate is exact for the ASCII-only wrapper generated below
+ * and avoids allocating either the SVG source or its base64 output on error.
+ */
+function assertNormalizedDarkPdfEncodedOutputBudget(
+  normalized: NormalizedPngDataUrl,
+  width: number,
+  height: number,
+  rasterBudget: Readonly<PdfRasterBudget> = getBrowserPdfRasterBudget(),
+): void {
+  const { width: safeWidth, height: safeHeight } = assertPdfRasterDimensions(width, height);
+  const pngBytes = base64PayloadByteLength(normalized);
+  const svgSourceLength = darkPdfSvgSourceLength(normalized.value.length, safeWidth, safeHeight);
+  const encodedOutputBytes = Number.isFinite(svgSourceLength)
+    ? SVG_DATA_URL_PREFIX.length + base64EncodedLength(svgSourceLength)
+    : Number.POSITIVE_INFINITY;
+  const maxEncodedBytes = darkPdfEncodedOutputLimit(rasterBudget);
+  if (
+    pngBytes > maxEncodedBytes
+    || !Number.isSafeInteger(encodedOutputBytes)
+    || encodedOutputBytes > maxEncodedBytes
+  ) {
+    throw new Error("The dark PDF preview output is too large to retain safely.");
+  }
+}
+
+export function assertDarkPdfEncodedOutputBudget(
+  pngDataURL: string,
+  width: number,
+  height: number,
+  rasterBudget: Readonly<PdfRasterBudget> = getBrowserPdfRasterBudget(),
+): void {
+  assertNormalizedDarkPdfEncodedOutputBudget(
+    normalizePngDataUrl(pngDataURL),
+    width,
+    height,
+    rasterBudget,
+  );
+}
+
 function pngRasterAsSvgDataUrl(
   pngDataURL: string,
   width: number,
   height: number,
+  rasterBudget: Readonly<PdfRasterBudget>,
 ): DataURL {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><image width="${width}" height="${height}" href="${pngDataURL}"/></svg>`;
-  return `data:image/svg+xml;base64,${window.btoa(svg)}` as DataURL;
+  const normalized = normalizePngDataUrl(pngDataURL);
+  assertNormalizedDarkPdfEncodedOutputBudget(normalized, width, height, rasterBudget);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><image width="${width}" height="${height}" href="${normalized.value}"/></svg>`;
+  // The source PNG data URL is now copied into the SVG source. Drop the
+  // separate reference before btoa allocates the final encoded string.
+  normalized.value = "";
+  const encoded = window.btoa(svg);
+  const maxEncodedBytes = darkPdfEncodedOutputLimit(rasterBudget);
+  if (SVG_DATA_URL_PREFIX.length + encoded.length > maxEncodedBytes) {
+    // Keep this defensive check in case a browser's btoa implementation
+    // differs from the ASCII length estimate above.
+    throw new Error("The dark PDF preview output is too large to retain safely.");
+  }
+  return `${SVG_DATA_URL_PREFIX}${encoded}` as DataURL;
 }
 
 /** Reads and validates the PNG header without decoding a potentially huge bitmap. */
 export function getPdfRasterDimensions(dataURL: string): Promise<PdfRasterDimensions> {
-  const prefix = "data:image/png;base64,";
-  if (!dataURL.startsWith(prefix)) {
-    return Promise.reject(new Error("The PDF page preview format is unsupported."));
-  }
   try {
+    const normalized = normalizePngDataUrl(dataURL);
     // The PNG signature and IHDR dimensions fit in the first 24 decoded
     // bytes. Avoid decoding the full data URL just to inspect its dimensions.
-    const header = window.atob(dataURL.slice(prefix.length, prefix.length + 32));
+    const header = window.atob(normalized.value.slice(
+      normalized.payloadOffset,
+      normalized.payloadOffset + 32,
+    ));
     const bytes = Uint8Array.from(header, (character) => character.charCodeAt(0));
     const signature = [137, 80, 78, 71, 13, 10, 26, 10];
     const validSignature = bytes.length >= 24
@@ -163,7 +334,7 @@ export function getPdfRasterDimensions(dataURL: string): Promise<PdfRasterDimens
       + bytes[22] * 0x100
       + bytes[23]
     );
-    return Promise.resolve(assertDarkPdfRasterSize(width, height));
+    return Promise.resolve(assertPdfRasterDimensions(width, height));
   } catch (error) {
     return Promise.reject(error instanceof Error
       ? error
@@ -180,6 +351,7 @@ export function getPdfRasterDimensions(dataURL: string): Promise<PdfRasterDimens
  */
 export async function renderDarkPdfPreview({
   bytes,
+  immutableSha256,
   pageIndex,
   rasterBudget: requestedRasterBudget,
   width,
@@ -194,6 +366,17 @@ export async function renderDarkPdfPreview({
   }
 
   let currentOperation: number | null = null;
+  const rasterOptions = getPdfJsRasterOptions(rasterBudget);
+  const embeddedImageBudget = getPdfImportEncodedByteBudget(rasterBudget);
+  const { assertPdfEmbeddedImageLimit } = await import("./embedded-image-limits");
+  await assertPdfEmbeddedImageLimit(bytes, rasterOptions.maxImageSize, {
+    immutableSha256,
+    maxEdge: rasterBudget.maxEdge,
+    maxTotalPixels: rasterBudget.maxPixelsPerDocument,
+    maxTotalEncodedBytes: embeddedImageBudget.maxBytesPerDocument,
+    signal,
+  });
+  throwIfDarkPdfAborted(signal);
 
   /**
    * PDF.js renders more than the page into a canvas. Tiling patterns, Type3
@@ -437,12 +620,15 @@ export async function renderDarkPdfPreview({
     // PDF.js may transfer this copy to its worker. The project-owned bytes stay
     // immutable for autosave, project archives, and annotated PDF export.
     data: Uint8Array.from(bytes),
+    enableScripting: false,
+    isEvalSupported: false,
     useSystemFonts: false,
     useWorkerFetch: false,
     useWasm: false,
     standardFontDataUrl: localPdfStandardFontDataUrl(),
     CanvasFactory: DarkPdfCanvasFactory,
-  });
+    ...rasterOptions,
+  } as SafePdfDocumentInitParameters);
   let desiredDarkCanvas: HTMLCanvasElement | null = null;
   let precompensatedCanvas: HTMLCanvasElement | null = null;
   try {
@@ -512,20 +698,33 @@ export async function renderDarkPdfPreview({
       // as SVG and skip its extra PNG image filter. The editor's one canvas
       // filter can then invert the page while compensated picture pixels keep
       // their natural colour polarity and hue instead of becoming negatives.
-      const pngDataURL = pdfRasterCanvasToPngDataUrl(precompensatedCanvas);
+      let pngDataURL = pdfRasterCanvasToPngDataUrl(precompensatedCanvas);
       releaseTrackedRasterCanvas(precompensatedCanvas);
       precompensatedCanvas = null;
-      return pngRasterAsSvgDataUrl(
-        pngDataURL,
-        width,
-        height,
-      );
+      try {
+        return pngRasterAsSvgDataUrl(
+          pngDataURL,
+          width,
+          height,
+          rasterBudget,
+        );
+      } finally {
+        // Do not retain the large intermediate PNG data URL after the SVG
+        // wrapper has either succeeded or rejected its bounded size check.
+        pngDataURL = "";
+      }
     } finally {
       page.cleanup();
     }
   } finally {
     await loadingTask.destroy().catch(() => undefined);
-    if (desiredDarkCanvas) releaseTrackedRasterCanvas(desiredDarkCanvas);
-    if (precompensatedCanvas) releaseTrackedRasterCanvas(precompensatedCanvas);
+    if (desiredDarkCanvas) {
+      releaseTrackedRasterCanvas(desiredDarkCanvas);
+      desiredDarkCanvas = null;
+    }
+    if (precompensatedCanvas) {
+      releaseTrackedRasterCanvas(precompensatedCanvas);
+      precompensatedCanvas = null;
+    }
   }
 }

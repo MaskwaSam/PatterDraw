@@ -9,6 +9,7 @@ import {
 export interface ProjectFindPanelProps {
   project: ClassroomProject;
   onActivate: (result: ProjectSearchResult) => void;
+  onClose: () => void;
   onOpenCanvasSearch: () => void;
 }
 
@@ -60,6 +61,7 @@ function moveResult(
 export function ProjectFindPanel({
   project,
   onActivate,
+  onClose,
   onOpenCanvasSearch,
 }: ProjectFindPanelProps) {
   const [query, setQuery] = useState("");
@@ -94,6 +96,10 @@ export function ProjectFindPanel({
   const activeResult = activeKey
     ? results.find((result) => result.key === activeKey) || null
     : null;
+  const activeResultIndex = activeResult ? results.indexOf(activeResult) : -1;
+  const activeResultId = activeResultIndex >= 0
+    ? `project-find-result-${activeResultIndex}`
+    : undefined;
 
   const activate = (result: ProjectSearchResult | null) => {
     if (!result) return;
@@ -102,6 +108,15 @@ export function ProjectFindPanel({
   };
 
   const handleInputKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    // This panel lives inside Excalidraw's DOM tree. Keep search keystrokes
+    // local so printable keys, tool shortcuts, and Escape cannot reach the
+    // canvas after the input has received focus.
+    event.stopPropagation();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+      return;
+    }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const direction: -1 | 1 = event.key === "ArrowDown" ? 1 : -1;
@@ -118,10 +133,33 @@ export function ProjectFindPanel({
     activate(activeResult || moveResult(results, null, 1));
   };
 
+  const handlePanelKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    // Result buttons and the canvas-search action are descendants of the
+    // Excalidraw container too. Keep their keyboard events out of the editor
+    // bubble path while preserving the native button activation default.
+    // The input handles its own keydown above.
+    event.stopPropagation();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+    }
+  };
+
+  const stopPanelKeyboardEvent = (event: KeyboardEvent<HTMLElement>) => {
+    event.stopPropagation();
+  };
+
   const countLabel = `${results.length} result${results.length === 1 ? "" : "s"}`;
 
   return (
-    <section className="project-find-panel" role="region" aria-label="Project Find">
+    <section
+      className="project-find-panel"
+      role="region"
+      aria-label="Project Find"
+      onKeyDown={handlePanelKeyDown}
+      onKeyUp={stopPanelKeyboardEvent}
+      onKeyPress={stopPanelKeyboardEvent}
+    >
       <div className="project-find-header">
         <div>
           <h2 className="project-find-title">Project Find</h2>
@@ -147,25 +185,34 @@ export function ProjectFindPanel({
           autoFocus
           aria-label="Find text across project"
           aria-controls="project-find-results"
+          aria-activedescendant={activeResultId}
+          aria-autocomplete="list"
           onChange={(event) => setQuery(event.target.value)}
           onKeyDown={handleInputKeyDown}
+          onKeyUp={stopPanelKeyboardEvent}
+          onKeyPress={stopPanelKeyboardEvent}
         />
       </label>
       <div
         ref={resultsRef}
-        id="project-find-results"
         className="project-find-results"
-        aria-label="Project Find results"
       >
         {results.length ? (
-          <ul className="project-find-result-list">
-            {results.map((result) => (
-              <li key={result.key} className="project-find-result-item">
+          <ul
+            id="project-find-results"
+            className="project-find-result-list"
+            role="listbox"
+            aria-label="Project Find results"
+          >
+            {results.map((result, index) => (
+              <li key={result.key} className="project-find-result-item" role="none">
                 <button
+                  id={`project-find-result-${index}`}
                   className={`project-find-result ${result.key === activeKey ? "is-active" : ""}`}
                   type="button"
+                  role="option"
                   aria-label={buttonLabel(result)}
-                  aria-current={result.key === activeKey ? "true" : undefined}
+                  aria-selected={result.key === activeKey}
                   onClick={() => activate(result)}
                 >
                   <span className={`project-find-result-scope project-find-result-scope-${result.scope as ProjectSearchScope}`}>
@@ -178,7 +225,7 @@ export function ProjectFindPanel({
             ))}
           </ul>
         ) : (
-          <p className="project-find-empty">No matching text.</p>
+          <p id="project-find-results" className="project-find-empty">No matching text.</p>
         )}
       </div>
     </section>

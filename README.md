@@ -35,7 +35,7 @@ The Moodle activity is designed but not yet implemented. See [the Moodle boundar
 Requires Node 22.13 or newer.
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
@@ -50,11 +50,51 @@ Open the LAN URL printed by Vite from another device. PatterDraw does not provid
 Production verification:
 
 ```bash
+npm ci
+npx playwright install chromium firefox webkit
 npm run check
 npm run test:browser
+npm run test:browser:production
+npm audit --audit-level=high
 ```
 
+CI and release verification use Node 22.13.0 and npm 11.12.1. The normal build
+omits source maps; set `PATTERDRAW_SOURCEMAPS=true` only for a local diagnostic
+build that will not be published to students.
+
 The Vite build uses a relative base so `dist/` can be served from a static subdirectory or packaged into Moodle. Browsers still require an HTTP origin for workers and IndexedDB; opening `index.html` directly with `file://` is not a supported launch path.
+“Offline-first” means the loaded app makes no external requests and keeps work
+on the device. PatterDraw does not install a service worker, so a fresh reload
+still requires the local/static host that serves the app bundle.
+
+## Deterministic release bundle
+
+After the production checks pass, package the already-built `dist/` tree into
+the ignored `dist/release/` directory:
+
+```bash
+npm run check
+npm run release:package
+npm run release:verify
+```
+
+Final packaging requires a clean git worktree. The release directory remains a
+complete deployable static root and includes `release-manifest.json`,
+`provenance.json`, a CycloneDX `sbom.cdx.json`, and `SHA256SUMS`. Payload paths
+and metadata are sorted and timestamped from `SOURCE_DATE_EPOCH` or the HEAD
+commit time; the checksum file covers every payload and metadata file except
+itself. The manifest records `releaseMode: "final"` or `"development"` and
+source maps are rejected because they are diagnostic-only artifacts.
+
+For a local development check while source changes are uncommitted, make the
+dirty state explicit in the recorded provenance:
+
+```bash
+npm run release:package -- --allow-dirty
+npm run release:verify -- --allow-dirty
+```
+
+Do not distribute a bundle whose manifest records `source.dirty: true`.
 
 ## Student-safety boundary
 

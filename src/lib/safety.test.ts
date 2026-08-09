@@ -186,6 +186,24 @@ describe("student safety", () => {
     expect(safe.elements.map((element) => element.id)).toEqual(["valid"]);
   });
 
+  it("repairs canvas-encoded PNG bytes that Excalidraw labels as GIF", () => {
+    const imported = scene([{ id: "gif", type: "image", fileId: "gif-file" }]);
+    imported.files = {
+      "gif-file": {
+        id: "gif-file",
+        mimeType: "image/gif",
+        dataURL: "data:image/gif;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      },
+    };
+
+    const safe = sanitizeScene(imported);
+    expect(safe.elements.map((element) => element.id)).toEqual(["gif"]);
+    expect(safe.files["gif-file"]).toMatchObject({
+      mimeType: "image/png",
+      dataURL: expect.stringMatching(/^data:image\/png;base64,/),
+    });
+  });
+
   it("sanitizes every scene in a project", () => {
     const project = {
       schemaVersion: 1,
@@ -335,6 +353,66 @@ describe("student safety", () => {
     } satisfies ClassroomProject;
     expect(() => assertSafeProject(project)).toThrow(/duplicate/);
     expect(() => assertSafeProject({ ...project, pdfPageOrder: ["missing"] })).toThrow(/invalid page scene/);
+  });
+
+  it("rejects inherited scene names in the active scene and PDF page order", () => {
+    const activeSceneProject = createBlankProject();
+    activeSceneProject.activeSceneId = "toString";
+    expect(() => assertSafeProject(activeSceneProject)).toThrow(/active scene is missing/);
+
+    const pageProject = createBlankProject();
+    const scenes = Object.create({ toString: pdfScene("toString", 0) }) as ClassroomProject["scenes"];
+    scenes.page = pdfScene("page", 0);
+    pageProject.activeSceneId = "page";
+    pageProject.scenes = scenes;
+    pageProject.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "source.pdf",
+      mimeType: "application/pdf",
+      byteLength: 1,
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+    };
+    pageProject.pdfPageOrder = ["toString"];
+    expect(() => assertSafeProject(pageProject)).toThrow(/invalid page scene/);
+  });
+
+  it("rejects inherited PDF document identities used by a page", () => {
+    const project = createBlankProject();
+    project.activeSceneId = "page";
+    project.scenes.page = pdfScene("page", 0);
+    project.pdfPageOrder = ["page"];
+    project.pdfDocuments = Object.create({
+      pdf: {
+        id: "pdf",
+        name: "source.pdf",
+        mimeType: "application/pdf",
+        byteLength: 1,
+        pageCount: 1,
+        archivePath: "documents/pdf.pdf",
+      },
+    }) as ClassroomProject["pdfDocuments"];
+    expect(() => assertSafeProject(project)).toThrow(/missing source document/);
+  });
+
+  it("rejects inherited scene identities in slide order", () => {
+    const project = createBlankProject();
+    const activeSceneId = project.activeSceneId;
+    const scenes = Object.create({
+      toString: {
+        ...scene([{ id: "frame", type: "frame" }]),
+        id: "toString",
+      },
+    }) as ClassroomProject["scenes"];
+    scenes[activeSceneId] = project.scenes[activeSceneId];
+    project.scenes = scenes;
+    project.slideOrder = [{
+      id: "slide",
+      sceneId: "toString",
+      frameId: "frame",
+      title: "Inherited",
+    }];
+    expect(() => assertSafeProject(project)).toThrow(/missing scene/);
   });
 
   it("rejects a PDF scene with an out-of-range immutable source-page index", () => {

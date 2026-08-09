@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_PDF_RASTER_BUDGET,
+  MAX_PDF_ENCODED_PNG_BYTES_PER_DOCUMENT,
   MAX_PDF_RASTER_EDGE,
   MAX_PDF_RASTER_PIXELS_PER_DOCUMENT,
   MAX_PDF_RASTER_PIXELS_PER_PAGE,
+  getPdfJsRasterOptions,
+  getPdfImportEncodedByteBudget,
   getPdfImportRasterScale,
   getPdfExportRasterBudget,
   getPdfRasterBudget,
@@ -13,6 +16,31 @@ import {
 } from "./raster-limits";
 
 describe("PDF import raster limits", () => {
+  it("derives encoded PNG limits from the remaining project-content budget", () => {
+    expect(getPdfImportEncodedByteBudget(DEFAULT_PDF_RASTER_BUDGET, 1_024)).toEqual({
+      maxBytesPerPage: 1_024,
+      maxBytesPerDocument: 1_024,
+    });
+    expect(getPdfImportEncodedByteBudget(DEFAULT_PDF_RASTER_BUDGET))
+      .toMatchObject({ maxBytesPerDocument: MAX_PDF_ENCODED_PNG_BYTES_PER_DOCUMENT });
+    expect(() => getPdfImportEncodedByteBudget(DEFAULT_PDF_RASTER_BUDGET, -1))
+      .toThrow(/encoded-image byte limit/i);
+  });
+  it("bounds PDF.js embedded images and worker canvases to the raster budget", () => {
+    expect(getPdfJsRasterOptions(DEFAULT_PDF_RASTER_BUDGET)).toEqual({
+      maxImageSize: MAX_PDF_RASTER_PIXELS_PER_PAGE,
+      canvasMaxAreaInBytes: MAX_PDF_RASTER_PIXELS_PER_PAGE * 4,
+    });
+    expect(getPdfJsRasterOptions({
+      maxEdge: 1_000,
+      maxPixelsPerPage: 2_000_000,
+      maxPixelsPerDocument: 3_000_000,
+    })).toEqual({
+      maxImageSize: 1_000_000,
+      canvasMaxAreaInBytes: 4_000_000,
+    });
+  });
+
   it("keeps the preferred high-resolution scale for an ordinary worksheet", () => {
     expect(getPdfImportRasterScale([{ width: 612, height: 792 }], 2)).toBe(3);
   });

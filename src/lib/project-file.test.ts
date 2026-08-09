@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { strToU8, zipSync } from "fflate";
+import { PDFDocument } from "pdf-lib";
 import { createBlankProject, type SerializedScene } from "../types";
 import {
   decodeProjectFile,
@@ -9,7 +10,33 @@ import {
 import { sanitizeProject } from "./safety";
 import { MATH_TOOL_CATALOGUE } from "./math-tools/catalogue";
 
-function pdfPageScene(id: string, pageIndex: number): SerializedScene {
+const MINIMAL_PDF_BASE64 = "JVBERi0xLjcKJYGBgYEKCjEgMCBvYmoKPDwKL1R5cGUgL1BhZ2VzCi9LaWRzIFsgNCAwIFIgXQovQ291bnQgMQo+PgplbmRvYmoKCjIgMCBvYmoKPDwKL1R5cGUgL0NhdGFsb2cKL1BhZ2VzIDEgMCBSCj4+CmVuZG9iagoKMyAwIG9iago8PAovUHJvZHVjZXIgPEZFRkYwMDcwMDA2NDAwNjYwMDJEMDA2QzAwNjkwMDYyMDAyMDAwMjgwMDY4MDA3NDAwNzQwMDcwMDA3MzAwM0EwMDJGMDAyRjAwNjcwMDY5MDA3NDAwNjgwMDc1MDA2MjAwMkUwMDYzMDA2RjAwNkQwMDJGMDA0ODAwNkYwMDcwMDA2NDAwNjkwMDZFMDA2NzAwMkYwMDcwMDA2NDAwNjYwMDJEMDA2QzAwNjkwMDYyMDAyOT4KL01vZERhdGUgKEQ6MjAyNjA4MDUwMTQ2MzFaKQovQ3JlYXRvciA8RkVGRjAwNzAwMDY0MDA2NjAwMkQwMDZDMDA2OTAwNjIwMDIwMDAyODAwNjgwMDc0MDA3NDAwNzAwMDczMDAzQTAwMkYwMDJGMDA2NzAwNjkwMDc0MDA2ODAwNzUwMDYyMDAyRTAwNjMwMDZGMDA2RDAwMkYwMDQ4MDA2RjAwNzAwMDY0MDA2OTAwNkUwMDY3MDAyRjAwNzAwMDY0MDA2NjAwMkQwMDZDMDA2OTAwNjIwMDI5PgovQ3JlYXRpb25EYXRlIChEOjIwMjYwODA1MDE0NjMxWikKPj4KZW5kb2JqCgo0IDAgb2JqCjw8Ci9UeXBlIC9QYWdlCi9QYXJlbnQgMSAwIFIKL1Jlc291cmNlcyA8PAo+PgovTWVkaWFCb3ggWyAwIDAgNjEyIDc5MiBdCj4+CmVuZG9iagoKeHJlZgowIDUKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDE2IDAwMDAwIG4gCjAwMDAwMDAwNzYgMDAwMDAgbiAKMDAwMDAwMDEyNiAwMDAwMCBuIAowMDAwMDAwNTk2IDAwMDAwIG4gCgp0cmFpbGVyCjw8Ci9TaXplIDUKL1Jvb3QgMiAwIFIKL0luZm8gMyAwIFIKPj4KCnN0YXJ0eHJlZgo2ODcKJSVFT0Y=";
+const validPdfBytes = () => Uint8Array.from(atob(MINIMAL_PDF_BASE64), (char) => char.charCodeAt(0));
+const VALID_PNG_DATA_URL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+function pngDataUrl(width: number, height: number): string {
+  const bytes = new Uint8Array(33);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  bytes.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+  bytes[16] = width >>> 24;
+  bytes[17] = width >>> 16;
+  bytes[18] = width >>> 8;
+  bytes[19] = width;
+  bytes[20] = height >>> 24;
+  bytes[21] = height >>> 16;
+  bytes[22] = height >>> 8;
+  bytes[23] = height;
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return `data:image/png;base64,${btoa(binary)}`;
+}
+
+function pdfPageScene(
+  id: string,
+  pageIndex: number,
+  width = 600,
+  height = 800,
+): SerializedScene {
   return {
     id,
     name: id,
@@ -19,8 +46,8 @@ function pdfPageScene(id: string, pageIndex: number): SerializedScene {
       fileId: `${id}-file`,
       x: 0,
       y: 0,
-      width: 600,
-      height: 800,
+      width,
+      height,
       angle: 0,
       locked: true,
       isDeleted: false,
@@ -40,14 +67,14 @@ function pdfPageScene(id: string, pageIndex: number): SerializedScene {
       [`${id}-file`]: {
         id: `${id}-file`,
         mimeType: "image/png",
-        dataURL: "data:image/png;base64,AA==",
+        dataURL: VALID_PNG_DATA_URL,
       },
     },
     pdfPage: {
       documentId: "pdf",
       pageIndex,
-      width: 600,
-      height: 800,
+      width,
+      height,
       rotation: 0,
       backgroundElementId: `${id}-background`,
     },
@@ -55,10 +82,21 @@ function pdfPageScene(id: string, pageIndex: number): SerializedScene {
 }
 
 describe("classroom project files", () => {
+  it("rejects an already-cancelled archive restore before extraction starts", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(decodeProjectFile(
+      new Uint8Array([1, 2, 3, 4]),
+      undefined,
+      { signal: controller.signal },
+    )).rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("round-trips project metadata and original PDF bytes", async () => {
     const project = createBlankProject(new Date("2026-07-12T12:00:00.000Z"));
     const documentId = "pdf-1";
-    const bytes = new Uint8Array([37, 80, 68, 70, 45, 49, 46, 55]);
+    const bytes = validPdfBytes();
     project.pdfDocuments[documentId] = {
       id: documentId,
       name: "worksheet.pdf",
@@ -193,7 +231,7 @@ describe("classroom project files", () => {
 
   it("upgrades a legacy archive with a verified PDF content identity", async () => {
     const project = createBlankProject();
-    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const bytes = validPdfBytes();
     project.pdfDocuments.pdf = {
       id: "pdf",
       name: "legacy.pdf",
@@ -211,7 +249,7 @@ describe("classroom project files", () => {
       project: {
         pdfDocuments: {
           pdf: {
-            sha256: "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a",
+            sha256: "b2771df32e3661390b42ff44701e91ce5463bbac40d9fc8f2b5e9b4f3d32b28c",
           },
         },
       },
@@ -247,6 +285,34 @@ describe("classroom project files", () => {
     await expect(decodeProjectFile(archive, 512)).rejects.toThrow(/expands beyond/);
   });
 
+  it("rejects a project with an oversized local raster header before archive creation", async () => {
+    const project = createBlankProject();
+    const scene = project.scenes[project.activeSceneId];
+    scene.files.file = {
+      id: "file",
+      mimeType: "image/png",
+      dataURL: pngDataUrl(9_000, 1),
+    };
+    scene.elements = [{ id: "image", type: "image", fileId: "file" }];
+    await expect(encodeProjectFile(project, {}))
+      .rejects.toThrow(/dimensions|decode safely/i);
+  });
+
+  it("rejects a source PDF that cannot pass embedded-image preflight before archive creation", async () => {
+    const project = createBlankProject();
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "malformed.pdf",
+      mimeType: "application/pdf",
+      byteLength: bytes.byteLength,
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+    };
+    await expect(encodeProjectFile(project, { pdf: bytes }))
+      .rejects.toThrow(/could not be checked/i);
+  });
+
   it("refuses to create a project whose complete uncompressed contents exceed the limit", async () => {
     const project = createBlankProject();
     project.title = "A".repeat(8_192);
@@ -256,7 +322,10 @@ describe("classroom project files", () => {
 
   it("round-trips an explicit reordered PDF page list", async () => {
     const project = createBlankProject();
-    const bytes = new Uint8Array([37, 80, 68, 70]);
+    const source = await PDFDocument.create();
+    source.addPage([600, 800]);
+    source.addPage([600, 800]);
+    const bytes = await source.save();
     project.pdfDocuments.pdf = {
       id: "pdf",
       name: "pages.pdf",
@@ -275,7 +344,7 @@ describe("classroom project files", () => {
 
   it("normalizes a legacy v1 project that has no PDF page-order field", async () => {
     const project = createBlankProject();
-    const bytes = new Uint8Array([37, 80, 68, 70]);
+    const bytes = validPdfBytes();
     project.pdfDocuments.pdf = {
       id: "pdf",
       name: "legacy.pdf",
@@ -284,13 +353,58 @@ describe("classroom project files", () => {
       pageCount: 1,
       archivePath: "documents/pdf.pdf",
     };
-    project.scenes.page = { ...pdfPageScene("page", 0), name: "Legacy page" };
+    project.scenes.page = {
+      ...pdfPageScene("page", 0, 612, 792),
+      name: "Legacy page",
+    };
     delete project.pdfPageOrder;
     const archive = zipSync({
       "project.json": strToU8(JSON.stringify(project)),
       "documents/pdf.pdf": bytes,
     });
     expect((await decodeProjectFile(archive)).project.pdfPageOrder).toEqual(["page"]);
+  });
+
+  it("rejects a restored PDF whose manifest claims a poisoned page count", async () => {
+    const project = createBlankProject();
+    const bytes = validPdfBytes();
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "poisoned-count.pdf",
+      mimeType: "application/pdf",
+      byteLength: bytes.byteLength,
+      pageCount: 2,
+      archivePath: "documents/pdf.pdf",
+    };
+    project.scenes.page = pdfPageScene("page", 0, 612, 792);
+
+    const archive = zipSync({
+      "project.json": strToU8(JSON.stringify(project)),
+      "documents/pdf.pdf": bytes,
+    });
+    await expect(decodeProjectFile(archive)).rejects.toThrow(
+      /page count.*saved 2.*actual 1/i,
+    );
+  });
+
+  it("rejects a restored PDF whose retained page geometry is stale", async () => {
+    const project = createBlankProject();
+    const bytes = validPdfBytes();
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "poisoned-geometry.pdf",
+      mimeType: "application/pdf",
+      byteLength: bytes.byteLength,
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+    };
+    project.scenes.page = pdfPageScene("page", 0, 600, 800);
+
+    const archive = zipSync({
+      "project.json": strToU8(JSON.stringify(project)),
+      "documents/pdf.pdf": bytes,
+    });
+    await expect(decodeProjectFile(archive)).rejects.toThrow(/geometry no longer matches/i);
   });
 
   it("round-trips every typed math-tool kind with its local SVG file", async () => {

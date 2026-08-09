@@ -2,11 +2,65 @@ export const MAX_PDF_RASTER_EDGE = 8_192;
 export const MAX_PDF_RASTER_PIXELS_PER_PAGE = 16_000_000;
 export const MAX_PDF_RASTER_PIXELS_PER_DOCUMENT = 64_000_000;
 export const MAX_PDF_PAGE_EDGE_POINTS = 14_400;
+/** Encoded page PNG output is charged before it is retained in a scene. */
+export const MAX_PDF_ENCODED_PNG_BYTES_PER_PAGE = 64 * 1024 * 1024;
+/** Keep source PDF bytes plus generated page rasters inside MAX_PROJECT_BYTES. */
+export const MAX_PDF_ENCODED_PNG_BYTES_PER_DOCUMENT = 75 * 1024 * 1024;
 
 export interface PdfRasterBudget {
   maxEdge: number;
   maxPixelsPerPage: number;
   maxPixelsPerDocument: number;
+}
+
+export interface PdfJsRasterOptions {
+  /** Maximum decoded embedded-image area, in source pixels. */
+  maxImageSize: number;
+  /** Maximum worker canvas area, expressed in bytes as required by PDF.js. */
+  canvasMaxAreaInBytes: number;
+}
+
+export interface PdfEncodedByteBudget {
+  maxBytesPerPage: number;
+  maxBytesPerDocument: number;
+}
+
+export function getPdfImportEncodedByteBudget(
+  rasterBudget: Readonly<PdfRasterBudget> = DEFAULT_PDF_RASTER_BUDGET,
+  maxDocumentBytes = MAX_PDF_ENCODED_PNG_BYTES_PER_DOCUMENT,
+): PdfEncodedByteBudget {
+  if (!Number.isSafeInteger(maxDocumentBytes) || maxDocumentBytes < 0) {
+    throw new Error("The PDF encoded-image byte limit is invalid.");
+  }
+  const maxBytesPerPage = Math.max(
+    maxDocumentBytes === 0 ? 0 : 1,
+    Math.min(
+      MAX_PDF_ENCODED_PNG_BYTES_PER_PAGE,
+      rasterBudget.maxPixelsPerPage * 4,
+      maxDocumentBytes,
+    ),
+  );
+  const maxBytesPerDocument = Math.max(
+    maxDocumentBytes === 0 ? 0 : maxBytesPerPage,
+    Math.min(
+      MAX_PDF_ENCODED_PNG_BYTES_PER_DOCUMENT,
+      rasterBudget.maxPixelsPerDocument * 4,
+      maxDocumentBytes,
+    ),
+  );
+  return { maxBytesPerPage, maxBytesPerDocument };
+}
+
+export function encodedDataUrlByteLength(dataURL: string): number {
+  const comma = dataURL.indexOf(",");
+  if (comma < 0) throw new Error("PNG export produced invalid local data.");
+  const payload = dataURL.slice(comma + 1);
+  const padding = payload.endsWith("==") ? 2 : payload.endsWith("=") ? 1 : 0;
+  const bytes = Math.floor(payload.length * 3 / 4) - padding;
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) {
+    throw new Error("PNG export produced invalid local data.");
+  }
+  return bytes;
 }
 
 export interface PdfRasterEnvironment {
@@ -19,6 +73,27 @@ export const DEFAULT_PDF_RASTER_BUDGET: Readonly<PdfRasterBudget> = Object.freez
   maxPixelsPerPage: MAX_PDF_RASTER_PIXELS_PER_PAGE,
   maxPixelsPerDocument: MAX_PDF_RASTER_PIXELS_PER_DOCUMENT,
 });
+
+export function getPdfJsRasterOptions(
+  rasterBudget: Readonly<PdfRasterBudget> = DEFAULT_PDF_RASTER_BUDGET,
+): PdfJsRasterOptions {
+  // PDF.js otherwise leaves maxImageSize and canvasMaxAreaInBytes unlimited.
+  // Keep one source image within the same conservative envelope as a page
+  // raster, and express the canvas bound in the four-bytes-per-pixel unit that
+  // PDF.js converts back to an area internally.
+  const maxImageSize = Math.max(
+    1,
+    Math.floor(Math.min(
+      rasterBudget.maxPixelsPerPage,
+      rasterBudget.maxPixelsPerDocument,
+      rasterBudget.maxEdge * rasterBudget.maxEdge,
+    )),
+  );
+  return {
+    maxImageSize,
+    canvasMaxAreaInBytes: maxImageSize * 4,
+  };
+}
 
 const LOW_MEMORY_PDF_RASTER_BUDGET: Readonly<PdfRasterBudget> = Object.freeze({
   maxEdge: 6_144,

@@ -8,6 +8,11 @@ export const PDF_RAIL_MIN_WIDTH = 180;
 export const PDF_RAIL_MAX_WIDTH = 420;
 export const PDF_RAIL_DEFAULT_WIDTH = 224;
 
+// Scene objects are immutable snapshots. Weak caches keep unchanged pages
+// from repeatedly walking their full element arrays when another page edits.
+const thumbnailDataUrlCache = new WeakMap<SerializedScene, string | null>();
+const annotationCountCache = new WeakMap<SerializedScene, number>();
+
 interface PdfPageRailProps {
   project: ClassroomProject;
   pages: readonly SerializedScene[];
@@ -28,17 +33,25 @@ function clampRailWidth(width: number): number {
 }
 
 function thumbnailDataUrl(scene: SerializedScene): string | null {
+  if (thumbnailDataUrlCache.has(scene)) return thumbnailDataUrlCache.get(scene) ?? null;
   const backgroundId = scene.pdfPage?.backgroundElementId;
   const background = scene.elements.find((element) => element.id === backgroundId);
   const fileId = background && typeof background.fileId === "string" ? background.fileId : null;
   const dataURL = fileId ? scene.files[fileId]?.dataURL : null;
-  return typeof dataURL === "string" ? dataURL : null;
+  const result = typeof dataURL === "string" ? dataURL : null;
+  thumbnailDataUrlCache.set(scene, result);
+  return result;
 }
 
 function annotationCount(scene: SerializedScene): number {
-  return scene.elements.filter(
-    (element) => element.id !== scene.pdfPage?.backgroundElementId && element.isDeleted !== true,
-  ).length;
+  const cached = annotationCountCache.get(scene);
+  if (cached !== undefined) return cached;
+  let count = 0;
+  for (const element of scene.elements) {
+    if (element.id !== scene.pdfPage?.backgroundElementId && element.isDeleted !== true) count += 1;
+  }
+  annotationCountCache.set(scene, count);
+  return count;
 }
 
 export function PdfPageRail({

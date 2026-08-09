@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -64,8 +65,37 @@ if (packageSource.dependencies?.mathjax !== "4.1.3") {
 if (packageSource.dependencies?.["@excalidraw/mermaid-to-excalidraw"] !== "2.2.2") {
   findings.push("package.json:1 Mermaid converter must remain pinned to 2.2.2");
 }
-if (packageSource.dependencies?.pptxgenjs !== "4.0.1") {
-  findings.push("package.json:1 PptxGenJS must remain pinned to 4.0.1");
+if (packageSource.dependencies?.["pdfjs-dist"] !== "6.2.108") {
+  findings.push("package.json:1 PDF.js must remain pinned to the reviewed 6.2.108 security release");
+}
+if (packageSource.dependencies?.pptxgenjs !== "file:vendor/pptxgenjs-browser") {
+  findings.push("package.json:1 PptxGenJS must use the reviewed browser-only local package");
+}
+if (packageSource.dependencies?.jszip !== "3.10.1") {
+  findings.push("package.json:1 JSZip must remain pinned to 3.10.1");
+}
+
+const vendorRoot = path.join(root, "vendor/pptxgenjs-browser");
+const vendorManifest = JSON.parse(await readFile(path.join(vendorRoot, "package.json"), "utf8"));
+if (
+  vendorManifest.name !== "pptxgenjs"
+  || vendorManifest.version !== "4.0.1-patterdraw.1"
+  || vendorManifest.dependencies?.jszip !== "3.10.1"
+  || Object.hasOwn(vendorManifest.dependencies || {}, "image-size")
+) {
+  findings.push("vendor/pptxgenjs-browser/package.json:1 reviewed browser-only dependency boundary changed");
+}
+for (const [relative, expectedSha256] of [
+  ["package.json", "f3622752a70dee653dc91ef870e3ecc8ef2b503d7117e3bd674120d4babd9122"],
+  ["dist/pptxgen.es.js", "05844c5625e2cda3b449eb967c2246dd57ca57341886a7c28eeebca263b29bd4"],
+  ["types/index.d.ts", "0726d015dbcb55ccfa75546cb2fd43fe13a0dfeb783d08572f1c62f59193bbe5"],
+  ["LICENSE", "7a2bfe96150786ed1908b8e63f98ebab88875c1e79e28faff6649e0f11f77e52"],
+]) {
+  const bytes = await readFile(path.join(vendorRoot, relative));
+  const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+  if (actualSha256 !== expectedSha256) {
+    findings.push(`vendor/pptxgenjs-browser/${relative}: reviewed upstream PptxGenJS bytes changed`);
+  }
 }
 const viteSource = await readFile(path.join(root, "vite.config.ts"), "utf8");
 if (!viteSource.includes("localMathJaxAssets") || !viteSource.includes('"mathjax/tex-svg.js"')) {
@@ -94,6 +124,19 @@ if (
   || !importPdfSource.includes("./pdfjs/standard_fonts/")
 ) {
   findings.push("src/lib/pdf/import-pdf.ts:1 PDF.js standardFontDataUrl must point at bundled local assets");
+}
+if (
+  !importPdfSource.includes("enableScripting: false")
+  || !importPdfSource.includes("isEvalSupported: false")
+) {
+  findings.push("src/lib/pdf/import-pdf.ts:1 PDF scripting and dynamic evaluation must remain explicitly disabled");
+}
+const darkPdfSource = await readFile(path.join(root, "src/lib/pdf/dark-preview.ts"), "utf8");
+if (
+  !darkPdfSource.includes("enableScripting: false")
+  || !darkPdfSource.includes("isEvalSupported: false")
+) {
+  findings.push("src/lib/pdf/dark-preview.ts:1 PDF scripting and dynamic evaluation must remain explicitly disabled");
 }
 const noticesSource = await readFile(path.join(root, "THIRD_PARTY_NOTICES.md"), "utf8");
 if (!noticesSource.includes("LICENSE_FOXIT") || !noticesSource.includes("LICENSE_LIBERATION")) {

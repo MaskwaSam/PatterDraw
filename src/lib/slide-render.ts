@@ -6,6 +6,7 @@ import type {
 } from "@excalidraw/excalidraw/element/types";
 import type { BinaryFileData, BinaryFiles } from "@excalidraw/excalidraw/types";
 import type { SerializedScene } from "../types";
+import { isBlockedEmbeddedElementType } from "./embedded-content-policy";
 import { isSlideFrame } from "./slides";
 
 export interface SlideRenderData {
@@ -25,10 +26,7 @@ function sceneFiles(scene: SerializedScene): BinaryFiles {
 function isSafeSlideElement(
   element: ExcalidrawElement,
 ): element is NonDeletedExcalidrawElement {
-  return !element.isDeleted &&
-    element.type !== "embeddable" &&
-    element.type !== "iframe" &&
-    element.type !== "magicframe";
+  return !element.isDeleted && !isBlockedEmbeddedElementType(element.type);
 }
 
 function rotatedBoxBounds(

@@ -1,6 +1,14 @@
 import { createCanvas, loadImage } from "@napi-rs/canvas";
-import { expect, test, type Download } from "@playwright/test";
-import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
+import {
+  expect,
+  test,
+  type BrowserContext,
+  type Download,
+  type Page,
+  type Route,
+  type TestInfo,
+} from "@playwright/test";
+import { strFromU8, strToU8, unzipSync, zipSync, zlibSync } from "fflate";
 import {
   degrees,
   PDFDocument,
@@ -272,6 +280,115 @@ async function openTestPdf(page: import("@playwright/test").Page, pageCount = 1)
   await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(pageCount, { timeout: 15_000 });
   await expect.poll(() => autosavedPdfBackgroundPosition(page), { timeout: 15_000 })
     .toMatchObject({ locked: true });
+}
+
+async function oversizedEmbeddedImagePdfBytes(painted = true): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const page = document.addPage([612, 792]);
+  const width = 4_097;
+  const height = 4_097;
+  // A valid one-bit image needs only about 2 MB before compression, while its
+  // decoded pixel area crosses the 16-million-pixel PDF.js safety boundary.
+  const samples = new Uint8Array(Math.ceil(width / 8) * height);
+  const image = document.context.flateStream(samples, {
+    Type: PDFName.of("XObject"),
+    Subtype: PDFName.of("Image"),
+    Width: width,
+    Height: height,
+    ColorSpace: PDFName.of("DeviceGray"),
+    BitsPerComponent: 1,
+  });
+  const imageRef = document.context.register(image);
+  if (painted) {
+    const imageName = page.node.newXObject("Oversized", imageRef);
+    const content = document.context.flateStream(new TextEncoder().encode(
+      `q 612 0 0 792 0 0 cm ${imageName.asString()} Do Q`,
+    ));
+    page.node.addContentStream(document.context.register(content));
+  }
+  return document.save({ useObjectStreams: false });
+}
+
+async function oversizedInlineImagePdfBytes(): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const page = document.addPage([612, 792]);
+  const width = 4_097;
+  const height = 4_097;
+  const compressed = zlibSync(new Uint8Array(Math.ceil(width / 8) * height));
+  const header = new TextEncoder().encode(
+    `q 612 0 0 792 0 0 cm BI /W ${width} /H ${height} /CS /G /BPC 1 /F /Fl ID\n`,
+  );
+  const footer = new TextEncoder().encode("\nEI Q");
+  const contentBytes = new Uint8Array(header.length + compressed.length + footer.length);
+  contentBytes.set(header);
+  contentBytes.set(compressed, header.length);
+  contentBytes.set(footer, header.length + compressed.length);
+  page.node.addContentStream(document.context.register(document.context.stream(contentBytes)));
+  return document.save({ useObjectStreams: false });
+}
+
+async function colouredPdfBytes(): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  for (const colour of [rgb(1, 0, 0), rgb(0, 0, 1)]) {
+    const page = document.addPage([612, 792]);
+    page.drawRectangle({ x: 0, y: 0, width: 612, height: 792, color: colour });
+  }
+  return document.save();
+}
+
+function oversizedPngDataUrl(width = 9_000, height = 1): string {
+  // Raster safety inspects the PNG signature/IHDR dimensions before any
+  // browser image decode, so a minimal header is sufficient for this probe.
+  const bytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0);
+  Buffer.from([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]).copy(bytes, 8);
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  return `data:image/png;base64,${bytes.toString("base64")}`;
+}
+
+async function deferAnimationFrames(page: import("@playwright/test").Page) {
+  await page.evaluate(() => {
+    type DeferredRafState = {
+      callbacks: Map<number, FrameRequestCallback>;
+      nextId: number;
+      request: typeof window.requestAnimationFrame;
+      cancel: typeof window.cancelAnimationFrame;
+    };
+    const host = window as Window & { __patterdrawDeferredRaf?: DeferredRafState };
+    const state: DeferredRafState = {
+      callbacks: new Map(),
+      nextId: 1,
+      request: window.requestAnimationFrame.bind(window),
+      cancel: window.cancelAnimationFrame.bind(window),
+    };
+    host.__patterdrawDeferredRaf = state;
+    window.requestAnimationFrame = (callback) => {
+      const id = state.nextId++;
+      state.callbacks.set(id, callback);
+      return id;
+    };
+    window.cancelAnimationFrame = (id) => {
+      state.callbacks.delete(id);
+    };
+  });
+}
+
+async function releaseDeferredAnimationFrames(page: import("@playwright/test").Page) {
+  await page.evaluate(() => {
+    type DeferredRafState = {
+      callbacks: Map<number, FrameRequestCallback>;
+      request: typeof window.requestAnimationFrame;
+      cancel: typeof window.cancelAnimationFrame;
+    };
+    const host = window as Window & { __patterdrawDeferredRaf?: DeferredRafState };
+    const state = host.__patterdrawDeferredRaf;
+    if (!state) return;
+    window.requestAnimationFrame = state.request;
+    window.cancelAnimationFrame = state.cancel;
+    delete host.__patterdrawDeferredRaf;
+    for (const callback of state.callbacks.values()) state.request(callback);
+  });
 }
 
 async function pictureDarkModePdfBytes(): Promise<Uint8Array> {
@@ -635,7 +752,7 @@ async function openClassroomFixture(
   await expect(page.locator(".busy-overlay")).toHaveCount(0);
 }
 
-async function openSlideSettings(page: import("@playwright/test").Page) {
+async function openSlideSettings(page: Page) {
   const trigger = page.getByRole("button", { name: "Slide settings", exact: true });
   if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click();
   const dialog = page.getByRole("dialog", { name: "Slide settings", exact: true });
@@ -744,6 +861,76 @@ async function keyvalValue<T>(page: import("@playwright/test").Page, key: string
     database.close();
     return value;
   }, key) as Promise<T | undefined>;
+}
+
+async function installDeferredFullscreenProbe(page: import("@playwright/test").Page): Promise<void> {
+  await page.evaluate(() => {
+    type DeferredRequest = { element: Element; resolve: () => void };
+    type ProbeWindow = Window & {
+      __patterdrawFullscreenProbe?: {
+        fullscreenElement: Element | null;
+        requests: DeferredRequest[];
+      };
+    };
+    const probeWindow = window as ProbeWindow;
+    const probe = {
+      fullscreenElement: null as Element | null,
+      requests: [] as DeferredRequest[],
+    };
+    probeWindow.__patterdrawFullscreenProbe = probe;
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => probe.fullscreenElement,
+    });
+    Object.defineProperty(document, "exitFullscreen", {
+      configurable: true,
+      value: async () => {
+        probe.fullscreenElement = null;
+        document.dispatchEvent(new Event("fullscreenchange"));
+      },
+    });
+    Object.defineProperty(Element.prototype, "requestFullscreen", {
+      configurable: true,
+      value(this: Element) {
+        return new Promise<void>((resolve) => {
+          probe.requests.push({ element: this, resolve });
+        });
+      },
+    });
+  });
+}
+
+async function deferredFullscreenRequestCount(
+  page: import("@playwright/test").Page,
+): Promise<number> {
+  return page.evaluate(() => (
+    window as Window & {
+      __patterdrawFullscreenProbe?: { requests: unknown[] };
+    }
+  ).__patterdrawFullscreenProbe?.requests.length || 0);
+}
+
+async function resolveDeferredFullscreenRequest(
+  page: import("@playwright/test").Page,
+  index: number,
+): Promise<void> {
+  await page.evaluate((requestIndex) => {
+    type DeferredRequest = { element: Element; resolve: () => void };
+    const probe = (
+      window as Window & {
+        __patterdrawFullscreenProbe?: {
+          fullscreenElement: Element | null;
+          requests: DeferredRequest[];
+        };
+      }
+    ).__patterdrawFullscreenProbe;
+    const request = probe?.requests[requestIndex];
+    if (!probe || !request) throw new Error(`Missing deferred fullscreen request ${requestIndex}.`);
+    probe.fullscreenElement = request.element;
+    request.resolve();
+    document.dispatchEvent(new Event("fullscreenchange"));
+  }, index);
+  await page.evaluate(() => new Promise<void>((resolve) => window.setTimeout(resolve, 0)));
 }
 
 async function setKeyvalValue(
@@ -1682,9 +1869,125 @@ async function autosavedPdfBackgroundPosition(page: import("@playwright/test").P
   });
 }
 
-test.beforeEach(async ({ page }) => {
+const runtimeGuardAllowedOrigin = "http://127.0.0.1:5173";
+const runtimeGuardUnhandledPrefix = "[patterdraw-runtime-guard:unhandledrejection] ";
+const syntheticPinchConsoleErrorPrefix =
+  "Warning: An update (setState, replaceState, or forceUpdate) was scheduled from inside an update function.";
+
+type RuntimeGuardState = {
+  consoleErrors: string[];
+  externalRequests: string[];
+  pageErrors: string[];
+  unhandledRejections: string[];
+  pages: Set<Page>;
+  pageListener: (page: Page) => void;
+  routeHandler: (route: Route) => Promise<void>;
+};
+
+const runtimeGuardStates = new WeakMap<BrowserContext, RuntimeGuardState>();
+
+function addRuntimeGuardPage(state: RuntimeGuardState, page: Page): void {
+  if (state.pages.has(page)) return;
+  state.pages.add(page);
+  page.on("pageerror", (error) => {
+    state.pageErrors.push(error.stack || error.message);
+  });
+  page.on("console", (message) => {
+    const text = message.text();
+    if (message.type() === "error") {
+      state.consoleErrors.push(text);
+      return;
+    }
+    if (message.type() !== "debug") return;
+    if (text.startsWith(runtimeGuardUnhandledPrefix)) {
+      state.unhandledRejections.push(text.slice(runtimeGuardUnhandledPrefix.length));
+    }
+  });
+}
+
+async function installRuntimeGuard(context: BrowserContext, page: Page): Promise<void> {
+  const state: RuntimeGuardState = {
+    consoleErrors: [],
+    externalRequests: [],
+    pageErrors: [],
+    unhandledRejections: [],
+    pages: new Set(),
+    pageListener: () => undefined,
+    routeHandler: async () => undefined,
+  };
+  state.pageListener = (openedPage) => addRuntimeGuardPage(state, openedPage);
+  state.routeHandler = async (route: Route) => {
+    let requestUrl: URL;
+    try {
+      requestUrl = new URL(route.request().url());
+    } catch {
+      await route.abort("blockedbyclient");
+      return;
+    }
+    if (
+      (requestUrl.protocol === "http:" || requestUrl.protocol === "https:")
+      && requestUrl.origin !== runtimeGuardAllowedOrigin
+    ) {
+      state.externalRequests.push(`${route.request().method()} ${route.request().url()}`);
+      await route.abort("blockedbyclient");
+      return;
+    }
+    await route.continue();
+  };
+  runtimeGuardStates.set(context, state);
+  addRuntimeGuardPage(state, page);
+  context.on("page", state.pageListener);
+  await context.addInitScript(() => {
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason = event.reason;
+      if (
+        reason
+        && typeof reason === "object"
+        && "name" in reason
+        && (reason as { name?: unknown }).name === "AbortError"
+      ) return;
+      const detail = reason instanceof Error
+        ? (reason.stack || reason.message)
+        : String(reason);
+      // A debug marker avoids turning an intentionally handled console.error
+      // probe into a second failure while remaining visible to Playwright.
+      console.debug("[patterdraw-runtime-guard:unhandledrejection] " + detail);
+    });
+  });
+  await context.route("**/*", state.routeHandler);
+}
+
+test.beforeEach(async ({ context, page }) => {
+  await installRuntimeGuard(context, page);
   await page.goto("/");
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+});
+
+test.afterEach(async ({ context }, testInfo: TestInfo) => {
+  const state = runtimeGuardStates.get(context);
+  if (!state) return;
+  await Promise.all(context.pages().map((openPage) => openPage.waitForTimeout(0).catch(() => undefined)));
+  await context.unroute("**/*", state.routeHandler);
+  context.off("page", state.pageListener);
+
+  // Preserve the primary assertion when a test is already failing; runtime
+  // diagnostics are still attached to the Playwright trace/listener output.
+  if (testInfo.status !== testInfo.expectedStatus) return;
+  const consoleErrors = state.consoleErrors.filter((error) => {
+    if (
+      testInfo.title === "fills a closed region with a persistent, undoable local vector"
+      && error.startsWith(syntheticPinchConsoleErrorPrefix)
+    ) return false;
+    if (
+      testInfo.title === "restores a canonical light PDF background after a failed dark render"
+      && error === "Failed to load resource: net::ERR_FAILED"
+    ) return false;
+    return true;
+  });
+  expect(consoleErrors, "browser console errors").toEqual([]);
+  expect(state.externalRequests, "offline guard blocked external requests").toEqual([]);
+  expect(state.pageErrors, "uncaught page errors").toEqual([]);
+  expect(state.unhandledRejections, "unhandled promise rejections").toEqual([]);
 });
 
 test("uses PatterDraw branding for the app and a new canvas", async ({ page }) => {
@@ -2388,12 +2691,25 @@ test("darkens PDF content while preserving embedded picture colours and canonica
   }, { timeout: 30_000 }).toBe(true);
   const readTransientDarkFiles = () => page.evaluate(() => {
     const app = (window as unknown as {
-      h?: { app?: { files?: Record<string, unknown>; imageCache?: Map<string, unknown> } };
+      h?: {
+        app?: {
+          files?: Record<string, { dataURL?: string }>;
+          imageCache?: Map<string, { image?: HTMLImageElement }>;
+        };
+      };
     }).h?.app;
     const fileIds = Object.keys(app?.files || {}).filter((id) => id.startsWith("patterdraw-dark-pdf"));
     const cachedIds = [...(app?.imageCache?.keys() || [])]
       .filter((id) => id.startsWith("patterdraw-dark-pdf"));
-    return { cachedIds, fileIds };
+    const file = fileIds[0] ? app?.files?.[fileIds[0]] : undefined;
+    const image = cachedIds[0] ? app?.imageCache?.get(cachedIds[0])?.image : undefined;
+    return {
+      cachedIds,
+      dataLength: file?.dataURL?.length || 0,
+      fileIds,
+      height: image?.naturalHeight || image?.height || null,
+      width: image?.naturalWidth || image?.width || null,
+    };
   });
   await expect.poll(async () => {
     const value = await readTransientDarkFiles();
@@ -2414,6 +2730,24 @@ test("darkens PDF content while preserving embedded picture colours and canonica
   const nativeDialog = page.locator(".Modal").filter({ has: page.locator(".ImageExportModal") });
   await expect(nativeDialog).toBeVisible();
   await expect(nativeDialog.getByLabel("Dark mode", { exact: true })).not.toBeChecked();
+  await expect.poll(async () => {
+    const value = await readTransientDarkFiles();
+    return {
+      cachedCount: value.cachedIds.length,
+      fileCount: value.fileIds.length,
+      height: value.height,
+      placeholderIsSmall: value.dataLength < 1_024,
+      sameId: value.cachedIds[0] === value.fileIds[0],
+      width: value.width,
+    };
+  }).toEqual({
+    cachedCount: 1,
+    fileCount: 1,
+    height: 1,
+    placeholderIsSmall: true,
+    sameId: true,
+    width: 1,
+  });
   const pngDownloadEvent = page.waitForEvent("download");
   await nativeDialog.getByRole("button", { name: "Export to PNG", exact: true }).click();
   const exportedSamples = await exportedPdfDisplaySamples(
@@ -2447,7 +2781,146 @@ test("darkens PDF content while preserving embedded picture colours and canonica
     return samples?.background.every((channel) => channel > 225)
       && samples.vector.every((channel) => channel < 40);
   }, { timeout: 15_000 }).toBe(true);
+  await expect.poll(() => page.evaluate(() => {
+    const app = (window as unknown as {
+      h?: {
+        app?: {
+          files?: Record<string, { dataURL?: string }>;
+          imageCache?: Map<string, { image?: HTMLImageElement }>;
+        };
+      };
+    }).h?.app;
+    const fileIds = Object.keys(app?.files || {})
+      .filter((id) => id.startsWith("patterdraw-dark-pdf"));
+    const cachedIds = [...(app?.imageCache?.keys() || [])]
+      .filter((id) => id.startsWith("patterdraw-dark-pdf"));
+    const file = fileIds[0] ? app?.files?.[fileIds[0]] : undefined;
+    const image = cachedIds[0] ? app?.imageCache?.get(cachedIds[0])?.image : undefined;
+    return {
+      cachedCount: cachedIds.length,
+      fileCount: fileIds.length,
+      height: image?.naturalHeight || image?.height || null,
+      placeholderIsSmall: (file?.dataURL?.length || Number.MAX_SAFE_INTEGER) < 1_024,
+      sameId: cachedIds[0] === fileIds[0],
+      width: image?.naturalWidth || image?.width || null,
+    };
+  }), { timeout: 15_000 }).toEqual({
+    cachedCount: 1,
+    fileCount: 1,
+    height: 1,
+    placeholderIsSmall: true,
+    sameId: true,
+    width: 1,
+  });
   expect(browserErrors).toEqual([]);
+});
+
+test("keeps native image export light when a dark PDF render is still pending", async ({ page }) => {
+  test.setTimeout(60_000);
+  await useDownloadBasedImageExport(page);
+  await openTestPdf(page);
+  const saved = await keyvalValue<{
+    activeSceneId: string;
+    scenes: Record<string, {
+      elements: Array<{ fileId?: string; id: string }>;
+      pdfPage?: { backgroundElementId: string };
+    }>;
+  }>(page, "patterdraw:autosave:project:v1");
+  const savedScene = saved?.scenes[saved.activeSceneId];
+  const backgroundId = savedScene?.pdfPage?.backgroundElementId;
+  const lightFileId = savedScene?.elements.find((element) => element.id === backgroundId)?.fileId;
+  expect(backgroundId).toBeTruthy();
+  expect(lightFileId).toBeTruthy();
+
+  const workerRoute = "**/*pdf.worker.min*";
+  let delayedWorkerRequests = 0;
+  await page.route(workerRoute, async (route) => {
+    delayedWorkerRequests += 1;
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    await route.continue();
+  });
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("dialog", { name: "Settings", exact: true })
+    .getByRole("combobox", { name: "Theme", exact: true })
+    .selectOption("dark");
+  await page.keyboard.press("Escape");
+  await expect.poll(() => delayedWorkerRequests).toBeGreaterThan(0);
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  await page.getByRole("dialog", { name: "More exports", exact: true })
+    .getByRole("button", { name: /Export image…/ })
+    .click();
+  const nativeDialog = page.locator(".Modal").filter({ has: page.locator(".ImageExportModal") });
+  await expect(nativeDialog).toBeVisible();
+  await expect(nativeDialog.getByLabel("Dark mode", { exact: true })).not.toBeChecked();
+
+  await page.waitForTimeout(1_800);
+  const liveState = await page.evaluate(({ backgroundId, lightFileId }) => {
+    const app = (window as unknown as {
+      h?: {
+        app?: {
+          files?: Record<string, unknown>;
+          scene?: { getNonDeletedElement?: (id: string) => { fileId?: string } | null };
+        };
+      };
+    }).h?.app;
+    return {
+      backgroundIsLight: app?.scene?.getNonDeletedElement?.(backgroundId)?.fileId === lightFileId,
+      darkFileCount: Object.keys(app?.files || {})
+        .filter((id) => id.startsWith("patterdraw-dark-pdf")).length,
+    };
+  }, { backgroundId: backgroundId || "", lightFileId: lightFileId || "" });
+  expect(liveState).toEqual({ backgroundIsLight: true, darkFileCount: 0 });
+
+  await page.unroute(workerRoute);
+  await nativeDialog.locator(".Modal__content").focus();
+  await page.keyboard.press("Escape");
+  await expect(nativeDialog).toHaveCount(0);
+});
+
+test("rejects an oversized embedded PDF image instead of importing a blank page", async ({ page }) => {
+  const warnings: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "warning") warnings.push(message.text());
+  });
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "oversized-embedded-image.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await oversizedEmbeddedImagePdfBytes()),
+  });
+
+  await expect(page.getByRole("alert")).toContainText(
+    "This PDF contains an embedded image that is too large to import safely.",
+  );
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
+  expect(warnings.some((warning) => warning.includes("Image exceeded maximum allowed size"))).toBe(false);
+});
+
+test("rejects an oversized inline PDF image instead of importing a blank page", async ({ page }) => {
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "oversized-inline-image.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await oversizedInlineImagePdfBytes()),
+  });
+
+  await expect(page.getByRole("alert")).toContainText(
+    "This PDF contains an embedded image that is too large to import safely.",
+  );
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
+});
+
+test("allows an unpainted oversized PDF image resource", async ({ page }) => {
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "unused-oversized-image.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await oversizedEmbeddedImagePdfBytes(false)),
+  });
+
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, { timeout: 15_000 });
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1);
+  await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
 test("merges and synchronizes feature preferences across open tabs", async ({ page }) => {
@@ -2835,6 +3308,81 @@ test("coalesces edits made during a slow autosave into one latest follow-up writ
   ).__slowAutosaveTest?.requests || 0)).toBe(2);
 });
 
+test("pauses a stale tab instead of overwriting a newer cross-tab autosave", async ({ page }) => {
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  const secondPage = await page.context().newPage();
+  try {
+    await secondPage.goto(page.url());
+    await expect(secondPage.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+    await expect(secondPage.getByText("Saved locally", { exact: true })).toBeVisible();
+
+    await page.evaluate(() => {
+      const state = window as Window & {
+        __crossTabAutosaveTest?: { release: () => void; requests: number };
+      };
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      state.__crossTabAutosaveTest = { release, requests: 0 };
+      Object.defineProperty(navigator, "locks", {
+        configurable: true,
+        value: {
+          request: async (_name: string, operation: () => Promise<unknown>) => {
+            const testState = state.__crossTabAutosaveTest;
+            if (!testState) return operation();
+            testState.requests += 1;
+            if (testState.requests === 1) await gate;
+            return operation();
+          },
+        },
+      });
+    });
+
+    const staleTabTitle = page.getByRole("textbox", { name: "Project title" });
+    await staleTabTitle.fill("Unsaved work in stale tab");
+    await expect.poll(() => page.evaluate(() => (
+      window as Window & { __crossTabAutosaveTest?: { requests: number } }
+    ).__crossTabAutosaveTest?.requests || 0)).toBe(1);
+
+    await secondPage.getByRole("textbox", { name: "Project title" })
+      .fill("Newer work from second tab");
+    await expect.poll(async () => (
+      await keyvalValue<{ title: string }>(secondPage, "patterdraw:autosave:project:v1")
+    )?.title).toBe("Newer work from second tab");
+
+    await page.evaluate(() => (
+      window as Window & { __crossTabAutosaveTest?: { release: () => void } }
+    ).__crossTabAutosaveTest?.release());
+
+    const recoveryNotice = page.getByRole("alert").filter({ hasText: "Autosave is paused" });
+    await expect(recoveryNotice).toContainText("Another tab saved a newer autosave");
+    await expect(staleTabTitle).toHaveValue("Unsaved work in stale tab");
+    await staleTabTitle.fill("Still protected in stale tab");
+    await page.waitForTimeout(900);
+    expect((await keyvalValue<{ title: string }>(
+      page,
+      "patterdraw:autosave:project:v1",
+    ))?.title).toBe("Newer work from second tab");
+
+    page.once("dialog", (dialog) => void dialog.dismiss());
+    await recoveryNotice.getByRole("button", { name: "Use this board and resume autosave" }).click();
+    await expect(recoveryNotice).toBeVisible();
+    expect((await keyvalValue<{ title: string }>(
+      page,
+      "patterdraw:autosave:project:v1",
+    ))?.title).toBe("Newer work from second tab");
+
+    page.once("dialog", (dialog) => void dialog.accept());
+    await recoveryNotice.getByRole("button", { name: "Use this board and resume autosave" }).click();
+    await expect(recoveryNotice).toBeHidden();
+    await expect.poll(async () => (
+      await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
+    )?.title).toBe("Still protected in stale tab");
+    await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  } finally {
+    await secondPage.close();
+  }
+});
+
 test("queues an urgent page-exit snapshot behind an in-flight save without a timer", async ({ page }) => {
   await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
   await page.evaluate(() => {
@@ -2889,6 +3437,9 @@ test("queues an urgent page-exit snapshot behind an in-flight save without a tim
       if ((timeout || 0) === 0) state.zeroDelayTimers = (state.zeroDelayTimers || 0) + 1;
       return originalSetTimeout(handler, timeout);
     }) as typeof window.setTimeout;
+    // Browsers commonly emit several exit-related events for one navigation.
+    // Repeating pagehide must not enqueue duplicate full autosave snapshots.
+    window.dispatchEvent(new Event("pagehide"));
     window.dispatchEvent(new Event("pagehide"));
   });
   await page.evaluate(() => (
@@ -2912,6 +3463,16 @@ test("queues an urgent page-exit snapshot behind an in-flight save without a tim
     return state?.zeroDelayTimers || 0;
   });
   expect(zeroDelayTimers).toBe(0);
+
+  // A genuinely newer snapshot after the exit flush must still be persisted;
+  // dedupe only covers the tuple already queued for the earlier pagehide.
+  await title.fill("Post-exit edit");
+  await expect.poll(async () => (
+    await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
+  )?.title).toBe("Post-exit edit");
+  await expect.poll(() => page.evaluate(() => (
+    window as Window & { __exitAutosaveTest?: { requests: number } }
+  ).__exitAutosaveTest?.requests || 0)).toBe(3);
 });
 
 test("keeps a newly opened project ahead of an older slow autosave", async ({ page }) => {
@@ -3161,6 +3722,51 @@ test("rejects imported relative image sources without issuing a request", async 
   expect(probeRequests).toEqual([]);
 });
 
+test("rejects an oversized native Excalidraw image before hydration or autosave", async ({ page }) => {
+  let before: { id: string; title: string } | undefined;
+  await expect.poll(async () => {
+    before = await keyvalValue<{ id: string; title: string }>(
+      page,
+      "patterdraw:autosave:project:v1",
+    );
+    return before;
+  }).toBeDefined();
+  const image = {
+    ...exportTestRectangle("oversized-native-image", 100, 100, 200, 120, "a0"),
+    type: "image",
+    fileId: "oversized-native-image-file",
+    status: "saved",
+    scale: [1, 1],
+  };
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "oversized-native-image.excalidraw",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({
+      type: "excalidraw",
+      version: 2,
+      source: "local",
+      name: "Oversized native image",
+      elements: [image],
+      appState: {},
+      files: {
+        [image.fileId]: {
+          id: image.fileId,
+          mimeType: "image/png",
+          dataURL: oversizedPngDataUrl(),
+          created: 1,
+        },
+      },
+    })),
+  });
+
+  await expect(page.getByRole("alert")).toContainText(/dimensions|decode safely/i);
+  await expect.poll(async () => (
+    await keyvalValue<{ id: string; title: string }>(page, "patterdraw:autosave:project:v1")
+  )).toEqual(before);
+  await expect(page.getByRole("textbox", { name: "Project title", exact: true }))
+    .not.toHaveValue("Oversized native image");
+});
+
 test("preserves a legitimate image that uses the former dark-preview file ID", async ({ page }) => {
   const legacyFileId = "patterdraw-dark-pdf-active-v1";
   const image = {
@@ -3170,7 +3776,7 @@ test("preserves a legitimate image that uses the former dark-preview file ID", a
     status: "saved",
     scale: [1, 1],
   };
-  const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl8sAAAAASUVORK5CYII=";
+  const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
   await page.locator('input[type="file"]').setInputFiles({
     name: "legacy-dark-preview-id.excalidraw",
@@ -5286,6 +5892,76 @@ test("exits presentation when Escape ends its native fullscreen session", async 
   await expect(page.locator(".presentation-controls")).toHaveCount(0);
 });
 
+test("exits presentation when an external preference update disables Slides", async ({ page }) => {
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.getByRole("button", { name: "Add slide", exact: true }).click();
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 1");
+
+  await page.evaluate(() => {
+    const key = "patterdraw:feature-preferences:v1";
+    const preferences = JSON.parse(localStorage.getItem(key) || "{}") as Record<string, boolean>;
+    const next = JSON.stringify({ ...preferences, slides: false });
+    localStorage.setItem(key, next);
+    window.dispatchEvent(new StorageEvent("storage", { key, newValue: next }));
+  });
+
+  await expect(page.locator(".presentation-controls")).toHaveCount(0);
+  await expect(page.locator(".app-shell")).not.toHaveClass(/is-presenting/);
+  await expect(page.getByRole("button", { name: "Board", exact: true }))
+    .toHaveAttribute("aria-pressed", "true");
+  await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true);
+});
+
+test("keeps a rapid presentation restart ahead of a stale fullscreen request", async ({ page }) => {
+  await installDeferredFullscreenProbe(page);
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.getByRole("button", { name: "Add slide", exact: true }).click();
+
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 1");
+  await expect.poll(() => deferredFullscreenRequestCount(page)).toBe(1);
+  await page.getByRole("button", { name: "Exit", exact: true }).click();
+  await expect(page.locator(".presentation-controls")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 1");
+  await expect.poll(() => deferredFullscreenRequestCount(page)).toBe(2);
+
+  // The first presentation's request completes after the replacement has
+  // started. Its fullscreen entry now belongs to the active presentation.
+  await resolveDeferredFullscreenRequest(page, 0);
+  await expect(page.locator(".presentation-controls")).toHaveCount(1);
+  await expect(page.locator(".app-shell")).toHaveClass(/is-presenting/);
+  await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(true);
+
+  await resolveDeferredFullscreenRequest(page, 1);
+  await expect(page.locator(".presentation-controls")).toHaveCount(1);
+});
+
+test("does not let a stale presentation request steal manual fullscreen", async ({ page }) => {
+  await installDeferredFullscreenProbe(page);
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.getByRole("button", { name: "Add slide", exact: true }).click();
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 1");
+  await expect.poll(() => deferredFullscreenRequestCount(page)).toBe(1);
+  await page.getByRole("button", { name: "Exit", exact: true }).click();
+  await expect(page.locator(".presentation-controls")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Enter fullscreen", exact: true }).click();
+  await expect.poll(() => deferredFullscreenRequestCount(page)).toBe(2);
+  await resolveDeferredFullscreenRequest(page, 1);
+  await expect(page.getByRole("button", { name: "Exit fullscreen", exact: true }))
+    .toHaveAttribute("aria-pressed", "true");
+
+  await resolveDeferredFullscreenRequest(page, 0);
+  await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(true);
+  await expect(page.getByRole("button", { name: "Exit fullscreen", exact: true }))
+    .toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".presentation-controls")).toHaveCount(0);
+});
+
 test("refreshes a PDF-active autosave back to the board without losing the PDF", async ({ page }) => {
   const consoleErrors: string[] = [];
   page.on("console", (message) => {
@@ -5782,7 +6458,7 @@ test("fills a closed region with a persistent, undoable local vector", async ({ 
   // synthetic CDP pinch; reject every other error and keep the rest of this
   // flow's console assertion strict.
   expect(consoleErrors.filter((error) => !error.startsWith(
-    "Warning: An update (setState, replaceState, or forceUpdate) was scheduled from inside an update function.",
+    syntheticPinchConsoleErrorPrefix,
   ))).toEqual([]);
   consoleErrors.length = 0;
 
@@ -6977,6 +7653,178 @@ test("navigates PDF pages with the left and right arrow keys", async ({ page }) 
   expect(consoleErrors).toEqual([]);
 });
 
+test("keeps a PDF page's annotation badge current after navigating away", async ({ page }) => {
+  await openTestPdf(page, 2);
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  await dragOnBoard(page, { x: 280, y: 220 }, { x: 400, y: 300 });
+  await expect(pages.nth(0).locator(".pdf-annotation-count")).toHaveText("1");
+
+  await pages.nth(1).locator(".pdf-page-open").click();
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await expect(pages.nth(0).locator(".pdf-annotation-count")).toHaveText("1");
+});
+
+test("waits for PDF scene hydration before exporting the full board", async ({ page }) => {
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "hydration-colours.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await colouredPdfBytes()),
+  });
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await expect(pages).toHaveCount(2, { timeout: 15_000 });
+  await deferAnimationFrames(page);
+
+  const downloadEvent = page.waitForEvent("download");
+  let downloadStarted = false;
+  void downloadEvent.then(() => { downloadStarted = true; });
+  await pages.nth(1).locator(".pdf-page-open").click();
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await page.getByRole("button", { name: "Export all", exact: true }).click();
+  await expect(page.getByText("Exporting the full board…", { exact: true })).toBeVisible();
+  await page.waitForTimeout(50);
+  expect(downloadStarted).toBe(false);
+
+  await releaseDeferredAnimationFrames(page);
+  const image = await loadImage(await downloadBytes(await downloadEvent));
+  const canvas = createCanvas(image.width, image.height);
+  const context = canvas.getContext("2d");
+  context.drawImage(image, 0, 0);
+  const pixel = context.getImageData(
+    Math.floor(canvas.width / 2),
+    Math.floor(canvas.height / 2),
+    1,
+    1,
+  ).data;
+  expect(pixel[2]).toBeGreaterThan(180);
+  expect(pixel[0]).toBeLessThan(80);
+});
+
+test("waits for PDF scene hydration before opening native image export", async ({ page }) => {
+  await useDownloadBasedImageExport(page);
+  await openTestPdf(page, 2);
+  const saved = await keyvalValue<{
+    pdfPageOrder: string[];
+    scenes: Record<string, { pdfPage?: { backgroundElementId: string } }>;
+  }>(page, "patterdraw:autosave:project:v1");
+  const firstBackgroundId = saved?.scenes[saved.pdfPageOrder[0]]?.pdfPage?.backgroundElementId;
+  const secondBackgroundId = saved?.scenes[saved.pdfPageOrder[1]]?.pdfPage?.backgroundElementId;
+  expect(firstBackgroundId).toBeTruthy();
+  expect(secondBackgroundId).toBeTruthy();
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await deferAnimationFrames(page);
+
+  await pages.nth(1).locator(".pdf-page-open").click();
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  await page.getByRole("dialog", { name: "More exports", exact: true })
+    .getByRole("button", { name: /Export image…/ })
+    .click();
+  const nativeDialog = page.locator(".Modal").filter({ has: page.locator(".ImageExportModal") });
+  await expect(nativeDialog).toHaveCount(0);
+
+  await releaseDeferredAnimationFrames(page);
+  await expect(nativeDialog).toBeVisible();
+  const liveBackgrounds = await page.evaluate(({ firstBackgroundId, secondBackgroundId }) => {
+    const scene = (window as unknown as {
+      h?: { app?: { scene?: { getNonDeletedElement?: (id: string) => unknown } } };
+    }).h?.app?.scene;
+    return {
+      firstPresent: Boolean(scene?.getNonDeletedElement?.(firstBackgroundId)),
+      secondPresent: Boolean(scene?.getNonDeletedElement?.(secondBackgroundId)),
+    };
+  }, {
+    firstBackgroundId: firstBackgroundId || "",
+    secondBackgroundId: secondBackgroundId || "",
+  });
+  expect(liveBackgrounds).toEqual({ firstPresent: false, secondPresent: true });
+  await nativeDialog.locator(".Modal__content").focus();
+  await page.keyboard.press("Escape");
+});
+
+test("replays a user edit made during PDF scene hydration", async ({ page }) => {
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "hydration-edit.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await colouredPdfBytes()),
+  });
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await expect(pages).toHaveCount(2, { timeout: 15_000 });
+  await deferAnimationFrames(page);
+
+  await pages.nth(1).locator(".pdf-page-open").click();
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  await dragOnBoard(page, { x: 260, y: 220 }, { x: 410, y: 320 });
+  const zoomBefore = await keyvalValue<{
+    activeSceneId: string;
+    scenes: Record<string, { appState?: { zoom?: { value?: number } } }>;
+  }>(page, "patterdraw:autosave:project:v1");
+  const baselineZoom = zoomBefore?.scenes[zoomBefore.activeSceneId]?.appState?.zoom?.value || 1;
+  await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+
+  // The deferred two-RAF hydration window must not drop the rectangle.
+  await releaseDeferredAnimationFrames(page);
+  await expect.poll(async () => {
+    const saved = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, { elements: Array<{ type?: string }> }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    return saved?.scenes[saved.activeSceneId]?.elements
+      .filter((element) => element.type === "rectangle").length || 0;
+  }, { timeout: 15_000 }).toBe(1);
+  await expect.poll(async () => {
+    const saved = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, { appState?: { zoom?: { value?: number } } }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    return saved?.scenes[saved.activeSceneId]?.appState?.zoom?.value || 1;
+  }, { timeout: 15_000 }).toBeGreaterThan(baselineZoom);
+});
+
+test("keeps the newest PDF open when an older import resolves later", async ({ page }) => {
+  test.setTimeout(60_000);
+  let workerRequests = 0;
+  const workerRoute = "**/*pdf.worker.min*";
+  await page.route(workerRoute, async (route) => {
+    workerRequests += 1;
+    if (workerRequests === 1) await new Promise((resolve) => setTimeout(resolve, 1_500));
+    await route.continue();
+  });
+
+  const input = page.locator('input[type="file"]');
+  const firstPdf = await PDFDocument.create();
+  const firstPage = firstPdf.addPage([612, 792]);
+  firstPage.drawRectangle({ x: 0, y: 0, width: 612, height: 792, color: rgb(1, 0, 0) });
+  await input.setInputFiles({
+    name: "older-one-page.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await firstPdf.save()),
+  });
+  await expect.poll(() => workerRequests, { timeout: 15_000 }).toBeGreaterThan(0);
+  // The second file has one page as well, but a distinct source name; its
+  // scene title proves that the first delayed result did not win.
+  const secondPdf = await PDFDocument.create();
+  const secondPage = secondPdf.addPage([612, 792]);
+  secondPage.drawRectangle({ x: 0, y: 0, width: 612, height: 792, color: rgb(0, 1, 0) });
+  await input.setInputFiles({
+    name: "newer-one-page.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await secondPdf.save()),
+  });
+
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1, { timeout: 20_000 });
+  await expect.poll(async () => {
+    const saved = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, { name?: string }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    return saved?.scenes[saved.activeSceneId]?.name || "";
+  }, { timeout: 20_000 }).toContain("newer-one-page.pdf");
+  await page.unroute(workerRoute);
+});
+
 test("keeps the latest PDF scene during rapid page switches", async ({ page }) => {
   test.setTimeout(60_000);
   await openTestPdf(page, 3);
@@ -7021,6 +7869,108 @@ test("keeps the latest PDF scene during rapid page switches", async ({ page }) =
   });
 });
 
+test("restores a canonical light PDF background after a failed dark render", async ({ page }) => {
+  test.setTimeout(60_000);
+  await openTestPdf(page, 2);
+  const saved = await keyvalValue<{
+    activeSceneId: string;
+    pdfPageOrder: string[];
+    scenes: Record<string, {
+      elements: Array<{ fileId?: string; id: string }>;
+      pdfPage?: { backgroundElementId: string };
+    }>;
+  }>(page, "patterdraw:autosave:project:v1");
+  const firstSceneId = saved?.pdfPageOrder[0];
+  const firstScene = firstSceneId ? saved?.scenes[firstSceneId] : undefined;
+  const firstBackgroundId = firstScene?.pdfPage?.backgroundElementId;
+  const lightFileId = firstBackgroundId
+    ? firstScene?.elements.find((element) => element.id === firstBackgroundId)?.fileId
+    : undefined;
+  expect(firstBackgroundId).toBeTruthy();
+  expect(lightFileId).toBeTruthy();
+
+  const readLiveBackground = () => page.evaluate(({ backgroundId }) => {
+    const app = (window as unknown as {
+      h?: {
+        app?: {
+          files?: Record<string, unknown>;
+          scene?: { getNonDeletedElement?: (id: string) => { fileId?: string } | null };
+        };
+      };
+    }).h?.app;
+    const fileIds = Object.keys(app?.files || {});
+    return {
+      backgroundFileId: app?.scene?.getNonDeletedElement?.(backgroundId)?.fileId || null,
+      fileIds,
+      transientFileIds: fileIds.filter((id) => id.startsWith("patterdraw-dark-pdf")),
+    };
+  }, { backgroundId: firstBackgroundId || "" });
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("dialog", { name: "Settings", exact: true })
+    .getByRole("combobox", { name: "Theme", exact: true })
+    .selectOption("dark");
+  await page.keyboard.press("Escape");
+  await expect.poll(async () => (await readLiveBackground()).backgroundFileId || "", { timeout: 30_000 })
+    .toMatch(/^patterdraw-dark-pdf/);
+
+  let workerRequests = 0;
+  const workerRoute = "**/*pdf.worker.min*";
+  await page.route(workerRoute, async (route) => {
+    workerRequests += 1;
+    await route.abort();
+  });
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await pages.nth(1).locator(".pdf-page-open").click();
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await expect.poll(() => workerRequests, { timeout: 15_000 }).toBeGreaterThan(0);
+  await page.waitForTimeout(500);
+
+  await pages.nth(0).locator(".pdf-page-open").click();
+  await expect(pages.nth(0)).toHaveClass(/is-selected/);
+  await page.waitForTimeout(100);
+  await page.getByTestId("toolbar-rectangle").click({ force: true });
+  await dragOnBoard(page, { x: 280, y: 220 }, { x: 400, y: 300 });
+
+  await expect.poll(async () => {
+    const state = await readLiveBackground();
+    return state.backgroundFileId === lightFileId
+      && state.fileIds.includes(lightFileId || "")
+      && state.transientFileIds.length === 0
+      ? state
+      : null;
+  }, { timeout: 15_000 }).not.toBeNull();
+  const liveBackground = await readLiveBackground();
+  expect(liveBackground.backgroundFileId).toBe(lightFileId);
+  expect(liveBackground.transientFileIds).toEqual([]);
+
+  await expect.poll(async () => {
+    const project = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, {
+        elements: Array<{ fileId?: string; id: string }>;
+        files: Record<string, unknown>;
+        pdfPage?: { backgroundElementId: string };
+      }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    const scene = project?.scenes[project.activeSceneId];
+    const background = scene?.pdfPage
+      ? scene.elements.find((element) => element.id === scene.pdfPage?.backgroundElementId)
+      : undefined;
+    const fileIds = Object.keys(scene?.files || {});
+    return {
+      backgroundFileId: background?.fileId || null,
+      hasLightFile: fileIds.includes(lightFileId || ""),
+      transientFileIds: fileIds.filter((id) => id.startsWith("patterdraw-dark-pdf")),
+    };
+  }, { timeout: 15_000 }).toEqual({
+    backgroundFileId: lightFileId,
+    hasLightFile: true,
+    transientFileIds: [],
+  });
+  await page.unroute(workerRoute);
+});
+
 test("never applies a rapid slide action to a PDF scene", async ({ page }) => {
   test.setTimeout(60_000);
   await openTestPdf(page, 2);
@@ -7061,6 +8011,24 @@ test("never applies a rapid slide action to a PDF scene", async ({ page }) => {
     if (host.__patterdrawNativeRaf) window.requestAnimationFrame = host.__patterdrawNativeRaf;
     delete host.__patterdrawNativeRaf;
   });
+});
+
+test("commits a live PDF annotation before switching to a blank Board", async ({ page }) => {
+  await openTestPdf(page);
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  await dragOnBoard(page, { x: 280, y: 220 }, { x: 400, y: 300 });
+
+  await page.getByRole("button", { name: "Board", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Board", exact: true }))
+    .toHaveAttribute("aria-pressed", "true");
+  await expect.poll(async () => {
+    const project = await keyvalValue<{
+      pdfPageOrder: string[];
+      scenes: Record<string, { elements: Array<{ type?: string; isDeleted?: boolean }> }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    const pdfScene = project?.scenes[project.pdfPageOrder?.[0] || ""];
+    return pdfScene?.elements.filter((element) => element.type === "rectangle" && !element.isDeleted).length || 0;
+  }, { timeout: 15_000 }).toBe(1);
 });
 
 test("cancels a queued slide action when leaving Slides mode", async ({ page }) => {
@@ -7420,7 +8388,13 @@ test("keeps off-page PDF annotations through reload and both annotated export mo
   test.setTimeout(90_000);
   await openTestPdf(page);
   await page.getByTestId("toolbar-rectangle").check({ force: true });
-  await dragOnBoard(page, { x: 632, y: 300 }, { x: 672, y: 340 });
+  await expect.poll(() => pdfPageHorizontalCenterError(page)).toBeLessThan(0.02);
+  const annotationStart = await liveScenePointInViewport(page, { x: 632, y: 300 });
+  const annotationEnd = await liveScenePointInViewport(page, { x: 672, y: 340 });
+  await page.mouse.move(annotationStart.x, annotationStart.y);
+  await page.mouse.down();
+  await page.mouse.move(annotationEnd.x, annotationEnd.y, { steps: 8 });
+  await page.mouse.up();
   await page.getByTestId("toolbar-selection").check({ force: true });
 
   const annotations = async () => {
@@ -7449,15 +8423,12 @@ test("keeps off-page PDF annotations through reload and both annotated export mo
   await expect.poll(annotations).toHaveLength(1);
   const [initialAnnotation] = await annotations();
   expect(initialAnnotation).toMatchObject({ type: "rectangle" });
+  // The rectangle is intentionally drawn 20 scene units beyond the 612-wide
+  // PDF page. Assert this immediately so a centering regression (x=333) cannot
+  // be hidden by a later keyboard nudge.
+  expect(initialAnnotation.x).toBeCloseTo(632, 3);
   expect(initialAnnotation.width).toBeGreaterThan(20);
   expect(initialAnnotation.width).toBeLessThan(60);
-
-  await page.locator(".editor-host .excalidraw").focus();
-  const nudgeCount = Math.max(0, Math.ceil((632 - initialAnnotation.x) / 5));
-  for (let nudge = 0; nudge < nudgeCount; nudge += 1) {
-    await page.keyboard.press("Shift+ArrowRight");
-  }
-  await expect.poll(async () => (await annotations())[0]?.x || 0).toBeGreaterThanOrEqual(632);
 
   await page.reload();
   await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);

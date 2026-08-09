@@ -53,6 +53,7 @@ describe("full-board export dimensions", () => {
       { id: "equation", type: "image", x: 4_000, y: 2_000, isDeleted: false },
       { id: "deleted", type: "text", isDeleted: true },
       { id: "unsafe", type: "iframe", isDeleted: false },
+      { id: "generated", type: "magicframe", isDeleted: false },
     ];
     const files = { equation: { id: "equation", dataURL: "data:image/svg+xml;base64,PHN2Zy8+" } };
     const api = {

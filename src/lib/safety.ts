@@ -1,13 +1,26 @@
 import {
   DEFAULT_PROJECT_TITLE,
   type ClassroomProject,
+  type LoadedClassroomProject,
   type SerializedScene,
   type SlideFrameAspectRatio,
 } from "../types";
+import {
+  assertLocalProjectRasterBudget,
+  canonicalizeCanvasEncodedGifDataUrl,
+  inspectLocalImageDataUrl,
+  type LocalImageRasterInfo,
+} from "./image-safety";
 import { sanitizeClassroomMathToolMetadata } from "./math-tools/types";
 import { canonicalizePdfBackground } from "./pdf/background";
 import { reconcilePdfPageOrder } from "./pdf/page-order";
-import { MAX_PDF_PAGE_EDGE_POINTS } from "./pdf/raster-limits";
+import {
+  getBrowserPdfRasterBudget,
+  getPdfImportEncodedByteBudget,
+  getPdfJsRasterOptions,
+  MAX_PDF_PAGE_EDGE_POINTS,
+  type PdfRasterBudget,
+} from "./pdf/raster-limits";
 import {
   MAX_SLIDE_MORPH_DURATION_MS,
   MIN_SLIDE_MORPH_DURATION_MS,
@@ -20,6 +33,7 @@ import {
   renumberAutomaticSlides,
   sanitizeClassroomSlideMetadata,
 } from "./slides";
+import { isBlockedEmbeddedElementType } from "./embedded-content-policy";
 
 export const MAX_PROJECT_BYTES = 150 * 1024 * 1024;
 export const MAX_PDF_BYTES = 75 * 1024 * 1024;
@@ -31,6 +45,24 @@ const LEGACY_DEFAULT_PROJECT_TITLES = new Set([
   "Untitled classroom canvas",
   "Untitled PatterDraw project",
 ]);
+
+export interface ProjectRasterSafetyOptions {
+  /** Cancel a restore/preflight when a newer open or navigation supersedes it. */
+  signal?: AbortSignal;
+  /** Use the same device-sensitive PDF raster envelope as import/export. */
+  rasterBudget?: Readonly<PdfRasterBudget>;
+}
+
+function abortError(): Error {
+  if (typeof DOMException === "function") return new DOMException("The operation was aborted.", "AbortError");
+  const error = new Error("The operation was aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : abortError();
+}
 
 export function normalizeSlideFrameAspectRatio(
   value: ClassroomProject["slideFrameAspectRatio"],
@@ -90,19 +122,19 @@ export function canonicalizePersistedWrapperTool(appState: Record<string, unknow
 
 export function sanitizeScene(scene: SerializedScene): SerializedScene {
   const safe = clone(scene);
-  safe.files = Object.fromEntries(
-    Object.entries(safe.files).filter(([, file]) => (
-      !!file
-      && typeof file === "object"
-      && isSafeLocalImageSource(file.dataURL)
-    )),
-  );
+  safe.files = Object.fromEntries(Object.entries(safe.files).flatMap(([id, file]) => {
+    if (!file || typeof file !== "object" || !isSafeLocalImageSource(file.dataURL)) return [];
+    const dataURL = canonicalizeCanvasEncodedGifDataUrl(file.dataURL);
+    return [[id, dataURL === file.dataURL ? file : {
+      ...file,
+      dataURL,
+      mimeType: "image/png",
+    }]];
+  }));
   const elements: Record<string, unknown>[] = [];
   for (const element of safe.elements) {
     if (
-      element.type === "embeddable"
-      || element.type === "iframe"
-      || element.type === "magicframe"
+      isBlockedEmbeddedElementType(element.type)
       || (
         element.type === "image"
         && (
@@ -247,7 +279,12 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
   if (!project.pdfDocuments || typeof project.pdfDocuments !== "object" || Array.isArray(project.pdfDocuments)) {
     throw new Error("Project PDF metadata must be an object.");
   }
-  if (!project.scenes[project.activeSceneId]) throw new Error("The active scene is missing.");
+  if (
+    !Object.hasOwn(project.scenes, project.activeSceneId)
+    || !project.scenes[project.activeSceneId]
+  ) {
+    throw new Error("The active scene is missing.");
+  }
   if (!Array.isArray(project.slideOrder)) throw new Error("Slide order must be a list.");
   if (project.slideFramesVisible !== undefined && typeof project.slideFramesVisible !== "boolean") {
     throw new Error("Slide frame visibility must be a boolean.");
@@ -284,7 +321,11 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
   if (project.pdfPageOrder) {
     const orderedIds = new Set<string>();
     for (const sceneId of project.pdfPageOrder) {
-      if (typeof sceneId !== "string" || !project.scenes[sceneId]?.pdfPage) {
+      if (
+        typeof sceneId !== "string"
+        || !Object.hasOwn(project.scenes, sceneId)
+        || !project.scenes[sceneId]?.pdfPage
+      ) {
         throw new Error("PDF page order references an invalid page scene.");
       }
       if (orderedIds.has(sceneId)) throw new Error("PDF page order contains a duplicate page.");
@@ -310,8 +351,13 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
       throw new Error("A scene is malformed.");
     }
     if (requireSanitized) {
-      for (const file of Object.values(scene.files)) {
-        if (!file || typeof file !== "object" || !isSafeLocalImageSource(file.dataURL)) {
+      for (const [fileId, file] of Object.entries(scene.files)) {
+        if (
+          !file
+          || typeof file !== "object"
+          || file.id !== fileId
+          || !isSafeLocalImageSource(file.dataURL)
+        ) {
           throw new Error("A project image has missing or unsafe local data.");
         }
       }
@@ -333,11 +379,7 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
       }
       if (elementIds.has(element.id)) throw new Error("A scene contains a duplicate element identity.");
       elementIds.add(element.id);
-      if (
-        element.type === "embeddable"
-        || element.type === "iframe"
-        || element.type === "magicframe"
-      ) {
+      if (isBlockedEmbeddedElementType(element.type)) {
         throw new Error("Web embeds and generated frames are not supported in PatterDraw projects.");
       }
       if (element.type === "frame") {
@@ -388,7 +430,9 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
       }
     }
     if (scene.pdfPage) {
-      const source = project.pdfDocuments[scene.pdfPage.documentId];
+      const source = Object.hasOwn(project.pdfDocuments, scene.pdfPage.documentId)
+        ? project.pdfDocuments[scene.pdfPage.documentId]
+        : undefined;
       if (!source) throw new Error("A PDF page references a missing source document.");
       if (!Number.isInteger(scene.pdfPage.pageIndex) || scene.pdfPage.pageIndex < 0 || scene.pdfPage.pageIndex >= source.pageCount) {
         throw new Error("A PDF page has an invalid source-page index.");
@@ -412,7 +456,9 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
       ) {
         throw new Error("A PDF page is missing its local background image.");
       }
-      const backgroundFile = scene.files[pdfBackground.fileId];
+      const backgroundFile = Object.hasOwn(scene.files, pdfBackground.fileId)
+        ? scene.files[pdfBackground.fileId]
+        : undefined;
       if (!backgroundFile || !isSafeLocalImageSource(backgroundFile.dataURL)) {
         throw new Error("A PDF page background has missing or unsafe local image data.");
       }
@@ -440,7 +486,12 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
     ) {
       throw new Error("Slide title mode must be automatic or custom.");
     }
-    if (!project.scenes[slide.sceneId]) throw new Error("A slide references a missing scene.");
+    if (
+      !Object.hasOwn(project.scenes, slide.sceneId)
+      || !project.scenes[slide.sceneId]
+    ) {
+      throw new Error("A slide references a missing scene.");
+    }
     if (slideIds.has(slide.id)) throw new Error("Slide order contains a duplicate slide identity.");
     const orderedSceneFrames = slideFrames.get(slide.sceneId) || new Set<string>();
     if (orderedSceneFrames.has(slide.frameId)) {
@@ -505,3 +556,84 @@ export function assertSafeProject(project: ClassroomProject): void {
 export function assertSanitizedProject(project: ClassroomProject): void {
   assertProject(project, true);
 }
+
+/**
+ * Validate every local raster retained by a loaded classroom project and each
+ * immutable PDF source before hydration can hand it to Excalidraw/PDF.js.
+ *
+ * This is intentionally asynchronous: image decoders and the PDF preflight
+ * may run in browser workers. Callers should pass an AbortSignal tied to the
+ * current open/autosave generation so an obsolete restore cannot continue
+ * allocating memory after a newer project wins.
+ */
+export async function assertLoadedProjectRasterSafety(
+  loaded: LoadedClassroomProject,
+  options: ProjectRasterSafetyOptions = {},
+): Promise<void> {
+  throwIfAborted(options.signal);
+  if (!loaded || typeof loaded !== "object") throw new Error("Loaded project is missing.");
+  const project = loaded.project;
+  const pdfBytes = loaded.pdfBytes;
+  assertSanitizedProject(project);
+  if (!pdfBytes || typeof pdfBytes !== "object" || Array.isArray(pdfBytes)) {
+    throw new Error("Loaded project PDF data is malformed.");
+  }
+
+  const rasterBudget = options.rasterBudget ?? getBrowserPdfRasterBudget();
+  let rasterTotals = { encodedBytes: 0, pixels: 0 };
+  const inspectedImages = new Map<string, LocalImageRasterInfo>();
+  for (const scene of Object.values(project.scenes)) {
+    throwIfAborted(options.signal);
+    for (const file of Object.values(scene.files)) {
+      throwIfAborted(options.signal);
+      if (!file || typeof file.dataURL !== "string" || !isSafeLocalImageSource(file.dataURL)) {
+        throw new Error("A project image has missing or unsafe local data.");
+      }
+      // Counting duplicate file IDs separately is conservative because each
+      // Excalidraw file can be decoded independently by a restored scene. The
+      // content hash set only avoids repeated work for exact duplicate data
+      // URLs while retaining the per-file cumulative budget charge.
+      const cacheKey = file.dataURL;
+      let info = inspectedImages.get(cacheKey);
+      if (!info) {
+        info = await inspectLocalImageDataUrl(file.dataURL, {
+          signal: options.signal,
+          rasterBudget,
+        });
+        inspectedImages.set(cacheKey, info);
+      }
+      rasterTotals = assertLocalProjectRasterBudget(info, rasterTotals, rasterBudget);
+    }
+  }
+
+  const rasterOptions = getPdfJsRasterOptions(rasterBudget);
+  const encodedRasterBudget = getPdfImportEncodedByteBudget(rasterBudget);
+  // Keep this import lazy to avoid a safety.ts <-> PDF preflight cycle during
+  // worker/module bootstrap. The worker itself calls back into this module's
+  // current-thread entrypoint only after the caller has supplied bytes.
+  const { assertPdfEmbeddedImageLimit } = await import("./pdf/embedded-image-limits");
+  for (const [id, source] of Object.entries(project.pdfDocuments)) {
+    throwIfAborted(options.signal);
+    const bytes = Object.hasOwn(pdfBytes, id) ? pdfBytes[id] : undefined;
+    if (!bytes || bytes.byteLength !== source.byteLength) {
+      throw new Error(`Loaded project is missing PDF data for ${source.name}.`);
+    }
+    await assertPdfEmbeddedImageLimit(bytes, rasterOptions.maxImageSize, {
+      immutableSha256: source.sha256,
+      maxEdge: rasterBudget.maxEdge,
+      maxTotalPixels: rasterBudget.maxPixelsPerDocument,
+      maxTotalEncodedBytes: encodedRasterBudget.maxBytesPerDocument,
+      signal: options.signal,
+    });
+  }
+  // Embedded-image inspection protects decoder allocations; this second
+  // preflight protects the immutable source/page relationship used by dark
+  // previews and vector export. Keep it after the existing malformed-PDF
+  // scanner so legacy safety errors remain actionable and stable.
+  const { assertPdfSourceMetadata } = await import("./pdf/source-metadata");
+  await assertPdfSourceMetadata(project, pdfBytes, { signal: options.signal });
+  throwIfAborted(options.signal);
+}
+
+/** Alias used by persistence callers that prefer a validation verb. */
+export const validateLoadedProjectRasterSafety = assertLoadedProjectRasterSafety;

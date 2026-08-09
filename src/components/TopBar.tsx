@@ -48,6 +48,7 @@ interface TopBarProps {
   sizePositionOpen: boolean;
   onSizePositionToggle: () => void;
   projectFindOpen: boolean;
+  projectFindButtonRef: RefObject<HTMLButtonElement>;
   onProjectFindToggle: () => void;
   onHide: () => void;
 }
@@ -132,6 +133,7 @@ export function TopBar({
   sizePositionOpen,
   onSizePositionToggle,
   projectFindOpen,
+  projectFindButtonRef,
   onProjectFindToggle,
   onHide,
 }: TopBarProps) {
@@ -232,6 +234,7 @@ export function TopBar({
         ) : null}
         {featurePreferences.projectFind ? (
           <button
+            ref={projectFindButtonRef}
             className={`topbar-tool ${projectFindOpen ? "is-active" : ""}`}
             type="button"
             aria-label="Find in project"

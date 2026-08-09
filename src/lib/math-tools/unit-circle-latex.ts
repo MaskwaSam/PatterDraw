@@ -1,4 +1,4 @@
-import { renderLatexToSvg, type RenderedLatex } from "../latex/render-latex";
+import type { RenderedLatex } from "../latex/render-latex";
 import {
   createUnitCircleAsset,
   type UnitCircleLabelMode,
@@ -82,6 +82,10 @@ function flattenMathJaxSvg(rendered: RenderedLatex): UnitCircleRenderedMathLabel
 }
 
 async function buildUnitCircleMathJaxAsset(labelMode: UnitCircleLabelMode, showCoordinates: boolean) {
+  // Keep the MathJax renderer out of the initial application graph. The
+  // equation dialog and this optional generated tool both load it only when
+  // the user actually asks for rendered mathematics.
+  const { renderLatexToSvg } = await import("../latex/render-latex");
   const degrees = [...RADIAN_LATEX.keys()];
   const angleEntries = await Promise.all(degrees.map(async (degree) => [degree, flattenMathJaxSvg(await renderLatexToSvg(angleLatex(degree, labelMode)))] as const));
   const coordinateEntries = showCoordinates

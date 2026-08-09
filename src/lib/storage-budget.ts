@@ -52,10 +52,34 @@ export function assertAuxiliaryStorageValuesFit(
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
     throw new Error("The local library size limit is invalid.");
   }
-  const totalBytes = (
-    estimateStructuredStorageBytes(libraryValue)
-    + estimateStructuredStorageBytes(screenshotValue)
+  const totalBytes = assertAuxiliaryStoragePhysicalValuesFit(
+    [libraryValue, screenshotValue],
+    maxBytes,
   );
+  return totalBytes;
+}
+
+/**
+ * Measure every physical value that will remain in the auxiliary key/value
+ * store. Callers that are migrating a legacy key should pass the post-write
+ * values (with that legacy value omitted); callers auditing existing storage
+ * should pass both canonical and legacy records so duplicates cannot be
+ * hidden by `canonical ?? legacy` fallback logic.
+ */
+export function assertAuxiliaryStoragePhysicalValuesFit(
+  values: readonly unknown[],
+  maxBytes = MAX_AUXILIARY_STORAGE_BYTES,
+): number {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new Error("The local library size limit is invalid.");
+  }
+  const totalBytes = values.reduce<number>(
+    (total, value) => total + estimateStructuredStorageBytes(value),
+    0,
+  );
+  if (!Number.isSafeInteger(totalBytes)) {
+    throw new Error("Local library storage is too large.");
+  }
   if (totalBytes > maxBytes) {
     throw new Error(
       "The Personal and Screenshot Libraries are full. Delete saved library items or screenshots before adding more.",
@@ -83,11 +107,15 @@ export async function assertAuxiliaryStorageBudget(
     get<unknown>(SCREENSHOT_LIBRARY_KEY),
     get<unknown>(LEGACY_SCREENSHOT_LIBRARY_KEY),
   ]);
-  const libraryValue = Object.hasOwn(replacement, "library")
-    ? replacement.library
-    : currentLibrary ?? legacyLibrary ?? [];
-  const screenshotValue = Object.hasOwn(replacement, "screenshots")
-    ? replacement.screenshots
-    : currentScreenshots ?? legacyScreenshots ?? { version: 1, items: [] };
-  assertAuxiliaryStorageValuesFit(libraryValue, screenshotValue);
+  const values = [
+    Object.hasOwn(replacement, "library") ? replacement.library : currentLibrary,
+    // The assertion runs before the caller's write/delete pair. Count an
+    // existing legacy record until that cleanup has actually committed; this
+    // prevents a duplicate physical record from being hidden by replacement
+    // fallback logic or by an interleaved writer.
+    legacyLibrary,
+    Object.hasOwn(replacement, "screenshots") ? replacement.screenshots : currentScreenshots,
+    legacyScreenshots,
+  ];
+  assertAuxiliaryStoragePhysicalValuesFit(values);
 }

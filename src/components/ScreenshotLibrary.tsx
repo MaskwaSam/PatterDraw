@@ -118,13 +118,13 @@ export function ScreenshotLibrary({
         <button
           type="button"
           className="screenshot-capture-button"
-          aria-label={busy ? "Capturing area" : "Capture area"}
-          title={busy ? "Capturing area" : "Capture area"}
+          aria-label={loading ? "Opening saved screenshots" : busy ? "Capturing area" : "Capture area"}
+          title={loading ? "Opening saved screenshots" : busy ? "Capturing area" : "Capture area"}
           onClick={onCaptureArea}
-          disabled={busy}
+          disabled={busy || loading}
         >
           <ScreenshotIcon />
-          <span className="icon-label">{busy ? "Capturing…" : "Capture area"}</span>
+          <span className="icon-label">{loading ? "Opening…" : busy ? "Capturing…" : "Capture area"}</span>
         </button>
       </div>
       {loading ? (
@@ -145,9 +145,9 @@ export function ScreenshotLibrary({
                 <div className="screenshot-card-meta">
                   <time dateTime={new Date(item.createdAt).toISOString()}>{captured}</time>
                   <div className="screenshot-card-actions">
-                    <button type="button" onClick={() => onCopy(item)} aria-label={`Copy screenshot captured ${captured}`}>Copy</button>
-                    <button type="button" onClick={() => onDownload(item)} aria-label={`Download screenshot captured ${captured}`}>Download</button>
-                    <button type="button" onClick={() => onDelete(item)} aria-label={`Delete screenshot captured ${captured}`}>Delete</button>
+                    <button type="button" onClick={() => onCopy(item)} disabled={busy} aria-label={`Copy screenshot captured ${captured}`}>Copy</button>
+                    <button type="button" onClick={() => onDownload(item)} disabled={busy} aria-label={`Download screenshot captured ${captured}`}>Download</button>
+                    <button type="button" onClick={() => onDelete(item)} disabled={busy} aria-label={`Delete screenshot captured ${captured}`}>Delete</button>
                   </div>
                 </div>
               </li>

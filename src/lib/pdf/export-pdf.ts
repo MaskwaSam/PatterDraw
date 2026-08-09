@@ -15,6 +15,7 @@ import type {
   SerializedScene,
 } from "../../types";
 import { bytesForBlob } from "../blob-bytes";
+import { isBlockedEmbeddedElementType } from "../embedded-content-policy";
 import { sha256Hex } from "../sha256";
 import { getSlideRenderData } from "../slide-render";
 import { orderedPdfScenes } from "./page-order";
@@ -154,9 +155,7 @@ function pdfAnnotationElements(
       !element.isDeleted &&
       element.id !== scene.pdfPage?.backgroundElementId &&
       element.type !== "frame" &&
-      element.type !== "embeddable" &&
-      element.type !== "iframe" &&
-      element.type !== "magicframe",
+      !isBlockedEmbeddedElementType(element.type),
   );
 }
 

@@ -15,6 +15,7 @@ import type {
   NonDeletedExcalidrawElement,
 } from "@excalidraw/excalidraw/element/types";
 import { createLocalId } from "../id";
+import { isBlockedEmbeddedElementType } from "../embedded-content-policy";
 import {
   MAX_SCREENSHOT_BYTES,
   MAX_SCREENSHOT_EDGE,
@@ -153,7 +154,7 @@ export function createScreenshotExportFrame(bounds: SceneCaptureBounds): Excalid
 }
 
 function isExportableElement(element: ExcalidrawElement): element is NonDeletedExcalidrawElement {
-  return !element.isDeleted && element.type !== "iframe" && element.type !== "embeddable";
+  return !element.isDeleted && !isBlockedEmbeddedElementType(element.type);
 }
 
 async function resizePng(source: Blob, width: number, height: number): Promise<Blob> {

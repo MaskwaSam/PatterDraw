@@ -2522,6 +2522,53 @@ button { color: inherit; }
   .screenshot-capture-cancel { top: 10px; right: 10px; }
 }
 
+/* At phone widths the full file-action set needs its own row. Keep every
+   action in the accessibility tree and use zero inter-action gaps so the
+   existing 34px targets fit inside a 320px viewport. The 390px layout above
+   remains unchanged. */
+@media (max-width: 359px) {
+  .app-shell,
+  .app-shell.is-slide-mode,
+  .app-shell.is-pdf-mode { grid-template-rows: 142px minmax(0, 1fr); }
+
+  .topbar {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 50px 46px 46px;
+    gap: 0;
+    padding: 0 8px;
+    align-content: start;
+  }
+
+  .topbar-document {
+    grid-column: 1;
+    grid-row: 1;
+    gap: 6px;
+  }
+  .settings-trigger { width: 30px; height: 30px; }
+  .document-title {
+    min-width: 0;
+    height: 27px;
+    padding-inline: 5px;
+  }
+
+  .file-actions {
+    grid-column: 1;
+    grid-row: 2;
+    width: 100%;
+    min-width: 0;
+    gap: 0;
+    justify-self: stretch;
+    justify-content: space-between;
+  }
+
+  .workspace-tabs {
+    grid-column: 1;
+    grid-row: 3;
+    width: 100%;
+  }
+  .workspace-toggle { min-width: 0; padding-inline: 6px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }

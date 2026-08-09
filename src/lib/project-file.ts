@@ -1,8 +1,10 @@
 import type { ClassroomProject, LoadedClassroomProject, PdfDocumentId } from "../types";
 import {
+  assertLoadedProjectRasterSafety,
   assertSafeProject,
   assertSanitizedProject,
   MAX_PROJECT_BYTES,
+  type ProjectRasterSafetyOptions,
   sanitizeProject,
 } from "./safety";
 import { sha256Hex } from "./sha256";
@@ -18,6 +20,7 @@ async function encodeProject(
   pdfBytes: Record<PdfDocumentId, Uint8Array>,
   maxUncompressedBytes: number,
   prepared: boolean,
+  options: ProjectRasterSafetyOptions = {},
 ): Promise<Uint8Array> {
   if (!Number.isSafeInteger(maxUncompressedBytes) || maxUncompressedBytes <= 0) {
     throw new Error("The project size limit is invalid.");
@@ -41,6 +44,10 @@ async function encodeProject(
     ...safe,
     pdfDocuments: Object.fromEntries(verifiedDocuments),
   };
+  // Perform the same local-image/PDF preflight used after extraction before
+  // creating an archive. A malformed embedded image must never be written
+  // successfully only to fail when the next restore hydrates it.
+  await assertLoadedProjectRasterSafety({ project: verifiedProject, pdfBytes }, options);
   assertProjectFitsContentBudget(verifiedProject, pdfBytes, maxUncompressedBytes);
   const manifest = textEncoder.encode(JSON.stringify(verifiedProject, null, 2));
   const entries: Record<string, Uint8Array> = {
@@ -61,26 +68,29 @@ export function encodeProjectFile(
   project: ClassroomProject,
   pdfBytes: Record<PdfDocumentId, Uint8Array>,
   maxUncompressedBytes = MAX_PROJECT_BYTES,
+  options: ProjectRasterSafetyOptions = {},
 ): Promise<Uint8Array> {
-  return encodeProject(project, pdfBytes, maxUncompressedBytes, false);
+  return encodeProject(project, pdfBytes, maxUncompressedBytes, false, options);
 }
 
 export function encodePreparedProjectFile(
   project: ClassroomProject,
   pdfBytes: Record<PdfDocumentId, Uint8Array>,
   maxUncompressedBytes = MAX_PROJECT_BYTES,
+  options: ProjectRasterSafetyOptions = {},
 ): Promise<Uint8Array> {
-  return encodeProject(project, pdfBytes, maxUncompressedBytes, true);
+  return encodeProject(project, pdfBytes, maxUncompressedBytes, true, options);
 }
 
 export async function decodeProjectFile(
   bytes: Uint8Array,
   maxUncompressedBytes = MAX_PROJECT_BYTES,
+  options: ProjectRasterSafetyOptions = {},
 ): Promise<LoadedClassroomProject> {
   if (!Number.isSafeInteger(maxUncompressedBytes) || maxUncompressedBytes <= 0) {
     throw new Error("The project size limit is invalid.");
   }
-  const entries = await extractProjectArchive(bytes, maxUncompressedBytes);
+  const entries = await extractProjectArchive(bytes, maxUncompressedBytes, options.signal);
   if (!entries[MANIFEST_PATH]) throw new Error("Project manifest is missing.");
 
   let project: ClassroomProject;
@@ -111,5 +121,7 @@ export async function decodeProjectFile(
     pdfDocuments: Object.fromEntries(verifiedDocuments),
   });
   assertSafeProject(verifiedProject);
-  return { project: verifiedProject, pdfBytes };
+  const loaded = { project: verifiedProject, pdfBytes };
+  await assertLoadedProjectRasterSafety(loaded, options);
+  return loaded;
 }

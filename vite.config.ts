@@ -50,6 +50,7 @@ function localAssetContentType(relativePath: string): string {
     case ".json": return "application/json; charset=utf-8";
     case ".js":
     case ".mjs": return "text/javascript; charset=utf-8";
+    case ".pfb": return "application/x-font-type1";
     case ".ttf": return "font/ttf";
     case ".woff2": return "font/woff2";
     case ".txt":
@@ -58,15 +59,37 @@ function localAssetContentType(relativePath: string): string {
   }
 }
 
+function sendLocalAssetPathError(response: { statusCode: number; setHeader(name: string, value: string): void; end(body?: string): void }, statusCode: 400 | 404): void {
+  response.statusCode = statusCode;
+  response.setHeader("Content-Type", "text/plain; charset=utf-8");
+  response.end(statusCode === 400 ? "Bad Request" : "Not found");
+}
+
+function isUnsafeLocalAssetPath(relativePath: string): boolean {
+  return !relativePath
+    || relativePath.includes("\0")
+    || relativePath.split(/[\\/]/).some((part) => part === "." || part === "..");
+}
+
 function localExcalidrawFonts(): Plugin {
   return {
     name: "local-excalidraw-fonts",
     configureServer(server) {
       server.middlewares.use(async (request, response, next) => {
         const prefix = "/excalidraw-assets/fonts/";
-        if (!request.url?.startsWith(prefix)) return next();
-        const relative = decodeURIComponent(request.url.slice(prefix.length).split(/[?#]/, 1)[0]);
-        if (!relative || relative.split("/").some((part) => part === "." || part === "..")) return next();
+        const rawPath = (request.url || "").split(/[?#]/, 1)[0];
+        if (!rawPath.startsWith(prefix)) return next();
+        let relative: string;
+        try {
+          relative = decodeURIComponent(rawPath.slice(prefix.length));
+        } catch {
+          sendLocalAssetPathError(response, 400);
+          return;
+        }
+        if (isUnsafeLocalAssetPath(relative)) {
+          sendLocalAssetPathError(response, 404);
+          return;
+        }
         try {
           const bytes = await readFile(path.join(excalidrawFontRoot, relative));
           response.statusCode = 200;
@@ -102,8 +125,20 @@ function localPdfjsAssets(): Plugin {
     name: "local-pdfjs-assets",
     configureServer(server) {
       server.middlewares.use(async (request, response, next) => {
-        const requestPath = decodeURIComponent((request.url || "").split(/[?#]/, 1)[0]).replace(/^\//, "");
-        if (!requestPath.startsWith("pdfjs/standard_fonts/")) return next();
+        const rawPath = (request.url || "").split(/[?#]/, 1)[0];
+        const rawRequestPath = rawPath.replace(/^\//, "");
+        if (!rawRequestPath.startsWith("pdfjs/standard_fonts/")) return next();
+        let requestPath: string;
+        try {
+          requestPath = decodeURIComponent(rawRequestPath);
+        } catch {
+          sendLocalAssetPathError(response, 400);
+          return;
+        }
+        if (isUnsafeLocalAssetPath(requestPath)) {
+          sendLocalAssetPathError(response, 404);
+          return;
+        }
         const asset = (await localPdfjsAssetList()).find((candidate) => candidate.output === requestPath);
         if (!asset) return next();
         try {
@@ -158,8 +193,21 @@ function localMathJaxAssets(): Plugin {
     name: "local-mathjax-assets",
     configureServer(server) {
       server.middlewares.use(async (request, response, next) => {
-        const requestPath = decodeURIComponent((request.url || "").split(/[?#]/, 1)[0]).replace(/^\//, "");
+        const rawPath = (request.url || "").split(/[?#]/, 1)[0];
+        const rawRequestPath = rawPath.replace(/^\//, "");
+        if (!rawRequestPath.startsWith("mathjax/") && !rawRequestPath.startsWith("mathjax-fonts/")) return next();
+        let requestPath: string;
+        try {
+          requestPath = decodeURIComponent(rawRequestPath);
+        } catch {
+          sendLocalAssetPathError(response, 400);
+          return;
+        }
         if (!requestPath.startsWith("mathjax/") && !requestPath.startsWith("mathjax-fonts/")) return next();
+        if (isUnsafeLocalAssetPath(requestPath)) {
+          sendLocalAssetPathError(response, 404);
+          return;
+        }
         const asset = (await localMathJaxAssetList()).find((candidate) => candidate.output === requestPath);
         if (!asset) return next();
         try {
@@ -222,7 +270,9 @@ export default defineConfig({
   },
   build: {
     target: "es2022",
-    sourcemap: true,
+    // Public classroom builds should not ship tens of megabytes of embedded
+    // source. Opt in explicitly when producing a local diagnostic bundle.
+    sourcemap: process.env.PATTERDRAW_SOURCEMAPS === "true",
   },
   test: {
     environment: "jsdom",

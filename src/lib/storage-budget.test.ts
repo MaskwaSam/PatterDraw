@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertAuxiliaryStoragePhysicalValuesFit,
   assertAuxiliaryStorageValuesFit,
   estimateStructuredStorageBytes,
 } from "./storage-budget";
@@ -23,5 +24,13 @@ describe("shared auxiliary storage budget", () => {
   it("accepts both libraries when their combined payload fits", () => {
     expect(assertAuxiliaryStorageValuesFit([{ id: "shape" }], { version: 1, items: [] }, 1_024))
       .toBeLessThan(1_024);
+  });
+
+  it("counts canonical and legacy physical records instead of coalescing duplicate keys", () => {
+    const canonical = { items: [{ id: "canonical", payload: "x".repeat(40) }] };
+    const legacy = { items: [{ id: "legacy", payload: "y".repeat(40) }] };
+    const oneRecord = estimateStructuredStorageBytes(canonical);
+    expect(() => assertAuxiliaryStoragePhysicalValuesFit([canonical, legacy], oneRecord + 1))
+      .toThrow(/Libraries are full/);
   });
 });

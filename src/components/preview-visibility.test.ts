@@ -4,6 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { StoredScreenshot } from "../lib/screenshots/persistence";
 import type { SerializedScene } from "../types";
 
+// React 18's `act` helper checks this flag before flushing updates from
+// visibility callbacks and effect cleanups. Keep the test environment honest
+// so preview lifecycle assertions do not emit a warning for every update.
+(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
 const { renderSlideThumbnailMock, slidePreviewRevisionMock } = vi.hoisted(() => ({
   renderSlideThumbnailMock: vi.fn(),
   slidePreviewRevisionMock: vi.fn(),
