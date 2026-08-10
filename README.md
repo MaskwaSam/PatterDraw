@@ -69,8 +69,8 @@ still requires the local/static host that serves the app bundle.
 
 ## Deterministic release bundle
 
-After the production checks pass, package the already-built `dist/` tree into
-the ignored `dist/release/` directory:
+After the production checks pass, create a fresh build and package it into the
+ignored `dist/release/` directory:
 
 ```bash
 npm run check
@@ -78,8 +78,14 @@ npm run release:package
 npm run release:verify
 ```
 
-Final packaging requires a clean git worktree. The release directory remains a
-complete deployable static root and includes `release-manifest.json`,
+`npm run release:package` builds an immutable archive of the clean `HEAD`
+commit after installing its lockfile-pinned dependencies inside that snapshot.
+It verifies a complete candidate beside `dist/`, then swaps it into place while
+retaining the previous tree until the handoff succeeds. This prevents stale,
+concurrently edited source, or live dependency bytes from being attributed to
+the commit. Release packaging and verification also share an exclusive local
+lock so concurrent commands cannot race the handoff. Final packaging requires a clean git worktree. The
+release directory remains a complete deployable static root and includes `release-manifest.json`,
 `provenance.json`, a CycloneDX `sbom.cdx.json`, and `SHA256SUMS`. Payload paths
 and metadata are sorted and timestamped from `SOURCE_DATE_EPOCH` or the HEAD
 commit time; the checksum file covers every payload and metadata file except

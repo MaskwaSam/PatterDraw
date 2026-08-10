@@ -2473,6 +2473,7 @@ async function inspectContentStreams(
 function isExpectedInspectionError(error: unknown): boolean {
   return error instanceof Error && (
     error.name === "AbortError"
+    || error.name === "EmbeddedImageInspectionTimeoutError"
     || error.message === embeddedImageLimitError().message
     || error.message === imageFilterLimitError().message
     || error.message === contentInspectionError().message
@@ -2562,9 +2563,9 @@ interface EmbeddedImageWorkerResponse {
   ok: boolean;
 }
 
-/** Worker startup/transport failures may be retried with the bounded inline
- * inspector. Responses with `ok: false` are semantic verdicts from a running
- * worker and must be surfaced without a retry. */
+/** Worker startup/transport failures are terminal in the browser. Retrying a
+ * hostile document on the UI thread would turn a contained worker failure into
+ * an uninterruptible main-thread stall. */
 class EmbeddedImageWorkerInfrastructureError extends Error {
   constructor(message: string) {
     super(message);
@@ -2574,12 +2575,22 @@ class EmbeddedImageWorkerInfrastructureError extends Error {
 
 const MAX_PDF_INSPECTION_MILLISECONDS = 30_000;
 
-function canUseEmbeddedImageWorker(): boolean {
-  return typeof window !== "undefined" && typeof Worker === "function";
+class EmbeddedImageInspectionTimeoutError extends Error {
+  constructor() {
+    super("PDF safety inspection timed out. Try a smaller or simpler PDF.");
+    this.name = "EmbeddedImageInspectionTimeoutError";
+  }
 }
 
-function isEmbeddedImageWorkerInfrastructureError(error: unknown): boolean {
-  return error instanceof EmbeddedImageWorkerInfrastructureError;
+class EmbeddedImageWorkerProtocolError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EmbeddedImageWorkerProtocolError";
+  }
+}
+
+function canUseEmbeddedImageWorker(): boolean {
+  return typeof window !== "undefined" && typeof Worker === "function";
 }
 
 function inspectEmbeddedImageLimitsInWorker(
@@ -2621,15 +2632,14 @@ function inspectEmbeddedImageLimitsInWorker(
     };
     const onAbort = () => fail(abortReason(signal!));
     timeout = globalThis.setTimeout(() => {
-      fail(new EmbeddedImageWorkerInfrastructureError(
-        "PDF embedded-image worker timed out.",
-      ));
+      if (signal?.aborted) fail(abortReason(signal));
+      else fail(new EmbeddedImageInspectionTimeoutError());
     }, MAX_PDF_INSPECTION_MILLISECONDS);
     signal?.addEventListener("abort", onAbort, { once: true });
     worker.onmessage = (event: MessageEvent<EmbeddedImageWorkerResponse>) => {
       const response = event.data;
       if (!response || typeof response.ok !== "boolean") {
-        fail(new EmbeddedImageWorkerInfrastructureError(
+        fail(new EmbeddedImageWorkerProtocolError(
           "PDF embedded-image worker returned an invalid response.",
         ));
         return;
@@ -2673,6 +2683,36 @@ function inspectEmbeddedImageLimitsInWorker(
   });
 }
 
+async function inspectEmbeddedImageLimitsInlineWithTimeout(
+  bytes: Uint8Array,
+  maxPixels: number,
+  maxEdge: number | undefined,
+  signal?: AbortSignal,
+  maxTotalPixels = MAX_PDF_EMBEDDED_IMAGE_PIXELS,
+  maxTotalEncodedBytes = MAX_PDF_EMBEDDED_IMAGE_BYTES,
+): Promise<void> {
+  throwIfAborted(signal);
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(abortReason(signal!));
+  signal?.addEventListener("abort", onAbort, { once: true });
+  const timeout = globalThis.setTimeout(() => {
+    controller.abort(new EmbeddedImageInspectionTimeoutError());
+  }, MAX_PDF_INSPECTION_MILLISECONDS);
+  try {
+    await inspectEmbeddedImageLimitsInline(
+      bytes,
+      maxPixels,
+      maxEdge,
+      controller.signal,
+      maxTotalPixels,
+      maxTotalEncodedBytes,
+    );
+  } finally {
+    globalThis.clearTimeout(timeout);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+
 async function inspectEmbeddedImageLimits(
   bytes: Uint8Array,
   maxPixels: number,
@@ -2682,33 +2722,25 @@ async function inspectEmbeddedImageLimits(
   maxTotalEncodedBytes = MAX_PDF_EMBEDDED_IMAGE_BYTES,
 ): Promise<void> {
   if (canUseEmbeddedImageWorker()) {
-    try {
-      await inspectEmbeddedImageLimitsInWorker(
-        bytes,
-        maxPixels,
-        maxEdge,
-        signal,
-        maxTotalPixels,
-        maxTotalEncodedBytes,
-      );
-      return;
-    } catch (error) {
-      if (!isEmbeddedImageWorkerInfrastructureError(error)) throw error;
-      // Abort must remain terminal, even if the worker failed at the same
-      // moment. The inline inspector receives the same signal and limits.
-      throwIfAborted(signal);
-      await inspectEmbeddedImageLimitsInline(
-        bytes,
-        maxPixels,
-        maxEdge,
-        signal,
-        maxTotalPixels,
-        maxTotalEncodedBytes,
-      );
-      return;
-    }
+    await inspectEmbeddedImageLimitsInWorker(
+      bytes,
+      maxPixels,
+      maxEdge,
+      signal,
+      maxTotalPixels,
+      maxTotalEncodedBytes,
+    );
+    return;
   }
-  await inspectEmbeddedImageLimitsInline(
+  // Production browsers must keep untrusted PDF parsing inside a killable
+  // Worker. Vitest/Node has no browser Worker, so its deterministic parser
+  // fixtures continue to exercise the current-thread implementation.
+  if (typeof window !== "undefined" && import.meta.env.MODE !== "test") {
+    throw new EmbeddedImageWorkerInfrastructureError(
+      "PDF safety inspection is unavailable because its worker could not be started.",
+    );
+  }
+  await inspectEmbeddedImageLimitsInlineWithTimeout(
     bytes,
     maxPixels,
     maxEdge,

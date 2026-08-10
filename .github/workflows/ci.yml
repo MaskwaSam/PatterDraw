@@ -94,7 +94,10 @@ jobs:
         run: |
           set -o pipefail
           production_diag_dir="$RUNNER_TEMP/patterdraw-production"
+          printf 'stale build probe\n' > dist/stale-release-probe.js
           npm run release:package 2>&1 | tee "$production_diag_dir/package.log"
+          test ! -e dist/stale-release-probe.js
+          test ! -e dist/release/stale-release-probe.js
           sha256sum dist/release/release-manifest.json dist/release/provenance.json dist/release/sbom.cdx.json dist/release/SHA256SUMS > "$production_diag_dir/release-first.sha256"
           npm run release:package 2>&1 | tee "$production_diag_dir/package-repeat.log"
           sha256sum dist/release/release-manifest.json dist/release/provenance.json dist/release/sbom.cdx.json dist/release/SHA256SUMS > "$production_diag_dir/release-second.sha256"
@@ -111,22 +114,186 @@ jobs:
           if [ -d dist/release ]; then
             find dist/release -type f -print | sort > artifacts/production/release-manifest-files.txt
           fi
+      - id: production-container
+        name: Build and smoke-test deployment container
+        if: ${{ always() && steps.production-package.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          deploy_env="$RUNNER_TEMP/patterdraw-deploy.env"
+          deploy_project="patterdraw-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          edge_network="patterdraw_edge"
+          network_created=0
+          cleanup() {
+            set +e
+            docker compose --project-name "$deploy_project" --env-file "$deploy_env" \
+              -f deploy/compose.yaml down --remove-orphans >/dev/null 2>&1
+            if [ "$network_created" = 1 ]; then
+              docker network rm "$edge_network" >/dev/null 2>&1
+            fi
+          }
+          trap cleanup EXIT
+
+          node deploy/verify-config.mjs | tee artifacts/production/deploy-verify.log
+          sed -n \
+            -e '/^PATTERDRAW_GIT_COMMIT=/p' \
+            -e '/^PATTERDRAW_MANIFEST_SHA256=/p' \
+            -e '/^PATTERDRAW_RELEASE_TREE_SHA256=/p' \
+            -e '/^PATTERDRAW_DEPLOY_CONFIG_SHA256=/p' \
+            -e '/^PATTERDRAW_IMAGE_TAG=/p' \
+            artifacts/production/deploy-verify.log > "$deploy_env"
+          test "$(wc -l < "$deploy_env" | tr -d '[:space:]')" = 5
+          chmod 0600 "$deploy_env"
+          set -a
+          . "$deploy_env"
+          set +a
+
+          docker compose --project-name "$deploy_project" --env-file "$deploy_env" \
+            -f deploy/compose.yaml config --quiet
+          docker compose --project-name "$deploy_project" --env-file "$deploy_env" \
+            -f deploy/compose.yaml build --pull patterdraw 2>&1 \
+            | tee artifacts/production/deploy-build.log
+          docker network create "$edge_network" > artifacts/production/deploy-network.id
+          network_created=1
+          docker compose --project-name "$deploy_project" --env-file "$deploy_env" \
+            -f deploy/compose.yaml up -d --no-deps --no-build --wait patterdraw
+
+          container_id=$(docker compose --project-name "$deploy_project" --env-file "$deploy_env" \
+            -f deploy/compose.yaml ps -q patterdraw)
+          test -n "$container_id"
+          test "$(docker inspect --format '{{.Config.User}}' "$container_id")" = "101:101"
+          test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container_id")" = "true"
+          test "$(docker inspect --format '{{.State.Health.Status}}' "$container_id")" = "healthy"
+          test -z "$(docker port "$container_id")"
+          docker inspect --format '{{json .HostConfig.CapDrop}}' "$container_id" | grep -q '"ALL"'
+          docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$container_id" | grep -q 'no-new-privileges'
+          docker inspect --format '{{json .HostConfig.Tmpfs}}' "$container_id" | grep -q '/var/cache/nginx'
+          test "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$container_id")" = 1
+          test -n "$(docker inspect --format '{{(index .NetworkSettings.Networks "patterdraw_edge").NetworkID}}' "$container_id")"
+          test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container_id")" = "$PATTERDRAW_GIT_COMMIT"
+          test "$(docker inspect --format '{{index .Config.Labels "ca.spatterson.patterdraw.manifest-sha256"}}' "$container_id")" = "$PATTERDRAW_MANIFEST_SHA256"
+          test "$(docker inspect --format '{{index .Config.Labels "ca.spatterson.patterdraw.release-tree-sha256"}}' "$container_id")" = "$PATTERDRAW_RELEASE_TREE_SHA256"
+          test "$(docker inspect --format '{{index .Config.Labels "ca.spatterson.patterdraw.deploy-config-sha256"}}' "$container_id")" = "$PATTERDRAW_DEPLOY_CONFIG_SHA256"
+
+          image_ref="patterdraw:${PATTERDRAW_IMAGE_TAG}"
+          client=(docker run --rm --network "$edge_network" --entrypoint /bin/sh "$image_ref")
+          "${client[@]}" -eu -c \
+            'test "$(wget -q -O - --header="Host: draw.spatterson.ca" http://patterdraw:8080/healthz)" = healthy'
+          "${client[@]}" -eu -c \
+            'wget -q -O - --header="Host: draw.spatterson.ca" http://patterdraw:8080/ | grep -q "<title>PatterDraw</title>"'
+          "${client[@]}" -c \
+            'wget -S -O /dev/null --header="Host: draw.spatterson.ca" http://patterdraw:8080/ 2>&1' \
+            > artifacts/production/deploy-root-headers.txt
+          assert_security_headers() {
+            local header_file="$1"
+            grep -qi 'Content-Security-Policy:' "$header_file"
+            grep -qi 'Cross-Origin-Opener-Policy: same-origin' "$header_file"
+            grep -qi 'Cross-Origin-Resource-Policy: same-origin' "$header_file"
+            grep -qi 'Permissions-Policy:' "$header_file"
+            grep -qi 'Referrer-Policy: no-referrer' "$header_file"
+            grep -qi 'Strict-Transport-Security: max-age=31536000' "$header_file"
+            grep -qi 'X-Content-Type-Options: nosniff' "$header_file"
+            grep -qi 'X-Frame-Options: DENY' "$header_file"
+            grep -qi 'X-PatterDraw-Production-Dist: 1' "$header_file"
+          }
+          assert_security_headers artifacts/production/deploy-root-headers.txt
+          grep -qi 'Cache-Control: no-store' artifacts/production/deploy-root-headers.txt
+
+          set +e
+          "${client[@]}" -c \
+            'wget -S -O /dev/null --post-data="" --header="Host: draw.spatterson.ca" http://patterdraw:8080/ 2>&1' \
+            > artifacts/production/deploy-method-headers.txt
+          method_status=$?
+          set -e
+          test "$method_status" -ne 0
+          grep -q 'HTTP/1.1 405' artifacts/production/deploy-method-headers.txt
+          grep -qi 'Allow: GET, HEAD' artifacts/production/deploy-method-headers.txt
+          assert_security_headers artifacts/production/deploy-method-headers.txt
+          grep -qi 'Cache-Control: no-store' artifacts/production/deploy-method-headers.txt
+
+          set +e
+          "${client[@]}" -c \
+            'wget -S -O /dev/null --header="Host: draw.spatterson.ca" http://patterdraw:8080/assets/missing-does-not-exist.js 2>&1' \
+            > artifacts/production/deploy-missing-headers.txt
+          missing_status=$?
+          set -e
+          test "$missing_status" -ne 0
+          grep -q 'HTTP/1.1 404' artifacts/production/deploy-missing-headers.txt
+          assert_security_headers artifacts/production/deploy-missing-headers.txt
+          grep -qi 'Cache-Control: public, max-age=0, must-revalidate' \
+            artifacts/production/deploy-missing-headers.txt
+
+          if "${client[@]}" -c \
+            'wget -q -O /dev/null --header="Host: invalid.example" http://patterdraw:8080/'; then
+            echo "Unknown Host unexpectedly received a usable response." >&2
+            exit 1
+          fi
+
+          asset_path=$(find dist/release/assets -type f -print | LC_ALL=C sort \
+            | sed -n '1p' | sed 's#^dist/release/##')
+          test -n "$asset_path"
+          "${client[@]}" -c \
+            "wget -S -O /dev/null --header='Host: draw.spatterson.ca' 'http://patterdraw:8080/$asset_path' 2>&1" \
+            > artifacts/production/deploy-asset-headers.txt
+          grep -qi 'Cache-Control: public, max-age=31536000, immutable' \
+            artifacts/production/deploy-asset-headers.txt
       - name: Start packaged release server
         if: ${{ always() && steps.production-package.outcome == 'success' }}
         run: |
+          set -euo pipefail
           node scripts/serve-production-dist.mjs --dist dist/release --host 127.0.0.1 --port 4174 > artifacts/production/server.log 2>&1 &
-          echo "$!" > artifacts/production/server.pid
+          server_pid=$!
+          echo "$server_pid" > artifacts/production/server.pid
+          expected_manifest_sha=$(sha256sum dist/release/release-manifest.json | awk '{print $1}')
+          printf '%s\n' "$expected_manifest_sha" > artifacts/production/expected-release-manifest.sha256
+          # Give an EADDRINUSE failure time to terminate before any existing
+          # listener can satisfy the HTTP readiness probe.
+          sleep 1
           for attempt in $(seq 1 30); do
-            if curl --fail --silent --show-error http://127.0.0.1:4174/classroom/math/unit-01/patterdraw/ > /dev/null; then
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              cat artifacts/production/server.log
+              echo "The recorded packaged release server exited before readiness." >&2
+              exit 1
+            fi
+            if curl --fail --silent --show-error \
+              http://127.0.0.1:4174/classroom/math/unit-01/patterdraw/release-manifest.json \
+              --output artifacts/production/served-release-manifest.json; then
+              served_manifest_sha=$(sha256sum artifacts/production/served-release-manifest.json | awk '{print $1}')
+              if [ "$served_manifest_sha" != "$expected_manifest_sha" ]; then
+                echo "The listening server does not match the packaged release manifest." >&2
+                exit 1
+              fi
+              kill -0 "$server_pid"
               exit 0
             fi
             sleep 1
           done
           cat artifacts/production/server.log
           exit 1
-      - name: Run production browser evidence
+      - id: production-browser
+        name: Run production browser evidence
         if: ${{ always() && steps.production-package.outcome == 'success' }}
-        run: PW_PRODUCTION_REUSE_SERVER=1 npm run test:browser:production
+        run: |
+          set -euo pipefail
+          server_pid=$(cat artifacts/production/server.pid)
+          expected_manifest_sha=$(cat artifacts/production/expected-release-manifest.sha256)
+          verify_served_release() {
+            phase=$1
+            kill -0 "$server_pid"
+            curl --fail --silent --show-error \
+              http://127.0.0.1:4174/classroom/math/unit-01/patterdraw/release-manifest.json \
+              --output "artifacts/production/served-release-manifest-${phase}.json"
+            served_manifest_sha=$(sha256sum "artifacts/production/served-release-manifest-${phase}.json" | awk '{print $1}')
+            test "$served_manifest_sha" = "$expected_manifest_sha"
+          }
+          verify_served_release before-browser
+          browser_status=0
+          PW_PRODUCTION_REUSE_SERVER=1 npm run test:browser:production || browser_status=$?
+          verify_served_release after-browser
+          exit "$browser_status"
+      - id: production-postverify
+        name: Verify browser tests preserved the release artifact
+        if: ${{ always() && steps.production-package.outcome == 'success' }}
+        run: npm run release:verify 2>&1 | tee artifacts/production/release-postverify.log
       - name: Stop packaged release server
         if: ${{ always() }}
         run: |
@@ -142,6 +309,13 @@ jobs:
             test-results/production/
             playwright-report/production/
             artifacts/production/
-            dist/release/
           if-no-files-found: warn
+          retention-days: 14
+      - name: Upload verified production release
+        if: ${{ steps.production-package.outcome == 'success' && steps.production-container.outcome == 'success' && steps.production-browser.outcome == 'success' && steps.production-postverify.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: patterdraw-release-${{ github.run_id }}
+          path: dist/release/
+          if-no-files-found: error
           retention-days: 14

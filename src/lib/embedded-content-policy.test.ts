@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertClipboardTextPayloadsWithinLimit,
   clipboardElementsContainBlockedContent,
   clipboardHtmlContainsBlockedContent,
   EMBEDDED_CONTENT_MODE,
@@ -8,6 +9,7 @@ import {
   isSafeLocalImageClipboardType,
   validateEmbeddedContentUrl,
 } from "./embedded-content-policy";
+import { MAX_CLIPBOARD_TEXT_BYTES } from "./structural-limits";
 
 describe("embedded content policy", () => {
   it("keeps the student build disabled through one explicit policy seam", () => {
@@ -41,6 +43,14 @@ describe("embedded content policy", () => {
     expect(clipboardHtmlContainsBlockedContent(tag("iframe", ` src="${remote}"`))).toBe(true);
     expect(clipboardHtmlContainsBlockedContent(tag("script", ` src="${remote}/a.js"`))).toBe(true);
     expect(clipboardHtmlContainsBlockedContent(tag("img", ` src="${remote}/a.png"`))).toBe(true);
+  });
+
+  it("rejects oversized plain text and HTML before dependency parsing", () => {
+    const oversized = "\u0800".repeat(Math.floor(MAX_CLIPBOARD_TEXT_BYTES / 3) + 1);
+    expect(() => assertClipboardTextPayloadsWithinLimit(oversized, "<p>safe</p>"))
+      .toThrow(/Clipboard text is larger than the .* import limit/i);
+    expect(() => assertClipboardTextPayloadsWithinLimit("safe", `<p>${oversized}</p>`))
+      .toThrow(/Clipboard HTML is larger than the .* import limit/i);
   });
 
   it("lets an actual clipboard image file use the native preflight path", () => {
@@ -119,7 +129,89 @@ describe("embedded content policy", () => {
       const [item] = await navigator.clipboard.read();
       expect(item.types).toEqual(["text/plain"]);
       expect(await (await item.getType("text/plain")).text()).toBe("Safe fallback text");
+      await expect(item.getType("text/html")).rejects.toThrow(/offline content policy/i);
       guard.restore();
+    } finally {
+      if (descriptor) Object.defineProperty(navigator, "clipboard", descriptor);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
+  it("removes oversized HTML before direct Clipboard API parsing", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        read: async () => [{
+          types: ["text/html", "text/plain"],
+          getType: async (type: string) => type === "text/html"
+            ? new Blob([new Uint8Array(MAX_CLIPBOARD_TEXT_BYTES + 1)], { type })
+            : new Blob(["Safe fallback text"], { type }),
+          presentationStyle: "unspecified",
+        }],
+      },
+    });
+    try {
+      const guard = installSafeClipboardReadGuard();
+      expect(guard.installed).toBe(true);
+      const [item] = await navigator.clipboard.read();
+      expect(item.types).toEqual(["text/plain"]);
+      expect(await (await item.getType("text/plain")).text()).toBe("Safe fallback text");
+      guard.restore();
+    } finally {
+      if (descriptor) Object.defineProperty(navigator, "clipboard", descriptor);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
+  it("removes oversized plain-only Clipboard API data before parsing", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        read: async () => [{
+          types: ["text/plain"],
+          getType: async (type: string) => new Blob([
+            new Uint8Array(MAX_CLIPBOARD_TEXT_BYTES + 1),
+          ], { type }),
+          presentationStyle: "unspecified",
+        }],
+      },
+    });
+    try {
+      const guard = installSafeClipboardReadGuard();
+      expect(guard.installed).toBe(true);
+      const [item] = await navigator.clipboard.read();
+      expect(item.types).toEqual([]);
+      guard.restore();
+    } finally {
+      if (descriptor) Object.defineProperty(navigator, "clipboard", descriptor);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
+  it("bounds the readText fallback when Clipboard API item reads fail", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    const originalRead = async () => {
+      throw new Error("native item read unavailable");
+    };
+    const originalReadText = async () => (
+      "\u0800".repeat(Math.floor(MAX_CLIPBOARD_TEXT_BYTES / 3) + 1)
+    );
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { read: originalRead, readText: originalReadText },
+    });
+    try {
+      const guard = installSafeClipboardReadGuard();
+      expect(guard.installed).toBe(true);
+      await expect(navigator.clipboard.read()).rejects.toThrow(/native item read unavailable/i);
+      await expect(navigator.clipboard.readText()).rejects.toThrow(
+        /Clipboard text is larger than the .* import limit/i,
+      );
+      guard.restore();
+      expect(navigator.clipboard.read).toBe(originalRead);
+      expect(navigator.clipboard.readText).toBe(originalReadText);
     } finally {
       if (descriptor) Object.defineProperty(navigator, "clipboard", descriptor);
       else Reflect.deleteProperty(navigator, "clipboard");

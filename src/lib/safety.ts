@@ -34,6 +34,10 @@ import {
   sanitizeClassroomSlideMetadata,
 } from "./slides";
 import { isBlockedEmbeddedElementType } from "./embedded-content-policy";
+import {
+  assertProjectStructure,
+  assertSceneStructure,
+} from "./structural-limits";
 
 export const MAX_PROJECT_BYTES = 150 * 1024 * 1024;
 export const MAX_PDF_BYTES = 75 * 1024 * 1024;
@@ -120,7 +124,7 @@ export function canonicalizePersistedWrapperTool(appState: Record<string, unknow
   };
 }
 
-export function sanitizeScene(scene: SerializedScene): SerializedScene {
+function sanitizeSceneAfterStructureCheck(scene: SerializedScene): SerializedScene {
   const safe = clone(scene);
   safe.files = Object.fromEntries(Object.entries(safe.files).flatMap(([id, file]) => {
     if (!file || typeof file !== "object" || !isSafeLocalImageSource(file.dataURL)) return [];
@@ -178,7 +182,19 @@ export function sanitizeScene(scene: SerializedScene): SerializedScene {
   return safe;
 }
 
+export function sanitizeScene(scene: SerializedScene): SerializedScene {
+  // This is intentionally before structuredClone: a hostile native scene can
+  // otherwise force a second deep traversal before the sanitizer has a chance
+  // to reject its shape.
+  assertSceneStructure(scene, { label: "Scene" });
+  return sanitizeSceneAfterStructureCheck(scene);
+}
+
 export function sanitizeProject(project: ClassroomProject): ClassroomProject {
+  // Validate the complete untrusted graph before cloning any of its scenes.
+  // Individual scenes are already covered by this pass, so the internal
+  // sanitizer below avoids traversing a large project twice.
+  assertProjectStructure(project, { label: "Project" });
   // Clone project metadata independently from the large scene collection.
   // sanitizeScene already performs a defensive deep clone, so cloning the
   // complete project first would temporarily duplicate every scene twice.
@@ -205,7 +221,7 @@ export function sanitizeProject(project: ClassroomProject): ClassroomProject {
   safe.pdfDocuments = clone(project.pdfDocuments);
   safe.pdfPageOrder = project.pdfPageOrder ? clone(project.pdfPageOrder) : undefined;
   safe.scenes = Object.fromEntries(
-    Object.entries(project.scenes).map(([id, scene]) => [id, sanitizeScene(scene)]),
+    Object.entries(project.scenes).map(([id, scene]) => [id, sanitizeSceneAfterStructureCheck(scene)]),
   );
   for (const scene of Object.values(safe.scenes)) {
     scene.elements = canonicalizePdfBackground(scene, scene.elements);
@@ -546,6 +562,10 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
 
 export function assertSafeProject(project: ClassroomProject): void {
   assertProject(project, false);
+  // Keep the existing semantic checks first so legacy malformed-map errors
+  // remain actionable, then enforce the recursive envelope before any caller
+  // can pass this value to a clone or restore path.
+  assertProjectStructure(project, { label: "Project" });
 }
 
 /**
@@ -555,6 +575,7 @@ export function assertSafeProject(project: ClassroomProject): void {
  */
 export function assertSanitizedProject(project: ClassroomProject): void {
   assertProject(project, true);
+  assertProjectStructure(project, { label: "Sanitized project" });
 }
 
 /**

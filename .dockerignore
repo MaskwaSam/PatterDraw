@@ -1,0 +1,6 @@
+*
+!deploy/
+!deploy/**
+!dist/
+!dist/release/
+!dist/release/**

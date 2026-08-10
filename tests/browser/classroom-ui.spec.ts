@@ -5,7 +5,7 @@ import {
   type BrowserContext,
   type Download,
   type Page,
-  type Route,
+  type Request,
   type TestInfo,
 } from "@playwright/test";
 import { strFromU8, strToU8, unzipSync, zipSync, zlibSync } from "fflate";
@@ -23,6 +23,8 @@ const pdfStandardFontDataUrl = decodeURIComponent(new URL(
   "./standard_fonts/",
   import.meta.resolve("pdfjs-dist/package.json"),
 ).pathname);
+
+const DEVELOPMENT_EDITOR_MOUNT_TIMEOUT = 90_000;
 
 interface RenderedPdfPage {
   width: number;
@@ -271,14 +273,19 @@ async function openTestPdf(page: import("@playwright/test").Page, pageCount = 1)
   const document = await PDFDocument.create();
   for (let index = 0; index < pageCount; index += 1) document.addPage([612, 792]);
   const bytes = await document.save();
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "toolbar-position.pdf",
     mimeType: "application/pdf",
     buffer: Buffer.from(bytes),
   });
-  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, { timeout: 15_000 });
-  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(pageCount, { timeout: 15_000 });
-  await expect.poll(() => autosavedPdfBackgroundPosition(page), { timeout: 15_000 })
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(pageCount, {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
+  await expect.poll(
+    () => autosavedPdfBackgroundPosition(page),
+    { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT },
+  )
     .toMatchObject({ locked: true });
 }
 
@@ -579,7 +586,7 @@ async function useDownloadBasedImageExport(page: import("@playwright/test").Page
     delete (window as Window & { showSaveFilePicker?: unknown }).showSaveFilePicker;
   });
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
 }
 
 function pngDimensions(bytes: Buffer): { width: number; height: number } {
@@ -738,7 +745,7 @@ async function openClassroomFixture(
     pdfDocuments: {},
   };
   const bytes = zipSync({ "project.json": strToU8(JSON.stringify(project)) });
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: fileName,
     mimeType: "application/vnd.patterdraw+zip",
     buffer: Buffer.from(bytes),
@@ -1881,7 +1888,7 @@ type RuntimeGuardState = {
   unhandledRejections: string[];
   pages: Set<Page>;
   pageListener: (page: Page) => void;
-  routeHandler: (route: Route) => Promise<void>;
+  requestListener: (request: Request) => void;
 };
 
 const runtimeGuardStates = new WeakMap<BrowserContext, RuntimeGuardState>();
@@ -1913,26 +1920,22 @@ async function installRuntimeGuard(context: BrowserContext, page: Page): Promise
     unhandledRejections: [],
     pages: new Set(),
     pageListener: () => undefined,
-    routeHandler: async () => undefined,
+    requestListener: () => undefined,
   };
   state.pageListener = (openedPage) => addRuntimeGuardPage(state, openedPage);
-  state.routeHandler = async (route: Route) => {
+  state.requestListener = (request: Request) => {
     let requestUrl: URL;
     try {
-      requestUrl = new URL(route.request().url());
+      requestUrl = new URL(request.url());
     } catch {
-      await route.abort("blockedbyclient");
       return;
     }
     if (
       (requestUrl.protocol === "http:" || requestUrl.protocol === "https:")
       && requestUrl.origin !== runtimeGuardAllowedOrigin
     ) {
-      state.externalRequests.push(`${route.request().method()} ${route.request().url()}`);
-      await route.abort("blockedbyclient");
-      return;
+      state.externalRequests.push(`${request.method()} ${request.url()}`);
     }
-    await route.continue();
   };
   runtimeGuardStates.set(context, state);
   addRuntimeGuardPage(state, page);
@@ -1954,20 +1957,25 @@ async function installRuntimeGuard(context: BrowserContext, page: Page): Promise
       console.debug("[patterdraw-runtime-guard:unhandledrejection] " + detail);
     });
   });
-  await context.route("**/*", state.routeHandler);
+  // Do not use context.route() here: Playwright disables the HTTP cache for
+  // every routed context, which makes each Vite reload fetch hundreds of local
+  // modules again. The dev browser launch sends every non-Vite origin through
+  // a closed local proxy, while this listener still records the attempted URL
+  // and fails the test with a useful diagnostic.
+  context.on("request", state.requestListener);
 }
 
 test.beforeEach(async ({ context, page }) => {
   await installRuntimeGuard(context, page);
-  await page.goto("/");
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
 });
 
 test.afterEach(async ({ context }, testInfo: TestInfo) => {
   const state = runtimeGuardStates.get(context);
   if (!state) return;
   await Promise.all(context.pages().map((openPage) => openPage.waitForTimeout(0).catch(() => undefined)));
-  await context.unroute("**/*", state.routeHandler);
+  context.off("request", state.requestListener);
   context.off("page", state.pageListener);
 
   // Preserve the primary assertion when a test is already failing; runtime
@@ -2010,7 +2018,7 @@ test("uses PatterDraw branding for the app and a new canvas", async ({ page }) =
     titleMode: undefined,
   });
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await expect(title).toHaveValue("Untitled PatterDraw canvas");
   await expect.poll(async () => (
     await keyvalValue<{ title: string; titleMode?: string }>(page, autosaveKey)
@@ -2028,7 +2036,7 @@ test("uses PatterDraw branding for the app and a new canvas", async ({ page }) =
     titleMode: "custom",
   });
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await expect(title).toHaveValue("Untitled classroom canvas");
 });
 
@@ -2133,7 +2141,7 @@ test("customizes optional features from device-local settings", async ({ page })
   });
 
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await expect(page.getByRole("button", { name: "Slides", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Insert", exact: true })).toHaveCount(0);
   await expect(page.locator(".statusbar")).toHaveCount(0);
@@ -2198,7 +2206,7 @@ test("optionally hides redundant icon labels without removing accessible names",
   )?.iconOnlyControls)).toBe(true);
 
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await expect(shell).toHaveClass(/is-icon-only-controls/);
   await expect(page.getByRole("button", { name: "Board", exact: true })).toBeVisible();
 });
@@ -2286,7 +2294,7 @@ test("applies pen-only, grid, and object-snapping preferences to the live editor
   expect(savedAppState.objectsSnapModeEnabled).toBeUndefined();
 
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await settings.click();
   await expect(penOnly).toBeChecked();
   await expect(showGrid).not.toBeChecked();
@@ -2357,7 +2365,7 @@ test("edits exact geometry through the optional Size & Position inspector", asyn
 });
 
 test("finds and activates text across Board, Slides, and PDF pages", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(180_000);
   const frame = classroomTestFrame("lesson-frame", "Lesson Slide", 300, 180, 520, 320, "a2", true);
   await openClassroomFixture(page, [
     exportTestText("board-lesson", "Board lesson", 60, 70, "a0"),
@@ -2554,7 +2562,7 @@ test("switches between light, dark, and live system themes", async ({ page }) =>
 });
 
 test("darkens PDF content while preserving embedded picture colours and canonical storage", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(180_000);
   const browserErrors: string[] = [];
   page.on("pageerror", (error) => browserErrors.push(error.message));
   page.on("console", (message) => {
@@ -2562,14 +2570,14 @@ test("darkens PDF content while preserving embedded picture colours and canonica
   });
   await useDownloadBasedImageExport(page);
   const pdfBytes = await pictureDarkModePdfBytes();
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "dark-mode-picture.pdf",
     mimeType: "application/pdf",
     buffer: Buffer.from(pdfBytes),
   });
-  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, { timeout: 15_000 });
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, { timeout: 30_000 });
   const thumbnails = page.locator("#pdf-page-rail .pdf-page-item img");
-  await expect(thumbnails).toHaveCount(2, { timeout: 15_000 });
+  await expect(thumbnails).toHaveCount(2, { timeout: 30_000 });
   const thumbnail = thumbnails.first();
   const unvisitedThumbnail = thumbnails.nth(1);
   await expectLoadedPreview(thumbnail);
@@ -2601,14 +2609,14 @@ test("darkens PDF content while preserving embedded picture colours and canonica
       fileId,
     } : null;
   };
-  await expect.poll(storedPdfRaster, { timeout: 15_000 }).not.toBeNull();
+  await expect.poll(storedPdfRaster, { timeout: 30_000 }).not.toBeNull();
   const lightStored = await storedPdfRaster();
   expect(lightStored?.dataURL).toBe(lightThumbnail);
   expect(lightStored?.appTheme).toBeUndefined();
 
   await expect.poll(
     () => renderedPdfDisplaySamples(page),
-    { timeout: 15_000 },
+    { timeout: 30_000 },
   ).not.toBeNull();
   const lightSamples = await renderedPdfDisplaySamples(page);
   expect(lightSamples?.background.every((channel) => channel > 225)).toBe(true);
@@ -2675,7 +2683,7 @@ test("darkens PDF content while preserving embedded picture colours and canonica
   expect(darkSamples?.pictureAccent[1] || 0).toBeGreaterThan((darkSamples?.pictureAccent[2] || 0) * 2);
   expect(darkSamples?.pictureTransparentVector.every((channel) => channel > 205)).toBe(true);
   expect(darkSamples?.pictureVectorOverlay.every((channel) => channel > 205)).toBe(true);
-  await expect.poll(storedPdfRaster, { timeout: 15_000 }).toEqual(lightStored);
+  await expect.poll(storedPdfRaster, { timeout: 30_000 }).toEqual(lightStored);
 
   await page.getByRole("button", { name: /Open output page 2:/ }).click();
   await expect(page.locator("#pdf-page-rail .pdf-page-item").nth(1)).toHaveClass(/is-selected/);
@@ -2767,8 +2775,8 @@ test("darkens PDF content while preserving embedded picture colours and canonica
     const samples = await renderedPdfDisplaySamples(page);
     return samples?.background.every((channel) => channel < 45)
       && samples.vector.every((channel) => channel > 205);
-  }, { timeout: 15_000 }).toBe(true);
-  await expect.poll(storedPdfRaster, { timeout: 15_000 }).toEqual(lightStored);
+  }, { timeout: 30_000 }).toBe(true);
+  await expect.poll(storedPdfRaster, { timeout: 30_000 }).toEqual(lightStored);
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("dialog", { name: "Settings", exact: true })
@@ -2780,7 +2788,7 @@ test("darkens PDF content while preserving embedded picture colours and canonica
     const samples = await renderedPdfDisplaySamples(page);
     return samples?.background.every((channel) => channel > 225)
       && samples.vector.every((channel) => channel < 40);
-  }, { timeout: 15_000 }).toBe(true);
+  }, { timeout: 30_000 }).toBe(true);
   await expect.poll(() => page.evaluate(() => {
     const app = (window as unknown as {
       h?: {
@@ -2804,7 +2812,7 @@ test("darkens PDF content while preserving embedded picture colours and canonica
       sameId: cachedIds[0] === fileIds[0],
       width: image?.naturalWidth || image?.width || null,
     };
-  }), { timeout: 15_000 }).toEqual({
+  }), { timeout: 30_000 }).toEqual({
     cachedCount: 1,
     fileCount: 1,
     height: 1,
@@ -2883,7 +2891,7 @@ test("rejects an oversized embedded PDF image instead of importing a blank page"
   page.on("console", (message) => {
     if (message.type() === "warning") warnings.push(message.text());
   });
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "oversized-embedded-image.pdf",
     mimeType: "application/pdf",
     buffer: Buffer.from(await oversizedEmbeddedImagePdfBytes()),
@@ -2898,7 +2906,7 @@ test("rejects an oversized embedded PDF image instead of importing a blank page"
 });
 
 test("rejects an oversized inline PDF image instead of importing a blank page", async ({ page }) => {
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "oversized-inline-image.pdf",
     mimeType: "application/pdf",
     buffer: Buffer.from(await oversizedInlineImagePdfBytes()),
@@ -2912,7 +2920,7 @@ test("rejects an oversized inline PDF image instead of importing a blank page", 
 });
 
 test("allows an unpainted oversized PDF image resource", async ({ page }) => {
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "unused-oversized-image.pdf",
     mimeType: "application/pdf",
     buffer: Buffer.from(await oversizedEmbeddedImagePdfBytes(false)),
@@ -2927,7 +2935,7 @@ test("merges and synchronizes feature preferences across open tabs", async ({ pa
   const secondPage = await page.context().newPage();
   try {
     await secondPage.goto("/");
-    await expect(secondPage.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+    await expect(secondPage.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
     await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
     await expect(secondPage.getByText("Saved locally", { exact: true })).toBeVisible();
 
@@ -3016,7 +3024,7 @@ test("merges and synchronizes feature preferences across open tabs", async ({ pa
 test("opens legacy .canvasclassroom project archives", async ({ page }) => {
   await openClassroomFixture(page, [], [], "legacy-project.canvasclassroom");
   await expect(page).toHaveTitle("PatterDraw");
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
 });
 
 test("hydrates changed content when a replacement reuses project and scene IDs", async ({ page }) => {
@@ -3175,7 +3183,7 @@ test("retries the latest dirty title during a real page reload", async ({ page }
   page.once("dialog", (dialog) => void dialog.accept());
   await page.reload();
 
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await expect(page.getByRole("textbox", { name: "Project title" }))
     .toHaveValue("Real page teardown autosave");
 });
@@ -3313,7 +3321,7 @@ test("pauses a stale tab instead of overwriting a newer cross-tab autosave", asy
   const secondPage = await page.context().newPage();
   try {
     await secondPage.goto(page.url());
-    await expect(secondPage.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+    await expect(secondPage.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
     await expect(secondPage.getByText("Saved locally", { exact: true })).toBeVisible();
 
     await page.evaluate(() => {
@@ -3571,7 +3579,7 @@ test("retries a failed replacement autosave without restoring the old project", 
     };
   });
 
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "replacement.excalidraw",
     mimeType: "application/json",
     buffer: Buffer.from(JSON.stringify({
@@ -3689,7 +3697,7 @@ test("rejects imported relative image sources without issuing a request", async 
     scale: [1, 1],
   };
 
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "relative-image-probe.excalidraw",
     mimeType: "application/json",
     buffer: Buffer.from(JSON.stringify({
@@ -3738,7 +3746,7 @@ test("rejects an oversized native Excalidraw image before hydration or autosave"
     status: "saved",
     scale: [1, 1],
   };
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "oversized-native-image.excalidraw",
     mimeType: "application/json",
     buffer: Buffer.from(JSON.stringify({
@@ -3778,7 +3786,7 @@ test("preserves a legitimate image that uses the former dark-preview file ID", a
   };
   const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "legacy-dark-preview-id.excalidraw",
     mimeType: "application/json",
     buffer: Buffer.from(JSON.stringify({
@@ -3868,7 +3876,7 @@ test("imports and exports standard Excalidraw libraries without online controls"
   )?.length).toBe(1);
 
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   ({ panel } = await openLibraryPanel(page));
   const restoredItem = panel.locator(".library-unit__active").first();
   await expect(restoredItem.locator(".library-unit__dragger svg")).toBeVisible();
@@ -3938,7 +3946,7 @@ test("persists reusable items separately from PatterDraw projects", async ({ pag
     }
   });
   const source = exportTestRectangle("library-source-rectangle", 260, 180, 180, 120, "a0");
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "library-source.excalidraw",
     mimeType: "application/json",
     buffer: Buffer.from(JSON.stringify({
@@ -3972,7 +3980,7 @@ test("persists reusable items separately from PatterDraw projects", async ({ pag
   }).toEqual({ title: "Library project round trip", rectangles: 1 });
 
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await expect(page.getByRole("textbox", { name: "Project title" })).toHaveValue("Library project round trip");
   ({ panel, trigger } = await openLibraryPanel(page));
   const storedItem = panel.locator(".library-unit__active:not(:has(.library-unit__adder))").first();
@@ -4001,8 +4009,8 @@ test("persists reusable items separately from PatterDraw projects", async ({ pag
     "patterdraw:autosave:project:v1",
   ]);
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
-  await page.locator('input[type="file"]').setInputFiles({
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await page.getByLabel("Open project file").setInputFiles({
     name: projectDownload.suggestedFilename(),
     mimeType: "application/octet-stream",
     buffer: projectBytes,
@@ -4060,7 +4068,7 @@ test("captures areas to the clipboard and persists Screenshot Library actions", 
     });
   });
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
 
   let { panel, trigger } = await openScreenshotLibrary(page);
   await panel.getByRole("button", { name: "Capture area", exact: true }).click();
@@ -4111,7 +4119,7 @@ test("captures areas to the clipboard and persists Screenshot Library actions", 
   expect(pngDimensions(await downloadBytes(download))).toEqual({ width: 480, height: 320 });
 
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   ({ panel } = await openScreenshotLibrary(page));
   await expect(panel.locator(".screenshot-card")).toHaveCount(1);
   await panel.getByRole("button", { name: /^Delete screenshot captured/ }).click();
@@ -4146,7 +4154,7 @@ test("keeps denied clipboard captures and inserts them as one undoable project i
     });
   });
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
 
   await captureScreenshotArea(page, { x: 300, y: 220 }, { x: 520, y: 360 });
   await expect.poll(() => storedScreenshotSummary(page)).toMatchObject({ count: 1 });
@@ -4183,8 +4191,8 @@ test("keeps denied clipboard captures and inserts them as one undoable project i
     "patterdraw:autosave:project:v1",
   ]);
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
-  await page.locator('input[type="file"]').setInputFiles({
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await page.getByLabel("Open project file").setInputFiles({
     name: projectDownload.suggestedFilename(),
     mimeType: "application/octet-stream",
     buffer: projectBytes,
@@ -4206,7 +4214,7 @@ test("exports the exact board rectangle without separated off-selection objects 
     ...exportTestRectangle("excluded-red", 800, 200, 120, 80, "a1"),
     backgroundColor: "#ff8787",
   };
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "separated-screenshot-objects.excalidraw",
     mimeType: "application/json",
     buffer: Buffer.from(JSON.stringify({
@@ -4306,7 +4314,7 @@ test("captures with touch pointer events and click-inserts at 390 by 844", async
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   const { panel } = await openScreenshotLibrary(page);
   await panel.getByRole("button", { name: "Capture area", exact: true }).click();
   const overlay = page.getByTestId("screenshot-capture-overlay");
@@ -4434,7 +4442,7 @@ test("strips canvas links and blocks external navigation", async ({ page }) => {
   expect(await page.evaluate(() => window.open("https://example.test/class-resource"))).toBeNull();
 
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await expect.poll(() => autosavedWebLink(page)).toEqual({
     link: null,
     blockedElementCount: 0,
@@ -4680,7 +4688,7 @@ test("toggles and persists the Morph slide transition", async ({ page }) => {
   await expect.poll(() => autosavedMorphSettings(page)).toEqual({ durationMs: 5_000, enabled: true });
 
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await page.getByRole("button", { name: "Slides", exact: true }).click();
   await openSlideSettings(page);
   await expect(page.getByRole("button", { name: "Morph", exact: true }))
@@ -4801,7 +4809,7 @@ test("requires Draw slide for each 16:9, 4:3, freeform, and touch slide", async 
   )).toBeCloseTo(16 / 9, 5);
 
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await page.getByRole("button", { name: "Slides", exact: true }).click();
   await openSlideSettings(page);
   await expect(page.locator("#slide-frame-aspect-options")).toHaveCount(0);
@@ -5439,7 +5447,7 @@ test("preserves custom slide names through reorder, PDF and PowerPoint export, a
   });
 
   await page.reload();
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "reordered-slides.patterdraw",
     mimeType: "application/vnd.patterdraw+zip",
     buffer: savedBytes,
@@ -5519,7 +5527,7 @@ test("deletes the selected slide frame while preserving its board content", asyn
   });
 
   await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await page.getByRole("button", { name: "Slides", exact: true }).click();
   await expect(page.locator(".slide-thumbnail")).toHaveCount(0);
   await expect.poll(() => autosavedSlideDeletion(page)).toEqual({
@@ -5631,7 +5639,7 @@ test("previews existing content geometrically enclosed by a frame", async ({ pag
     customData: { classroomSlide: { kind: "slide", version: 1 } },
     index: "a2",
   };
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "frame-around-existing-content.excalidraw",
     mimeType: "application/json",
     buffer: Buffer.from(JSON.stringify({
@@ -5699,7 +5707,7 @@ test("fits the first slide after presentation layout opens", async ({ page }) =>
     customData: { classroomSlide: { kind: "slide", version: 1 } },
     index,
   });
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "presentation-first-fit.excalidraw",
     mimeType: "application/json",
     buffer: Buffer.from(JSON.stringify({
@@ -5813,7 +5821,7 @@ test("commits pending edits before presentation switches between project scenes"
     pdfPageOrder: [],
     pdfDocuments: {},
   };
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "presentation-scene-boundary.patterdraw",
     mimeType: "application/vnd.patterdraw+zip",
     buffer: Buffer.from(zipSync({ "project.json": strToU8(JSON.stringify(project)) })),
@@ -5977,7 +5985,7 @@ test("refreshes a PDF-active autosave back to the board without losing the PDF",
   await page.reload();
   await expect(page).toHaveTitle("PatterDraw");
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
   await expect(page.locator(".page-status")).toContainText("Board");
 
@@ -6015,7 +6023,7 @@ test("saves and resumes unusual PDF geometry with the original source intact", a
       : null;
   };
 
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "unusual-resume.pdf",
     mimeType: "application/pdf",
     buffer: Buffer.from(sourceBytes),
@@ -6051,7 +6059,7 @@ test("saves and resumes unusual PDF geometry with the original source intact", a
   await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1);
 
   await page.reload();
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "unusual-resume.patterdraw",
     mimeType: "application/vnd.patterdraw+zip",
     buffer: savedBytes,
@@ -6652,6 +6660,51 @@ test("uses the experimental one-shot lasso for live, additive, and cancellable s
   await dragOnBoard(page, { x: 650, y: 220 }, { x: 770, y: 320 });
   await expect.poll(() => autosavedRectanglePositions(page)).toHaveLength(2);
   const initial = await autosavedRectanglePositions(page);
+  const expectedRectangleIds = initial.map((position) => position.id);
+  const expectedSelectedRectangleIds = [...expectedRectangleIds].sort();
+  const liveSelectedElementIds = () => page.evaluate(() => {
+    const state = (window as unknown as {
+      h?: { app?: { state?: { selectedElementIds?: Record<string, boolean> } } };
+    }).h?.app?.state;
+    return Object.entries(state?.selectedElementIds || {})
+      .filter(([, selected]) => selected)
+      .map(([id]) => id)
+      .sort();
+  });
+  const liveRectangleViewportBounds = (id: string) => page.evaluate((elementId) => {
+    const app = (window as unknown as {
+      h?: {
+        app?: {
+          scene?: { getNonDeletedElements?: () => Array<{
+            id: string;
+            height: number;
+            width: number;
+            x: number;
+            y: number;
+          }> };
+          state?: {
+            offsetLeft?: number;
+            offsetTop?: number;
+            scrollX?: number;
+            scrollY?: number;
+            zoom?: { value?: number };
+          };
+        };
+      };
+    }).h?.app;
+    const element = app?.scene?.getNonDeletedElements?.().find((candidate) => candidate.id === elementId);
+    const state = app?.state;
+    if (!element || !state) throw new Error("The live lasso rectangle is unavailable.");
+    const zoom = state.zoom?.value || 1;
+    const left = (element.x + (state.scrollX || 0)) * zoom + (state.offsetLeft || 0);
+    const top = (element.y + (state.scrollY || 0)) * zoom + (state.offsetTop || 0);
+    return {
+      bottom: top + element.height * zoom,
+      left,
+      right: left + element.width * zoom,
+      top,
+    };
+  }, id);
 
   const openExtraTools = async () => {
     await page.locator(".App-toolbar__extra-tools-trigger").click();
@@ -6710,14 +6763,27 @@ test("uses the experimental one-shot lasso for live, additive, and cancellable s
   moved = await autosavedRectanglePositions(page);
   await openExtraTools();
   await page.getByTestId("toolbar-lasso").click();
+  const additiveOverlay = page.getByTestId("lasso-overlay");
+  await expect(additiveOverlay).toBeVisible();
+  await expect(additiveOverlay).toHaveAttribute("data-initial-selection-count", "1");
+  const additiveBounds = await liveRectangleViewportBounds(expectedRectangleIds[1]);
+  const additiveMargin = 30;
   await page.keyboard.down("Shift");
-  await page.mouse.move(host.x + 620, host.y + 190);
+  await page.mouse.move(additiveBounds.left - additiveMargin, additiveBounds.top - additiveMargin);
   await page.mouse.down();
-  await page.mouse.move(host.x + 800, host.y + 190, { steps: 4 });
-  await page.mouse.move(host.x + 800, host.y + 350, { steps: 4 });
-  await page.mouse.move(host.x + 620, host.y + 350, { steps: 4 });
+  await page.mouse.move(additiveBounds.right + additiveMargin, additiveBounds.top - additiveMargin, { steps: 4 });
+  await page.mouse.move(additiveBounds.right + additiveMargin, additiveBounds.bottom + additiveMargin, { steps: 4 });
+  await page.mouse.move(additiveBounds.left - additiveMargin, additiveBounds.bottom + additiveMargin, { steps: 4 });
   await page.mouse.up();
   await page.keyboard.up("Shift");
+  // Wait for the one-shot overlay to finish its synchronous selection update,
+  // restore Excalidraw focus, and unmount before sending the next editor key.
+  // The two earlier lasso phases already use this boundary; omitting it here
+  // allowed ArrowDown to race the final additive selection on a cold run.
+  await expect(page.getByTestId("lasso-overlay")).toHaveCount(0);
+  await expect.poll(liveSelectedElementIds).toEqual(expectedSelectedRectangleIds);
+  await expect(page.getByTestId("toolbar-selection")).toBeChecked();
+  await expect(page.locator(".editor-host .excalidraw")).toBeFocused();
   await page.keyboard.press("Shift+ArrowDown");
   await expect.poll(async () => {
     const positions = await autosavedRectanglePositions(page);
@@ -6728,7 +6794,6 @@ test("uses the experimental one-shot lasso for live, additive, and cancellable s
   await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
   await openExtraTools();
   await expect(page.getByTestId("toolbar-lasso")).toBeVisible();
-  const expectedRectangleIds = initial.map((position) => position.id);
   const beforeTouch = await waitForAutosavedRectangleSet(page, expectedRectangleIds);
   await page.getByTestId("toolbar-lasso").click();
   await expect(page.getByTestId("lasso-overlay")).toBeVisible();
@@ -7084,7 +7149,7 @@ test("configures, inserts, and persists the static advanced math-tool release", 
   expect(savedProject.byteLength).toBeGreaterThan(1_000);
 
   await page.reload();
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "advanced-static-math-tools.patterdraw",
     mimeType: "application/vnd.patterdraw+zip",
     buffer: savedProject,
@@ -7214,7 +7279,7 @@ test("batch-inserts independent fraction, algebra, integer, and probability mani
   expect(savedProject.byteLength).toBeGreaterThan(1_000);
 
   await page.reload();
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "advanced-manipulatives.patterdraw",
     mimeType: "application/vnd.patterdraw+zip",
     buffer: savedProject,
@@ -7515,7 +7580,10 @@ test("constructs compass and angle annotations with touch input on mobile", asyn
     if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== "http://127.0.0.1:5173") externalRequests.push(request.url());
   });
   await page.goto("/");
-  await page.locator(".editor-host .excalidraw").waitFor({ state: "visible" });
+  await page.locator(".editor-host .excalidraw").waitFor({
+    state: "visible",
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
   const editorBounds = await page.locator(".editor-host").boundingBox();
   if (!editorBounds) throw new Error("Editor host has no visible mobile bounds.");
 
@@ -7667,7 +7735,7 @@ test("keeps a PDF page's annotation badge current after navigating away", async 
 });
 
 test("waits for PDF scene hydration before exporting the full board", async ({ page }) => {
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "hydration-colours.pdf",
     mimeType: "application/pdf",
     buffer: Buffer.from(await colouredPdfBytes()),
@@ -7744,7 +7812,7 @@ test("waits for PDF scene hydration before opening native image export", async (
 });
 
 test("replays a user edit made during PDF scene hydration", async ({ page }) => {
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "hydration-edit.pdf",
     mimeType: "application/pdf",
     buffer: Buffer.from(await colouredPdfBytes()),
@@ -7790,10 +7858,19 @@ test("keeps the newest PDF open when an older import resolves later", async ({ p
   await page.route(workerRoute, async (route) => {
     workerRequests += 1;
     if (workerRequests === 1) await new Promise((resolve) => setTimeout(resolve, 1_500));
-    await route.continue();
+    try {
+      await route.continue();
+    } catch (error) {
+      // Superseding the older PDF intentionally aborts its worker request
+      // while this delayed route is pending. Playwright then owns the route;
+      // only that exact cancellation race is expected here.
+      if (!(error instanceof Error) || !error.message.includes("Route is already handled")) {
+        throw error;
+      }
+    }
   });
 
-  const input = page.locator('input[type="file"]');
+  const input = page.getByLabel("Open project file");
   const firstPdf = await PDFDocument.create();
   const firstPage = firstPdf.addPage([612, 792]);
   firstPage.drawRectangle({ x: 0, y: 0, width: 612, height: 792, color: rgb(1, 0, 0) });
@@ -7835,10 +7912,16 @@ test("keeps the latest PDF scene during rapid page switches", async ({ page }) =
   await page.keyboard.press("Escape");
   const pages = page.locator("#pdf-page-rail .pdf-page-item");
 
-  await pages.nth(1).click();
-  await pages.nth(2).click();
-  await pages.nth(0).click();
+  // Exercise several latest-intent transitions while the first dark render is
+  // still likely to be pending. The display-only raster must never re-enter
+  // Excalidraw while its single live scene is being hydrated.
+  for (let cycle = 0; cycle < 3; cycle += 1) {
+    await pages.nth(1).click();
+    await pages.nth(2).click();
+    await pages.nth(0).click();
+  }
 
+  await expect(page.getByTestId("patterdraw-fatal-screen")).toHaveCount(0);
   await expect(pages.nth(0)).toHaveClass(/is-selected/);
   await expect(page.locator(".page-status")).toContainText("Page 1 of 3");
   await expect.poll(() => pages.nth(0).locator("img").getAttribute("class"), { timeout: 30_000 })
@@ -8102,7 +8185,7 @@ test("reorders PDF output pages without changing their immutable source indexes"
     document.addPage([width, height]);
   }
   const bytes = await document.save();
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "reorder-pages.pdf",
     mimeType: "application/pdf",
     buffer: Buffer.from(bytes),
@@ -8218,7 +8301,7 @@ test("opens the official image export dialog with native controls and export sem
   const left = exportTestRectangle("left-object", 100, 120, 100, 80, "a0");
   const right = exportTestRectangle("right-object", 600, 120, 150, 100, "a1");
   await wrapperDialog.getByRole("button", { name: "Cancel", exact: true }).click();
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "native-image-export.excalidraw",
     mimeType: "application/json",
     buffer: Buffer.from(JSON.stringify({
@@ -8330,7 +8413,7 @@ test("uses native frame export behavior for a selected slide frame", async ({ pa
   };
   const inside = exportTestRectangle("inside-frame", 150, 140, 100, 80, "a0", "export-frame");
   const outside = exportTestRectangle("outside-frame", 700, 100, 200, 150, "a2");
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "selected-frame-export.excalidraw",
     mimeType: "application/json",
     buffer: Buffer.from(JSON.stringify({
@@ -8482,7 +8565,7 @@ test("adds a blank PDF page, reopens the project on Board, and exports it", asyn
   const savedBytes = Buffer.concat(savedChunks);
 
   await page.reload();
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "blank-page-roundtrip.patterdraw",
     mimeType: "application/vnd.patterdraw+zip",
     buffer: savedBytes,
@@ -8557,7 +8640,7 @@ test("deletes the selected PDF page without renumbering its source page", async 
   document.addPage([612, 792]);
   document.addPage([612, 792]);
   const bytes = await document.save();
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "delete-pages.pdf",
     mimeType: "application/pdf",
     buffer: Buffer.from(bytes),
@@ -8599,7 +8682,7 @@ test("deletes the selected PDF page without renumbering its source page", async 
   const savedBytes = Buffer.concat(savedChunks);
 
   await page.reload();
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "deleted-page-roundtrip.patterdraw",
     mimeType: "application/vnd.patterdraw+zip",
     buffer: savedBytes,

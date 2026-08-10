@@ -13,14 +13,16 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:release-isolation": "node scripts/test-package-release-isolation.mjs",
+    "test:release-tooling": "node --test deploy/release-inventory.test.mjs deploy/deploy-config-inventory.test.mjs && npm run test:release-isolation && node deploy/verify-config.mjs --config-only",
     "test:browser": "playwright test",
     "test:browser:production": "playwright test --config=playwright.production.config.ts",
     "test:watch": "vitest",
-    "release:package": "node scripts/package-release.mjs",
+    "release:package": "node scripts/package-release.mjs --build",
     "release:verify": "node scripts/package-release.mjs --verify",
     "check:safety": "node scripts/check-offline-safety.mjs",
     "check:browser-types": "tsc -p tsconfig.browser.json",
-    "check": "npm run test && npm run build && npm run check:browser-types && npm run check:safety"
+    "check": "npm run test && npm run test:release-tooling && npm run build && npm run check:browser-types && npm run check:safety"
   },
   "dependencies": {
     "@excalidraw/common": "0.18.0-e9c856d",

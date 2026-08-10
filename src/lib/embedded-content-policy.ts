@@ -1,3 +1,8 @@
+import {
+  MAX_CLIPBOARD_TEXT_BYTES,
+  assertImportTextBytes,
+} from "./structural-limits";
+
 /**
  * Embedded web content is deliberately disabled in the offline student build.
  *
@@ -36,6 +41,19 @@ export function isBlockedEmbeddedElementType(type: unknown): boolean {
 
 export function isSafeLocalImageClipboardType(type: unknown): boolean {
   return SAFE_LOCAL_IMAGE_CLIPBOARD_TYPES.has(normalizedClipboardMimeType(type));
+}
+
+/** Run in the capture phase, before Excalidraw JSON.parse/DOMParser work. */
+export function assertClipboardTextPayloadsWithinLimit(
+  plainText: string | undefined,
+  html: string | undefined,
+): void {
+  if (plainText) {
+    assertImportTextBytes(plainText, MAX_CLIPBOARD_TEXT_BYTES, "Clipboard text");
+  }
+  if (html) {
+    assertImportTextBytes(html, MAX_CLIPBOARD_TEXT_BYTES, "Clipboard HTML");
+  }
 }
 
 export function clipboardElementsContainBlockedContent(
@@ -87,26 +105,71 @@ export function installSafeClipboardReadGuard(): SafeClipboardReadGuard {
     return { installed: false, restore: () => undefined };
   }
   const ownDescriptor = Object.getOwnPropertyDescriptor(clipboard, "read");
+  const ownReadTextDescriptor = Object.getOwnPropertyDescriptor(clipboard, "readText");
   const originalRead = clipboard.read.bind(clipboard);
+  const originalReadText = typeof clipboard.readText === "function"
+    ? clipboard.readText.bind(clipboard)
+    : undefined;
   const guardedRead = async (): Promise<ClipboardItems> => {
     const items = await originalRead();
     return Promise.all(items.map(async (item) => {
-      if (!item.types.includes("text/html")) return item;
-      const withoutHtml = (): ClipboardItem => ({
-        types: item.types.filter((type) => type !== "text/html"),
-        getType: (type: string) => item.getType(type),
+      const blockedTypes = new Set<string>();
+      const withoutBlockedTypes = (): ClipboardItem => ({
+        types: item.types.filter((type) => !blockedTypes.has(type)),
+        getType: (type: string) => blockedTypes.has(type)
+          ? Promise.reject(new DOMException("Clipboard type is blocked by the offline content policy.", "NotAllowedError"))
+          : item.getType(type),
         presentationStyle: item.presentationStyle,
       }) as ClipboardItem;
-      let html: string;
-      try {
-        html = await (await item.getType("text/html")).text();
-      } catch {
-        return withoutHtml();
+
+      if (item.types.includes("text/plain")) {
+        try {
+          const plainBlob = await item.getType("text/plain");
+          if (plainBlob.size > MAX_CLIPBOARD_TEXT_BYTES) throw new Error("Clipboard text is too large.");
+          assertImportTextBytes(
+            await plainBlob.text(),
+            MAX_CLIPBOARD_TEXT_BYTES,
+            "Clipboard text",
+          );
+        } catch {
+          blockedTypes.add("text/plain");
+        }
       }
-      const hasImageFile = item.types.some(isSafeLocalImageClipboardType);
-      if (!clipboardHtmlContainsBlockedContent(html, hasImageFile)) return item;
-      return withoutHtml();
+
+      if (item.types.includes("text/html")) {
+        try {
+          const htmlBlob = await item.getType("text/html");
+          if (htmlBlob.size > MAX_CLIPBOARD_TEXT_BYTES) throw new Error("Clipboard HTML is too large.");
+          const html = await htmlBlob.text();
+          assertImportTextBytes(html, MAX_CLIPBOARD_TEXT_BYTES, "Clipboard HTML");
+          const hasImageFile = item.types.some(isSafeLocalImageClipboardType);
+          if (clipboardHtmlContainsBlockedContent(html, hasImageFile)) {
+            blockedTypes.add("text/html");
+          }
+        } catch {
+          blockedTypes.add("text/html");
+        }
+      }
+
+      return blockedTypes.size ? withoutBlockedTypes() : item;
     }));
+  };
+  const guardedReadText = originalReadText
+    ? async (): Promise<string> => {
+      const text = await originalReadText();
+      assertImportTextBytes(text, MAX_CLIPBOARD_TEXT_BYTES, "Clipboard text");
+      return text;
+    }
+    : undefined;
+  const restoreRead = () => {
+    if (clipboard.read !== guardedRead) return;
+    if (ownDescriptor) Object.defineProperty(clipboard, "read", ownDescriptor);
+    else Reflect.deleteProperty(clipboard, "read");
+  };
+  const restoreReadText = () => {
+    if (!guardedReadText || clipboard.readText !== guardedReadText) return;
+    if (ownReadTextDescriptor) Object.defineProperty(clipboard, "readText", ownReadTextDescriptor);
+    else Reflect.deleteProperty(clipboard, "readText");
   };
   try {
     Object.defineProperty(clipboard, "read", {
@@ -114,15 +177,23 @@ export function installSafeClipboardReadGuard(): SafeClipboardReadGuard {
       value: guardedRead,
       writable: true,
     });
+    if (guardedReadText) {
+      Object.defineProperty(clipboard, "readText", {
+        configurable: true,
+        value: guardedReadText,
+        writable: true,
+      });
+    }
   } catch {
+    restoreReadText();
+    restoreRead();
     return { installed: false, restore: () => undefined };
   }
   return {
     installed: true,
     restore: () => {
-      if (clipboard.read !== guardedRead) return;
-      if (ownDescriptor) Object.defineProperty(clipboard, "read", ownDescriptor);
-      else Reflect.deleteProperty(clipboard, "read");
+      restoreReadText();
+      restoreRead();
     },
   };
 }
