@@ -138,6 +138,16 @@ requireMatch(nginx, /server_name draw\.spatterson\.ca;/, "NGINX must recognize o
 requireMatch(nginx, /return 444;/, "NGINX must reject unknown Host headers.");
 requireMatch(nginx, /add_header Cache-Control "no-store" always;/, "NGINX must keep the entry point uncached.");
 requireMatch(nginx, /max-age=31536000, immutable/, "NGINX must cache hashed assets immutably.");
+requireMatch(
+  nginx,
+  /location @asset_not_found[\s\S]*?max-age=0, must-revalidate[\s\S]*?return 404;/,
+  "NGINX must keep missing hashed assets revalidating instead of caching their 404 immutably.",
+);
+requireMatch(
+  nginx,
+  /error_page 404 = @asset_not_found;/,
+  "NGINX hashed-asset misses must use the non-immutable 404 policy.",
+);
 requireMatch(nginx, /try_files \$uri =404;/, "NGINX must fail closed for missing static assets.");
 
 for (const requiredHeader of [
