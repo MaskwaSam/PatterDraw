@@ -136,12 +136,22 @@ requireMatch(dockerfile, /"dirty"/, "The image build must reject dirty release p
 requireMatch(nginx, /listen 8080 default_server;/, "NGINX must have a rejecting default server.");
 requireMatch(nginx, /server_name draw\.spatterson\.ca;/, "NGINX must recognize only the draw hostname.");
 requireMatch(nginx, /return 444;/, "NGINX must reject unknown Host headers.");
-requireMatch(nginx, /add_header Cache-Control "no-store" always;/, "NGINX must keep the entry point uncached.");
+for (const [routeName, routePattern] of [
+  ["root", /location = \/ \{[^}]*add_header Cache-Control "no-store, no-transform" always;[^}]*\}/],
+  ["direct index", /location = \/index\.html \{[^}]*add_header Cache-Control "no-store, no-transform" always;[^}]*\}/],
+  ["SPA fallback", /location @patterdraw_app \{[^}]*add_header Cache-Control "no-store, no-transform" always;[^}]*\}/],
+]) {
+  requireMatch(
+    nginx,
+    routePattern,
+    `NGINX must keep the ${routeName} HTML response uncached and prevent proxy-side script injection.`,
+  );
+}
 requireMatch(nginx, /max-age=31536000, immutable/, "NGINX must cache hashed assets immutably.");
 requireMatch(
   nginx,
-  /location @asset_not_found[\s\S]*?max-age=0, must-revalidate[\s\S]*?return 404;/,
-  "NGINX must keep missing hashed assets revalidating instead of caching their 404 immutably.",
+  /location @asset_not_found[\s\S]*?add_header Cache-Control "no-store" always;[\s\S]*?return 404;/,
+  "NGINX must prevent missing hashed-asset responses from being cached.",
 );
 requireMatch(
   nginx,

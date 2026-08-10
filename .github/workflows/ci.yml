@@ -197,6 +197,17 @@ jobs:
           }
           assert_security_headers artifacts/production/deploy-root-headers.txt
           grep -qi 'Cache-Control: no-store' artifacts/production/deploy-root-headers.txt
+          grep -qi 'Cache-Control: no-store, no-transform' artifacts/production/deploy-root-headers.txt
+
+          for html_path in /index.html /classroom/deployment-acceptance; do
+            "${client[@]}" -c \
+              "wget -S -O /dev/null --header='Host: draw.spatterson.ca' 'http://patterdraw:8080$html_path' 2>&1" \
+              > artifacts/production/deploy-html-route-headers.txt
+            grep -q 'HTTP/1.1 200' artifacts/production/deploy-html-route-headers.txt
+            assert_security_headers artifacts/production/deploy-html-route-headers.txt
+            grep -qi 'Cache-Control: no-store, no-transform' \
+              artifacts/production/deploy-html-route-headers.txt
+          done
 
           set +e
           "${client[@]}" -c \
@@ -219,7 +230,7 @@ jobs:
           test "$missing_status" -ne 0
           grep -q 'HTTP/1.1 404' artifacts/production/deploy-missing-headers.txt
           assert_security_headers artifacts/production/deploy-missing-headers.txt
-          grep -qi 'Cache-Control: public, max-age=0, must-revalidate' \
+          grep -qi 'Cache-Control: no-store' \
             artifacts/production/deploy-missing-headers.txt
 
           if "${client[@]}" -c \

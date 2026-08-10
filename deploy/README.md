@@ -82,14 +82,14 @@ Before adding a public hostname:
 - create or reuse only the dedicated `patterdraw_edge` network, attach the existing connector to it without disconnecting its site network, and confirm PatterDraw has no membership in `spatterson-site_default`;
 - confirm it is non-root, read-only, capability-free, resource-bounded, log-bounded, and has no host port;
 - from the connector's actual Docker network, require `Host: draw.spatterson.ca` to return the app and an arbitrary Host to return no usable response;
-- require GET/HEAD-only behavior, `404` for missing or traversal-like assets, `no-store` on `index.html`, immutable caching only for hashed `assets/`, CSP/HSTS/nosniff/frame protections, and no remote browser requests;
+- require GET/HEAD-only behavior, uncached `404` responses for missing or traversal-like assets, `no-store, no-transform` on every HTML entry/fallback path, immutable caching only for existing hashed `assets/`, and CSP/HSTS/nosniff/frame protections;
 - restart only PatterDraw and prove health returns without touching the main site or connector.
 
 ## Cutover and acceptance
 
 Only after the private origin passes, replace the captured `draw` behavior with one Cloudflare Tunnel Published application route whose Service URL is `http://patterdraw:8080`. Resolve only an exact conflicting `draw` record and remove only the confirmed hostname-scoped redirect behavior.
 
-Acceptance requires public HTTPS `200` for the PatterDraw entry point, a valid certificate, expected security/cache headers, a working board and local persistence, no redirect to Moodle, and no remote application requests. Recheck that `https://spatterson.ca`, `https://www.spatterson.ca`, `https://mesconline.ca`, the standalone connector, email DNS, and router TCP 443 ownership are unchanged.
+Acceptance requires public HTTPS `200` for the PatterDraw entry point, a valid certificate, expected security/cache headers, a working board and local persistence, no redirect to Moodle, and no remote application requests. The final edge must preserve `Cache-Control: no-store, no-transform` on HTML and must not inject an analytics beacon. Recheck that `https://spatterson.ca`, `https://www.spatterson.ca`, `https://mesconline.ca`, the standalone connector, email DNS, and router TCP 443 ownership are unchanged.
 
 ## Image rollback checkpoint
 
