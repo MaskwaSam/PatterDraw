@@ -94,7 +94,10 @@ jobs:
         run: |
           set -o pipefail
           production_diag_dir="$RUNNER_TEMP/patterdraw-production"
+          printf 'stale build probe\n' > dist/stale-release-probe.js
           npm run release:package 2>&1 | tee "$production_diag_dir/package.log"
+          test ! -e dist/stale-release-probe.js
+          test ! -e dist/release/stale-release-probe.js
           sha256sum dist/release/release-manifest.json dist/release/provenance.json dist/release/sbom.cdx.json dist/release/SHA256SUMS > "$production_diag_dir/release-first.sha256"
           npm run release:package 2>&1 | tee "$production_diag_dir/package-repeat.log"
           sha256sum dist/release/release-manifest.json dist/release/provenance.json dist/release/sbom.cdx.json dist/release/SHA256SUMS > "$production_diag_dir/release-second.sha256"
@@ -114,19 +117,61 @@ jobs:
       - name: Start packaged release server
         if: ${{ always() && steps.production-package.outcome == 'success' }}
         run: |
+          set -euo pipefail
           node scripts/serve-production-dist.mjs --dist dist/release --host 127.0.0.1 --port 4174 > artifacts/production/server.log 2>&1 &
-          echo "$!" > artifacts/production/server.pid
+          server_pid=$!
+          echo "$server_pid" > artifacts/production/server.pid
+          expected_manifest_sha=$(sha256sum dist/release/release-manifest.json | awk '{print $1}')
+          printf '%s\n' "$expected_manifest_sha" > artifacts/production/expected-release-manifest.sha256
+          # Give an EADDRINUSE failure time to terminate before any existing
+          # listener can satisfy the HTTP readiness probe.
+          sleep 1
           for attempt in $(seq 1 30); do
-            if curl --fail --silent --show-error http://127.0.0.1:4174/classroom/math/unit-01/patterdraw/ > /dev/null; then
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              cat artifacts/production/server.log
+              echo "The recorded packaged release server exited before readiness." >&2
+              exit 1
+            fi
+            if curl --fail --silent --show-error \
+              http://127.0.0.1:4174/classroom/math/unit-01/patterdraw/release-manifest.json \
+              --output artifacts/production/served-release-manifest.json; then
+              served_manifest_sha=$(sha256sum artifacts/production/served-release-manifest.json | awk '{print $1}')
+              if [ "$served_manifest_sha" != "$expected_manifest_sha" ]; then
+                echo "The listening server does not match the packaged release manifest." >&2
+                exit 1
+              fi
+              kill -0 "$server_pid"
               exit 0
             fi
             sleep 1
           done
           cat artifacts/production/server.log
           exit 1
-      - name: Run production browser evidence
+      - id: production-browser
+        name: Run production browser evidence
         if: ${{ always() && steps.production-package.outcome == 'success' }}
-        run: PW_PRODUCTION_REUSE_SERVER=1 npm run test:browser:production
+        run: |
+          set -euo pipefail
+          server_pid=$(cat artifacts/production/server.pid)
+          expected_manifest_sha=$(cat artifacts/production/expected-release-manifest.sha256)
+          verify_served_release() {
+            phase=$1
+            kill -0 "$server_pid"
+            curl --fail --silent --show-error \
+              http://127.0.0.1:4174/classroom/math/unit-01/patterdraw/release-manifest.json \
+              --output "artifacts/production/served-release-manifest-${phase}.json"
+            served_manifest_sha=$(sha256sum "artifacts/production/served-release-manifest-${phase}.json" | awk '{print $1}')
+            test "$served_manifest_sha" = "$expected_manifest_sha"
+          }
+          verify_served_release before-browser
+          browser_status=0
+          PW_PRODUCTION_REUSE_SERVER=1 npm run test:browser:production || browser_status=$?
+          verify_served_release after-browser
+          exit "$browser_status"
+      - id: production-postverify
+        name: Verify browser tests preserved the release artifact
+        if: ${{ always() && steps.production-package.outcome == 'success' }}
+        run: npm run release:verify 2>&1 | tee artifacts/production/release-postverify.log
       - name: Stop packaged release server
         if: ${{ always() }}
         run: |
@@ -142,6 +187,13 @@ jobs:
             test-results/production/
             playwright-report/production/
             artifacts/production/
-            dist/release/
           if-no-files-found: warn
+          retention-days: 14
+      - name: Upload verified production release
+        if: ${{ steps.production-package.outcome == 'success' && steps.production-browser.outcome == 'success' && steps.production-postverify.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: patterdraw-release-${{ github.run_id }}
+          path: dist/release/
+          if-no-files-found: error
           retention-days: 14

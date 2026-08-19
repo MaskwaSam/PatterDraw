@@ -71,11 +71,13 @@ vi.stubGlobal("Path2D", class Path2D {});
 vi.stubGlobal("ImageData", class ImageData {});
 const { canonicalizePersistedWrapperTool } = await import("./lib/safety");
 const {
+  darkPdfDisplaySceneIsCurrent,
   hydrationChangesMatch,
   presentationInkPointerDownIsCurrent,
   presentationInkStrokeIsCurrent,
   preservePendingScenePersistence,
   prefersReducedMotion,
+  readBoundedProjectFileBytes,
   sceneOperationIsCurrent,
   startupLoadGenerationIsCurrent,
 } = await import("./App");
@@ -219,6 +221,28 @@ describe("startup autosave load fencing", () => {
   });
 });
 
+describe("project file allocation boundary", () => {
+  it("rejects an oversized project before arrayBuffer is called", async () => {
+    const arrayBuffer = vi.fn(async () => new ArrayBuffer(0));
+    const oversizedFile = {
+      size: Number.MAX_SAFE_INTEGER,
+      arrayBuffer,
+    } as unknown as Blob;
+
+    await expect(readBoundedProjectFileBytes(oversizedFile)).rejects.toThrow(
+      "Project file is larger than",
+    );
+    expect(arrayBuffer).not.toHaveBeenCalled();
+  });
+
+  it("returns bytes for a project within the limit", async () => {
+    const source = Uint8Array.from([80, 65, 84, 84, 69, 82]);
+    const file = new Blob([source]);
+
+    await expect(readBoundedProjectFileBytes(file)).resolves.toEqual(source);
+  });
+});
+
 describe("delayed scene operation fencing", () => {
   const operation = {
     projectId: "project-a",
@@ -237,6 +261,32 @@ describe("delayed scene operation fencing", () => {
     { ...operation, cancelled: true },
   ])("rejects a stale callback (%s)", (current) => {
     expect(sceneOperationIsCurrent(operation, current)).toBe(false);
+  });
+});
+
+describe("dark PDF display hydration guard", () => {
+  it("allows display updates only after the active scene is the hydrated editor scene", () => {
+    expect(darkPdfDisplaySceneIsCurrent(
+      "scene-b",
+      "scene-b",
+      "scene-b",
+      false,
+    )).toBe(true);
+  });
+
+  it.each([
+    { active: "scene-a", hydrated: "scene-b", switching: false },
+    { active: "scene-b", hydrated: "scene-a", switching: false },
+    { active: "scene-b", hydrated: "scene-b", switching: true },
+    { active: null, hydrated: "scene-b", switching: false },
+    { active: "scene-b", hydrated: null, switching: false },
+  ])("rejects an update across an unsettled scene boundary (%s)", ({ active, hydrated, switching }) => {
+    expect(darkPdfDisplaySceneIsCurrent(
+      "scene-b",
+      active,
+      hydrated,
+      switching,
+    )).toBe(false);
   });
 });
 

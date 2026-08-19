@@ -7,6 +7,7 @@ import {
   sanitizeProject,
   sanitizeScene,
 } from "./safety";
+import { MAX_STRUCTURAL_DEPTH } from "./structural-limits";
 import { MATH_TOOL_CATALOGUE } from "./math-tools/catalogue";
 
 const scene = (elements: readonly Record<string, unknown>[]): SerializedScene => ({
@@ -61,6 +62,18 @@ const pdfScene = (id: string, pageIndex: number): SerializedScene => ({
 });
 
 describe("student safety", () => {
+  it("rejects a deeply nested scene before sanitizeScene can clone it", () => {
+    let nested: Record<string, unknown> = { leaf: true };
+    for (let index = 0; index < MAX_STRUCTURAL_DEPTH + 1; index += 1) {
+      nested = { next: nested };
+    }
+    expect(() => sanitizeScene(scene([{
+      id: "deep",
+      type: "rectangle",
+      customData: nested,
+    }]))).toThrow(/maximum structural depth/);
+  });
+
   it.each([
     "Untitled classroom canvas",
     "Untitled PatterDraw project",

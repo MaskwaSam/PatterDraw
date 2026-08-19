@@ -136,12 +136,23 @@ export function ProjectFindPanel({
   const handlePanelKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     // Result buttons and the canvas-search action are descendants of the
     // Excalidraw container too. Keep their keyboard events out of the editor
-    // bubble path while preserving the native button activation default.
+    // bubble path and activate buttons explicitly so Enter/Space behavior is
+    // identical in Chromium, Firefox, and WebKit.
     // The input handles its own keydown above.
     event.stopPropagation();
     if (event.key === "Escape") {
       event.preventDefault();
       onClose();
+      return;
+    }
+    const isButtonActivation = event.key === "Enter"
+      || event.key === " "
+      || event.key === "Space"
+      || event.key === "Spacebar"
+      || event.code === "Space";
+    if (isButtonActivation && event.target instanceof HTMLButtonElement) {
+      event.preventDefault();
+      event.target.click();
     }
   };
 

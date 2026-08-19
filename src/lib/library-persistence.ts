@@ -12,12 +12,23 @@ import {
   PERSONAL_LIBRARY_KEY,
 } from "./storage-budget";
 import { isBlockedEmbeddedElementType } from "./embedded-content-policy";
+import {
+  MAX_NATIVE_LIBRARY_BLOB_BYTES,
+  MAX_NATIVE_LIBRARY_TEXT_BYTES,
+  assertImportBlobBytes,
+  assertImportTextBytes,
+  assertLibraryStructure,
+} from "./structural-limits";
 
 let observedLibrary: AuxiliaryObservation | undefined;
 
 type LibraryElement = LibraryItems[number]["elements"][number];
 
 export function sanitizeLibraryItems(libraryItems: LibraryItems): LibraryItems {
+  // Do not let a malformed or pathological library reach even this shallow
+  // sanitizer. Native file paths use the same helper before Excalidraw's
+  // dependency parser; stored paths use it before restoreLibraryItems below.
+  assertLibraryStructure(libraryItems, { label: "Library" });
   let changed = false;
   const safeItems: LibraryItems[number][] = [];
   for (const item of libraryItems) {
@@ -58,10 +69,48 @@ export function sanitizeLibraryItems(libraryItems: LibraryItems): LibraryItems {
   return changed ? safeItems : libraryItems;
 }
 
+/**
+ * Parse a user-selected Excalidraw library behind wrapper-owned byte and
+ * structure gates. This deliberately replaces Excalidraw's native library
+ * chooser path, whose parser otherwise restores the entire untrusted graph
+ * before PatterDraw receives onLibraryChange.
+ */
+export async function loadSafeLibraryFromBlob(blob: Blob): Promise<LibraryItems> {
+  assertImportBlobBytes(blob, MAX_NATIVE_LIBRARY_BLOB_BYTES, "Personal library file");
+  const text = await blob.text();
+  assertImportTextBytes(text, MAX_NATIVE_LIBRARY_TEXT_BYTES, "Personal library file");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    throw new Error("The personal library file is not valid JSON.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("The personal library file is invalid.");
+  }
+  const record = parsed as Record<string, unknown>;
+  if (
+    record.type !== "excalidrawlib"
+    || (record.version !== 1 && record.version !== 2)
+  ) {
+    throw new Error("The personal library file is invalid.");
+  }
+  const imported = record.libraryItems ?? record.library;
+  if (!Array.isArray(imported)) {
+    throw new Error("The personal library file has no library items.");
+  }
+  assertLibraryStructure(imported, { label: "Personal library file" });
+  const restored = restoreLibraryItems(imported as LibraryItems_anyVersion, "unpublished");
+  return sanitizeLibraryItems(restored);
+}
+
 async function restoreSafeLibraryItems(
   stored: LibraryItems_anyVersion,
   source: AuxiliaryObservation["source"],
 ): Promise<LibraryItems> {
+  // This must remain before observation/fingerprinting and, most importantly,
+  // before Excalidraw's migration/restore walk.
+  assertLibraryStructure(stored, { label: "Saved personal library" });
   observedLibrary = observationForValue(stored, source);
   const restored = restoreLibraryItems(stored, "unpublished");
   const safe = sanitizeLibraryItems(restored);
@@ -75,6 +124,7 @@ export async function loadLibraryItems(): Promise<LibraryItems> {
   if (current !== undefined && current !== null) {
     try {
       if (!Array.isArray(current)) throw new Error("The saved personal library is invalid.");
+      assertLibraryStructure(current, { label: "Saved personal library" });
       return await restoreSafeLibraryItems(current as LibraryItems_anyVersion, "canonical");
     } catch (error) {
       // A partially written/corrupt canonical value must not hide a valid
@@ -87,6 +137,7 @@ export async function loadLibraryItems(): Promise<LibraryItems> {
   if (legacy !== undefined && legacy !== null) {
     try {
       if (!Array.isArray(legacy)) throw new Error("The saved personal library is invalid.");
+      assertLibraryStructure(legacy, { label: "Saved personal library" });
       return await restoreSafeLibraryItems(legacy as LibraryItems_anyVersion, "legacy");
     } catch (error) {
       observedLibrary = undefined;
@@ -103,6 +154,7 @@ export async function loadLibraryItems(): Promise<LibraryItems> {
 }
 
 export async function saveLibraryItems(libraryItems: LibraryItems): Promise<void> {
+  assertLibraryStructure(libraryItems, { label: "Library" });
   const safeLibraryItems = sanitizeLibraryItems(libraryItems);
   await enqueueAuxiliaryMutation(async () => {
     const observation = await commitAuxiliaryStorage({

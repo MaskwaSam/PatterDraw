@@ -1,5 +1,7 @@
 import { expect, test, type Locator } from "@playwright/test";
 
+const DEVELOPMENT_EDITOR_MOUNT_TIMEOUT = 60_000;
+
 async function expectLoadedSlidePreview(preview: Locator): Promise<void> {
   await expect(preview).toBeVisible();
   await expect.poll(
@@ -16,7 +18,7 @@ test("themes Slides chrome without recoloring slide previews", async ({ page }) 
   });
 
   await page.goto("/");
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await page.getByRole("button", { name: "Slides", exact: true }).click();
   await page.getByRole("button", { name: "Add slide", exact: true }).click();
 

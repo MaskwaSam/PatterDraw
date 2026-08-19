@@ -10,6 +10,10 @@
   --muted: #687287;
   --panel: #ffffff;
   --workspace: #f3f5f8;
+  --safe-area-top: env(safe-area-inset-top, 0px);
+  --safe-area-right: env(safe-area-inset-right, 0px);
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-left: env(safe-area-inset-left, 0px);
 }
 
 * { box-sizing: border-box; }
@@ -20,9 +24,10 @@ button { color: inherit; }
 .app-shell {
   width: 100%;
   height: 100%;
+  height: 100dvh;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: 58px minmax(0, 1fr);
+  grid-template-rows: calc(58px + var(--safe-area-top)) minmax(0, 1fr);
   background: var(--workspace);
 }
 .app-shell.is-slide-mode { grid-template-columns: 224px minmax(0, 1fr); }
@@ -38,7 +43,7 @@ button { color: inherit; }
   align-items: center;
   gap: 16px;
   min-width: 0;
-  padding: 0 14px;
+  padding: var(--safe-area-top) calc(14px + var(--safe-area-right)) 0 calc(14px + var(--safe-area-left));
   background: #fff;
   border-bottom: 1px solid var(--border);
   z-index: 20;
@@ -659,7 +664,7 @@ button { color: inherit; }
   position: fixed;
   z-index: 70;
   top: 0;
-  right: 12px;
+  right: calc(12px + var(--safe-area-right));
   width: 40px;
   height: 30px;
   display: grid;
@@ -679,8 +684,8 @@ button { color: inherit; }
 .footer-show {
   position: fixed;
   z-index: 70;
-  right: 12px;
-  bottom: 0;
+  right: calc(12px + var(--safe-area-right));
+  bottom: var(--safe-area-bottom);
   width: 40px;
   height: 30px;
   display: grid;
@@ -701,7 +706,7 @@ button { color: inherit; }
   position: absolute;
   z-index: 40;
   top: 10px;
-  left: 10px;
+  left: calc(10px + var(--safe-area-left));
   width: 36px;
   height: 36px;
   display: grid;
@@ -714,6 +719,7 @@ button { color: inherit; }
   box-shadow: 0 3px 10px rgb(15 23 42 / 14%);
   cursor: pointer;
 }
+.is-nav-hidden .slide-rail-show-floating { top: calc(10px + var(--safe-area-top)); }
 .slide-rail-show-floating:hover { border-color: #8fa1ba; background: #fff; }
 .slide-rail-show-floating:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .slide-rail-show-floating svg { width: 18px; height: 18px; }
@@ -805,7 +811,7 @@ button { color: inherit; }
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) 45px;
+  grid-template-rows: minmax(0, 1fr) calc(45px + var(--safe-area-bottom));
   background: var(--workspace);
   position: relative;
 }
@@ -817,6 +823,11 @@ button { color: inherit; }
 .editor-host { min-height: 0; position: relative; }
 .editor-host > .excalidraw { height: 100%; }
 .editor-host .excalidraw { --color-primary: #2859c5; --color-primary-darker: #204aa5; }
+/* Keep Excalidraw's mobile bottom island because it also exposes contextual
+   object actions. Offset its side tools from an iPhone landscape safe area. */
+.editor-host .excalidraw.excalidraw--mobile .mobile-misc-tools-container {
+  right: var(--safe-area-right);
+}
 .slide-frame-draw-overlay {
   position: absolute;
   z-index: 21;
@@ -1252,7 +1263,7 @@ button { color: inherit; }
   display: grid;
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  padding: 0 16px;
+  padding: 0 calc(16px + var(--safe-area-right)) var(--safe-area-bottom) calc(16px + var(--safe-area-left));
   border-top: 1px solid var(--border);
   background: #fff;
   font-size: 12px;
@@ -1795,7 +1806,8 @@ button { color: inherit; }
 .spinner { width: 20px; height: 20px; border: 2px solid #cbd5e7; border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .error-toast { position: fixed; z-index: 310; right: 18px; bottom: 58px; max-width: 440px; display: flex; align-items: center; gap: 16px; padding: 12px 13px; border: 1px solid #e8b6b6; border-radius: 8px; background: #fff7f7; color: #7d2525; box-shadow: 0 8px 30px rgb(80 20 20 / 16%); font-size: 13px; }
-.error-toast button { border: 0; background: transparent; color: #8d3030; font-size: 12px; font-weight: 700; cursor: pointer; }
+.error-toast span { min-width: 0; overflow-wrap: anywhere; }
+.error-toast button { flex: 0 0 auto; border: 0; background: transparent; color: #8d3030; font-size: 12px; font-weight: 700; cursor: pointer; }
 .autosave-recovery-banner {
   position: fixed;
   z-index: 250;
@@ -2364,7 +2376,12 @@ button { color: inherit; }
   .app-shell.is-slide-mode.is-slide-rail-hidden { grid-template-columns: minmax(0, 1fr); }
   .app-shell.is-pdf-mode { grid-template-columns: min(var(--pdf-rail-width, 224px), 42vw) minmax(0, 1fr); }
   .app-shell.is-pdf-mode.is-pdf-rail-hidden { grid-template-columns: minmax(0, 1fr); }
-  .topbar { grid-template-columns: minmax(145px, 1fr) auto auto; gap: 8px; padding-inline: 10px; }
+  .topbar {
+    grid-template-columns: minmax(145px, 1fr) auto auto;
+    gap: 8px;
+    padding-right: calc(10px + var(--safe-area-right));
+    padding-left: calc(10px + var(--safe-area-left));
+  }
   .brand-mark { width: 28px; height: 28px; }
   .file-actions > .topbar-action,
   .topbar-menu > .topbar-menu-trigger,
@@ -2391,7 +2408,10 @@ button { color: inherit; }
 }
 
 @media (max-width: 640px) {
-  .app-shell, .app-shell.is-slide-mode, .app-shell.is-pdf-mode { grid-template-columns: 1fr; grid-template-rows: 96px minmax(0, 1fr); }
+  .app-shell, .app-shell.is-slide-mode, .app-shell.is-pdf-mode {
+    grid-template-columns: 1fr;
+    grid-template-rows: calc(96px + var(--safe-area-top)) minmax(0, 1fr);
+  }
   .app-shell.is-nav-hidden,
   .app-shell.is-nav-hidden.is-slide-mode,
   .app-shell.is-nav-hidden.is-pdf-mode { grid-template-rows: 0 minmax(0, 1fr); }
@@ -2400,14 +2420,14 @@ button { color: inherit; }
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-rows: 50px 46px;
     gap: 0 8px;
-    padding: 0 8px;
+    padding: var(--safe-area-top) calc(8px + var(--safe-area-right)) 0 calc(8px + var(--safe-area-left));
   }
-  .autosave-recovery-banner { top: 108px; }
+  .autosave-recovery-banner { top: calc(108px + var(--safe-area-top)); }
   .autosave-recovery-actions { display: grid; }
   .autosave-recovery-actions button { width: 100%; }
   .probability-randomizer { gap: 7px; padding-left: 9px; }
   .probability-randomizer button { padding-inline: 9px; }
-  .topbar-show { top: 62px; right: auto; left: 50%; transform: translateX(-50%); }
+  .topbar-show { top: calc(62px + var(--safe-area-top)); right: auto; left: 50%; transform: translateX(-50%); }
   .topbar-document { grid-column: 1; grid-row: 1; }
   .file-actions { grid-column: 2; grid-row: 1; }
   .workspace-tabs { grid-column: 1 / -1; grid-row: 2; width: 100%; align-self: start; }
@@ -2421,14 +2441,17 @@ button { color: inherit; }
   .is-pdf-mode .pdf-page-rail {
     position: fixed;
     z-index: 45;
-    top: 96px;
+    top: calc(96px + var(--safe-area-top));
     bottom: 0;
     left: 0;
     display: grid;
     box-shadow: 8px 0 25px rgb(15 23 42 / 18%);
   }
   .is-nav-hidden.is-slide-mode .slide-rail,
-  .is-nav-hidden.is-pdf-mode .pdf-page-rail { top: 0; }
+  .is-nav-hidden.is-pdf-mode .pdf-page-rail {
+    top: 0;
+    padding-top: var(--safe-area-top);
+  }
   .is-slide-mode .slide-rail { width: min(260px, 82vw); }
   .is-slide-mode .slide-rail-heading { padding-inline: 12px 9px; }
   .is-slide-mode .slide-count { display: inline-block; }
@@ -2438,7 +2461,7 @@ button { color: inherit; }
   .slide-rail-backdrop {
     position: fixed;
     z-index: 44;
-    top: 96px;
+    top: calc(96px + var(--safe-area-top));
     right: 0;
     bottom: 0;
     left: min(260px, 82vw);
@@ -2449,13 +2472,19 @@ button { color: inherit; }
     cursor: default;
   }
   .is-nav-hidden .slide-rail-backdrop { top: 0; }
+  .is-pdf-mode .slide-rail-backdrop { left: min(var(--pdf-rail-width, 224px), 82vw); }
   .app-shell[data-theme="dark"] #slide-rail { box-shadow: 8px 0 28px rgb(0 0 0 / 48%); }
   .is-pdf-mode .pdf-page-rail { width: min(var(--pdf-rail-width, 224px), 82vw); }
+  .is-pdf-mode .pdf-rail-resize-handle { display: none; }
   .editor-region { grid-column: 1; grid-row: 2; }
   .is-slide-mode .editor-region,
   .is-pdf-mode .editor-region { grid-column: 1; }
   .file-actions .export-options-button { width: 27px; }
-  .statusbar { grid-template-columns: minmax(0, 1fr) auto; padding-inline: 8px; }
+  .statusbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding-right: calc(8px + var(--safe-area-right));
+    padding-left: calc(8px + var(--safe-area-left));
+  }
   .is-board-mode .statusbar,
   .is-slide-mode .statusbar,
   .is-pdf-mode .statusbar { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
@@ -2522,20 +2551,19 @@ button { color: inherit; }
   .screenshot-capture-cancel { top: 10px; right: 10px; }
 }
 
-/* At phone widths the full file-action set needs its own row. Keep every
-   action in the accessibility tree and use zero inter-action gaps so the
-   existing 34px targets fit inside a 320px viewport. The 390px layout above
-   remains unchanged. */
-@media (max-width: 359px) {
+/* Across current iPhone widths, keep all file actions visible while sharing
+   the first row between the document title and icon-only mode tabs. This
+   avoids both the old 142px header and title/action overlap at 360–430px. */
+@media (max-width: 439px) {
   .app-shell,
   .app-shell.is-slide-mode,
-  .app-shell.is-pdf-mode { grid-template-rows: 142px minmax(0, 1fr); }
+  .app-shell.is-pdf-mode { grid-template-rows: calc(96px + var(--safe-area-top)) minmax(0, 1fr); }
 
   .topbar {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: 50px 46px 46px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: 50px 46px;
     gap: 0;
-    padding: 0 8px;
+    padding: var(--safe-area-top) calc(8px + var(--safe-area-right)) 0 calc(8px + var(--safe-area-left));
     align-content: start;
   }
 
@@ -2552,7 +2580,7 @@ button { color: inherit; }
   }
 
   .file-actions {
-    grid-column: 1;
+    grid-column: 1 / -1;
     grid-row: 2;
     width: 100%;
     min-width: 0;
@@ -2562,11 +2590,46 @@ button { color: inherit; }
   }
 
   .workspace-tabs {
-    grid-column: 1;
-    grid-row: 3;
-    width: 100%;
+    grid-column: 2;
+    grid-row: 1;
+    width: auto;
+    align-self: center;
   }
-  .workspace-toggle { min-width: 0; padding-inline: 6px; }
+  .workspace-toggle { width: 32px; min-width: 0; padding: 0; justify-content: center; }
+  .workspace-toggle .icon-label { display: none; }
+}
+
+/* Short phone landscapes stay on one row to protect board height, but compact
+   the title and mode switcher enough to remain inside iPhone safe areas. */
+@media (min-width: 641px) and (max-width: 1000px) and (max-height: 500px) {
+  .topbar { grid-template-columns: minmax(60px, 1fr) auto auto; }
+  .topbar-document { gap: 6px; }
+  .brand-mark { display: none; }
+  .document-title { min-width: 0; padding-inline: 5px; }
+  .save-state { font-size: 0; }
+  .workspace-toggle { width: 32px; min-width: 0; padding: 0; justify-content: center; }
+  .workspace-toggle .icon-label { display: none; }
+}
+
+/* Excalidraw uses its mobile control layout both on narrow phones and on short
+   phone landscapes. In those layouts its bottom island owns history and
+   contextual object actions, so the wrapper footer becomes mode navigation
+   only. Board mode needs no second footer at all. */
+@media (max-width: 640px), (max-width: 1000px) and (max-height: 500px) {
+  .is-board-mode .editor-region { grid-template-rows: minmax(0, 1fr); }
+  .is-board-mode .statusbar { display: none; }
+  .is-board-mode .footer-show { display: none; }
+  .is-slide-mode .editor-region,
+  .is-pdf-mode .editor-region {
+    grid-template-rows: minmax(0, 1fr) calc(40px + var(--safe-area-bottom));
+  }
+  .is-footer-hidden.is-slide-mode .editor-region,
+  .is-footer-hidden.is-pdf-mode .editor-region { grid-template-rows: minmax(0, 1fr) 0; }
+  .is-slide-mode .statusbar,
+  .is-pdf-mode .statusbar { grid-template-columns: minmax(0, 1fr) auto; }
+  .footer-zoom-controls,
+  .footer-history-button,
+  .fullscreen-button { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

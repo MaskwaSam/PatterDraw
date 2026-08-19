@@ -17,10 +17,16 @@ vi.mock("@excalidraw/excalidraw", () => ({
 }));
 
 import {
+  loadSafeLibraryFromBlob,
   loadLibraryItems,
   sanitizeLibraryItems,
   saveLibraryItems,
 } from "./library-persistence";
+import {
+  MAX_LIBRARY_ITEMS,
+  MAX_NATIVE_LIBRARY_BLOB_BYTES,
+  MAX_STRUCTURAL_DEPTH,
+} from "./structural-limits";
 
 const restoredItems = [{
   id: "shape-library-item",
@@ -77,6 +83,46 @@ describe("personal library persistence", () => {
     getMock.mockResolvedValue({ libraryItems: [] });
 
     await expect(loadLibraryItems()).rejects.toThrow("saved personal library is invalid");
+    expect(restoreLibraryItemsMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized stored collection before Excalidraw restore", async () => {
+    const oversized = Array.from({ length: MAX_LIBRARY_ITEMS + 1 }, () => []);
+    getMock.mockResolvedValue(oversized);
+
+    await expect(loadLibraryItems()).rejects.toThrow(/items/);
+    expect(restoreLibraryItemsMock).not.toHaveBeenCalled();
+  });
+
+  it("bounds and validates a native library before Excalidraw restore", async () => {
+    restoreLibraryItemsMock.mockReturnValue(restoredItems);
+    const file = new Blob([JSON.stringify({
+      type: "excalidrawlib",
+      version: 2,
+      libraryItems: [[{ id: "safe-native-item", type: "rectangle" }]],
+    })], { type: "application/vnd.excalidrawlib+json" });
+
+    await expect(loadSafeLibraryFromBlob(file)).resolves.toBe(restoredItems);
+    expect(restoreLibraryItemsMock).toHaveBeenCalledOnce();
+
+    const oversized = {
+      size: MAX_NATIVE_LIBRARY_BLOB_BYTES + 1,
+      text: vi.fn(),
+    } as unknown as Blob;
+    await expect(loadSafeLibraryFromBlob(oversized)).rejects.toThrow(/import limit/);
+    expect(oversized.text).not.toHaveBeenCalled();
+  });
+
+  it("rejects deeply nested native library data before Excalidraw restore", async () => {
+    let nested: Record<string, unknown> = { leaf: true };
+    for (let index = 0; index <= MAX_STRUCTURAL_DEPTH; index += 1) nested = { next: nested };
+    const file = new Blob([JSON.stringify({
+      type: "excalidrawlib",
+      version: 2,
+      libraryItems: [{ elements: [], customData: nested }],
+    })]);
+
+    await expect(loadSafeLibraryFromBlob(file)).rejects.toThrow(/structural depth/);
     expect(restoreLibraryItemsMock).not.toHaveBeenCalled();
   });
 

@@ -1,5 +1,9 @@
 import { expect, test } from "@playwright/test";
 
+test("fails closed before an external literal-IP request can leave the dev browser", async ({ page }) => {
+  await expect(page.goto("http://192.0.2.1/", { timeout: 5_000 })).rejects.toThrow();
+});
+
 test("fails closed for malformed local asset paths without poisoning Vite", async ({ request }) => {
   for (const assetPath of [
     "/excalidraw-assets/fonts/%ZZ",

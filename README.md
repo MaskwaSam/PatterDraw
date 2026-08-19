@@ -14,6 +14,7 @@ This repository is intentionally independent from PolyPad. Nothing here patches 
 - Board-first workspace with an accessible **Slides** toggle. The live editor stays mounted, so switching modes does not discard selections, history, or canvas position.
 - Offline LaTeX equations rendered to movable Excalidraw image elements by a locally bundled MathJax 4.1.3. Select an equation and press **Equation** to edit its original LaTeX.
 - Offline, no-AI Mermaid diagrams with explicit **Preview** and **Insert** actions. Flowchart, sequence, class, ER, and state diagrams become editable Excalidraw objects and can be reopened from a selected diagram.
+- Local 3DGeoGon handoff: use **COPY SVG HTML** in 3DGeoGon, then paste into PatterDraw to insert its self-contained vector view. Exported GeoGon PNG/SVG files can also be dropped on the board. Inserted views are ordinary local images included in autosave and `.patterdraw` backups; live web embeds remain disabled.
 - Browser autosave plus portable `.patterdraw` project files containing scene data and original PDF bytes. Existing `.canvasclassroom` files remain supported for import.
 - One-click **Export all** downloads every object on the current board as a shareable PNG, including off-screen and off-page content. Editable Excalidraw scene data is embedded when the receiving image workflow preserves PNG metadata.
 - A device-wide, locally persisted Excalidraw library supports adding and reusing canvas objects plus importing and exporting standard `.excalidrawlib` files without enabling public-library browsing or publishing.
@@ -69,8 +70,8 @@ still requires the local/static host that serves the app bundle.
 
 ## Deterministic release bundle
 
-After the production checks pass, package the already-built `dist/` tree into
-the ignored `dist/release/` directory:
+After the production checks pass, create a fresh build and package it into the
+ignored `dist/release/` directory:
 
 ```bash
 npm run check
@@ -78,7 +79,9 @@ npm run release:package
 npm run release:verify
 ```
 
-Final packaging requires a clean git worktree. The release directory remains a
+`npm run release:package` empties and rebuilds `dist/` before recording source
+provenance, so a stale ignored bundle cannot be attributed to the current
+commit. Final packaging requires a clean git worktree. The release directory remains a
 complete deployable static root and includes `release-manifest.json`,
 `provenance.json`, a CycloneDX `sbom.cdx.json`, and `SHA256SUMS`. Payload paths
 and metadata are sorted and timestamped from `SOURCE_DATE_EPOCH` or the HEAD
