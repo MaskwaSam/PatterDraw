@@ -10,6 +10,15 @@ const deployRoot = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(deployRoot, "..");
 const configOnly = process.argv.includes("--config-only");
 const unexpected = process.argv.slice(2).filter((argument) => argument !== "--config-only");
+const expectedDockerignore = [
+  "*",
+  "!deploy/",
+  "!deploy/**",
+  "!dist/",
+  "!dist/release/",
+  "!dist/release/**",
+  "",
+].join("\n");
 
 if (unexpected.length > 0) {
   throw new Error(`Unknown argument: ${unexpected[0]}`);
@@ -23,12 +32,21 @@ function rejectMatch(text, pattern, message) {
   if (pattern.test(text)) throw new Error(message);
 }
 
-const [compose, dockerfile, nginx, headers] = await Promise.all([
+const [compose, dockerfile, nginx, headers, dockerignore] = await Promise.all([
   readFile(path.join(deployRoot, "compose.yaml"), "utf8"),
   readFile(path.join(deployRoot, "Dockerfile"), "utf8"),
   readFile(path.join(deployRoot, "nginx.conf"), "utf8"),
   readFile(path.join(deployRoot, "security-headers.conf"), "utf8"),
+  readFile(path.join(repoRoot, ".dockerignore"), "utf8").catch((error) => {
+    throw new Error("The repository root .dockerignore must exist and be readable.", { cause: error });
+  }),
 ]);
+
+if (dockerignore !== expectedDockerignore) {
+  throw new Error(
+    "The repository root .dockerignore must exactly restrict the Docker context to deploy/ and dist/release/.",
+  );
+}
 
 rejectMatch(compose, /^\s*ports\s*:/m, "PatterDraw must not publish a host port.");
 requireMatch(compose, /^\s*read_only:\s*true\s*$/m, "Compose must use a read-only root filesystem.");
