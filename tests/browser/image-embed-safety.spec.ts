@@ -589,6 +589,92 @@ test("pastes and restores a local 3DGeoGon vector export", async ({ page }) => {
   expect(runtimeErrors).toEqual([]);
 });
 
+test("builds in the bundled GeoGon dialog and persists only its local vector handoff", async ({ page }) => {
+  test.setTimeout(120_000);
+  const externalRequests: string[] = [];
+  const geoGonRequests: string[] = [];
+  const httpRequests: string[] = [];
+  const runtimeErrors: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.includes("/geogon/")) geoGonRequests.push(url.pathname);
+    if (url.protocol === "http:" || url.protocol === "https:") httpRequests.push(request.url());
+    if (
+      (url.protocol === "http:" || url.protocol === "https:")
+      && url.hostname !== "127.0.0.1"
+    ) externalRequests.push(request.url());
+  });
+  page.on("pageerror", (error) => runtimeErrors.push(error.message));
+
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await page.locator(".App-toolbar__extra-tools-trigger").click();
+  await page.getByTestId("toolbar-math-tools").click();
+  const mathTools = page.getByRole("dialog", { name: "Math tools", exact: true });
+  const geoGonCard = page.getByTestId("math-tool-geogon");
+  await expect(geoGonCard).toHaveCount(0);
+  await mathTools.getByRole("switch", { name: "Experimental features", exact: true }).check();
+  await expect(geoGonCard).toContainText("Build a 3D geometry view");
+  await geoGonCard.click();
+
+  const dialog = page.getByRole("dialog", { name: "3D GeoGon", exact: true });
+  const frameElement = dialog.locator("iframe.geogon-frame");
+  const frame = page.frameLocator("iframe.geogon-frame");
+  const insert = dialog.getByTestId("geogon-insert");
+  await expect(dialog).toBeVisible();
+  await expect(frameElement).toHaveAttribute("src", /\/geogon\/index\.html\?host=patterdraw$/);
+  await expect(frameElement).toHaveAttribute("sandbox", "allow-scripts allow-same-origin allow-downloads");
+  await expect(frameElement).toHaveAttribute("referrerpolicy", "no-referrer");
+  await expect(frame.getByRole("button", { name: "Add", exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(insert).toBeEnabled();
+  await frame.getByRole("button", { name: "Add", exact: true }).click();
+  await frame.getByRole("button", { name: "+ Right Rectangular Prism", exact: true }).click();
+  await expect(frame.getByRole("button", { name: "Remove Right Rectangular Prism", exact: true })).toBeVisible();
+
+  for (const viewport of [{ width: 390, height: 844 }, { width: 320, height: 568 }]) {
+    await page.setViewportSize(viewport);
+    const dialogBounds = await dialog.boundingBox();
+    const insertBounds = await insert.boundingBox();
+    expect(dialogBounds).not.toBeNull();
+    expect(insertBounds).not.toBeNull();
+    expect(dialogBounds?.x || 0).toBeGreaterThanOrEqual(0);
+    expect(dialogBounds?.y || 0).toBeGreaterThanOrEqual(0);
+    expect((dialogBounds?.x || 0) + (dialogBounds?.width || 0)).toBeLessThanOrEqual(viewport.width);
+    expect((dialogBounds?.y || 0) + (dialogBounds?.height || 0)).toBeLessThanOrEqual(viewport.height);
+    expect((insertBounds?.y || 0) + (insertBounds?.height || 0)).toBeLessThanOrEqual(viewport.height);
+    expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    expect(await frame.locator("html").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  }
+
+  await insert.click();
+  await expect(dialog).toBeHidden();
+  await expect(page.locator("iframe")).toHaveCount(0);
+  await expect.poll(() => autosavedImageSummary(page)).toMatchObject({
+    count: 1,
+    mimeTypes: ["image/svg+xml"],
+  });
+  await expect.poll(async () => (
+    (await autosavedSceneElements(page)).find((element) => element.type === "image")
+      ?.customData?.classroomGeoGon
+  )).toEqual({ transfer: "svg", version: 1 });
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect.poll(() => autosavedImageSummary(page)).toMatchObject({
+    count: 1,
+    mimeTypes: ["image/svg+xml"],
+  });
+  await expect.poll(async () => (
+    (await autosavedSceneElements(page)).find((element) => element.type === "image")
+      ?.customData?.classroomGeoGon
+  )).toEqual({ transfer: "svg", version: 1 });
+  expect(geoGonRequests.some((pathname) => pathname.endsWith("/geogon/index.html"))).toBe(true);
+  expect(geoGonRequests.some((pathname) => pathname.endsWith("/geogon/app.js"))).toBe(true);
+  expect(httpRequests.every((url) => new URL(url).origin === new URL(page.url()).origin)).toBe(true);
+  expect(externalRequests).toEqual([]);
+  expect(runtimeErrors).toEqual([]);
+});
+
 test("preflights native and JSON clipboard images before insertion", async ({ page }) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });

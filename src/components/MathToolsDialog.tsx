@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   MATH_TOOL_CATALOGUE,
   MATH_TOOL_CATEGORIES,
@@ -22,6 +22,7 @@ import { useModalDialog } from "./useModalDialog";
 interface MathToolsDialogProps {
   initialConfiguration?: MathToolConfiguration | null;
   onCancel: () => void;
+  onOpenGeoGon: () => void;
   onInsert: (tool: GeneratedMathToolInsertion) => void;
   onStartInteraction: (kind: MathInteractionKind) => void;
 }
@@ -210,12 +211,19 @@ function initialConfigurations(initialConfiguration?: MathToolConfiguration | nu
   return configurations;
 }
 
-export function MathToolsDialog({ initialConfiguration, onCancel, onInsert, onStartInteraction }: MathToolsDialogProps) {
+export function MathToolsDialog({
+  initialConfiguration,
+  onCancel,
+  onOpenGeoGon,
+  onInsert,
+  onStartInteraction,
+}: MathToolsDialogProps) {
   const dialogRef = useModalDialog<HTMLElement>({
     onClose: onCancel,
     restoreFocus: false,
   });
   const [experimentalFeaturesEnabled, setExperimentalFeaturesEnabled] = useState(readExperimentalFeaturesPreference);
+  const autofocusGeoGon = useRef(experimentalFeaturesEnabled).current;
   const initialDefinition = initialConfiguration
     ? MATH_TOOL_CATALOGUE.find((candidate) => candidate.kind === initialConfiguration.kind) || null
     : null;
@@ -349,6 +357,33 @@ export function MathToolsDialog({ initialConfiguration, onCancel, onInsert, onSt
               </div>
             ) : null}
             <div className="math-tools-grid" role="region" aria-label={experimentalFeaturesEnabled ? `${MATH_TOOL_CATEGORIES.find((candidate) => candidate.id === category)?.label} tools` : "Ready classroom tools"}>
+              {experimentalFeaturesEnabled && category === "instruments" ? (
+                <button
+                  className="math-tool-card geogon-math-tool-card"
+                  type="button"
+                  data-testid="math-tool-geogon"
+                  autoFocus={autofocusGeoGon}
+                  onClick={onOpenGeoGon}
+                >
+                  <span className="math-tool-card-heading">
+                    <strong>3D GeoGon</strong>
+                    <span>Local 3D</span>
+                  </span>
+                  <span className="geogon-math-tool-preview" aria-hidden="true">
+                    <svg viewBox="0 0 180 100" role="img">
+                      <path d="M48 77 30 35 86 18l49 25 14 42-58 4Z" />
+                      <path d="m30 35 61 54m-5-71 5 71m44-46-44 46M48 77l87-34" />
+                      <circle cx="30" cy="35" r="4" />
+                      <circle cx="86" cy="18" r="4" />
+                      <circle cx="135" cy="43" r="4" />
+                      <circle cx="149" cy="85" r="4" />
+                      <circle cx="91" cy="89" r="4" />
+                      <circle cx="48" cy="77" r="4" />
+                    </svg>
+                  </span>
+                  <span>Build a 3D geometry view and insert it as a local vector image.</span>
+                </button>
+              ) : null}
               {tools.length ? tools.map((definition, index) => {
                 const preview = mathToolPreview(definition);
                 return (
@@ -357,7 +392,7 @@ export function MathToolsDialog({ initialConfiguration, onCancel, onInsert, onSt
                     className="math-tool-card"
                     type="button"
                     data-testid={`math-tool-${definition.id}`}
-                    autoFocus={category === "instruments" && index === 0}
+                    autoFocus={category === "instruments" && index === 0 && !experimentalFeaturesEnabled}
                     onClick={() => chooseTool(definition)}
                   >
                     <span className="math-tool-card-heading"><strong>{definition.title}</strong>{definition.configurable ? <span>Configure</span> : null}</span>

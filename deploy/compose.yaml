@@ -1,0 +1,59 @@
+name: patterdraw
+
+services:
+  patterdraw:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        PATTERDRAW_GIT_COMMIT: ${PATTERDRAW_GIT_COMMIT:?Set PATTERDRAW_GIT_COMMIT from the verified final release}
+        PATTERDRAW_MANIFEST_SHA256: ${PATTERDRAW_MANIFEST_SHA256:?Set PATTERDRAW_MANIFEST_SHA256 from the verified final release}
+        PATTERDRAW_RELEASE_TREE_SHA256: ${PATTERDRAW_RELEASE_TREE_SHA256:?Set PATTERDRAW_RELEASE_TREE_SHA256 from the verified final release}
+        PATTERDRAW_DEPLOY_CONFIG_SHA256: ${PATTERDRAW_DEPLOY_CONFIG_SHA256:?Set PATTERDRAW_DEPLOY_CONFIG_SHA256 from the reviewed deployment files}
+    image: patterdraw:${PATTERDRAW_IMAGE_TAG:?Set a unique PATTERDRAW_IMAGE_TAG}
+    restart: unless-stopped
+    init: true
+    user: "101:101"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    expose:
+      - "8080"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777,uid=101,gid=101
+      - /var/cache/nginx:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=101,gid=101
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - --header='Host: draw.spatterson.ca' http://127.0.0.1:8080/healthz | grep -qx healthy"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    stop_grace_period: 10s
+    pids_limit: 64
+    cpus: 0.50
+    mem_limit: 128m
+    ulimits:
+      nofile:
+        soft: 8192
+        hard: 8192
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      org.opencontainers.image.revision: ${PATTERDRAW_GIT_COMMIT:?Set PATTERDRAW_GIT_COMMIT from the verified final release}
+      ca.spatterson.patterdraw.manifest-sha256: ${PATTERDRAW_MANIFEST_SHA256:?Set PATTERDRAW_MANIFEST_SHA256 from the verified final release}
+      ca.spatterson.patterdraw.release-tree-sha256: ${PATTERDRAW_RELEASE_TREE_SHA256:?Set PATTERDRAW_RELEASE_TREE_SHA256 from the verified final release}
+      ca.spatterson.patterdraw.deploy-config-sha256: ${PATTERDRAW_DEPLOY_CONFIG_SHA256:?Set PATTERDRAW_DEPLOY_CONFIG_SHA256 from the reviewed deployment files}
+    networks:
+      edge:
+        aliases:
+          - patterdraw
+
+networks:
+  edge:
+    name: patterdraw_edge
+    external: true

@@ -20,6 +20,7 @@ const checksumFile = "SHA256SUMS";
 const allowedBuildTopLevelEntries = new Set([
   "assets",
   "excalidraw-assets",
+  "geogon",
   "index.html",
   "licenses",
   "mathjax",
@@ -29,6 +30,53 @@ const allowedBuildTopLevelEntries = new Set([
 const manifestSchema = "patterdraw.release-manifest.v1";
 const provenanceSchema = "patterdraw.provenance.v1";
 const sbomSchema = "CycloneDX";
+const geoGonVendor = Object.freeze({
+  license: "GPL-3.0-or-later",
+  repository: "https://github.com/MaskwaSam/3dgeogon",
+  sourceCommit: "386e47223740ed9955ae1fe8a022516fea98d57f",
+  version: "0.2.10",
+  upstreamFiles: new Map([
+    ["BRAND_ASSETS.md", "1c403191332c508363a82f5a5858d29d8b45710b79eecaadf2eb26fc125dd656"],
+    ["EMBEDDING.md", "53badbb03f5bde036d05277c5950b529d3271a98f4f36a5ee59ca661e6d7248e"],
+    ["LICENSE", "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"],
+    ["THIRD_PARTY_NOTICES.md", "e26ee46b967bfb0629682243b29c63724c5eb0227ef84f801961b5c82f86365c"],
+    ["app.js", "eb8a45fa27aa5434bc9ce351bf60d3b1d553196fb71f4d221d816aa68a286178"],
+    ["build/three-0.185.1/LICENSE", "8b378ebe60e2fe500158cb0ac71cb5e8b7d92953c2abcc63a0eb90499653b5bc"],
+    ["build/three-0.185.1/controls/OrbitControls.js", "faabb4e8dfd9235ee4a9fd7c9a3d75f90f1689dbd4944bd6fd32117dacec5f93"],
+    ["build/three-0.185.1/lines/Line2.js", "69dd2120d4df14208796acf199f80a64d37e042cfa65dc2b98286694b2954194"],
+    ["build/three-0.185.1/lines/LineGeometry.js", "b7ec6b0011e3b09dc72e17cfd8e8945295cb2bc8c8aa9aa19e47119680bdad7e"],
+    ["build/three-0.185.1/lines/LineMaterial.js", "d4517001f9d7b3e885ea5baa930de0077351e885db52ef4565cde4c7dd17eb23"],
+    ["build/three-0.185.1/lines/LineSegments2.js", "fcbc20f576e88343cea12131f49b7003d7ab44ede422fcb694e567456022f7a0"],
+    ["build/three-0.185.1/lines/LineSegmentsGeometry.js", "471f0a954a0c9c59d3d151392f424142a9164a722802f63b371971378a84a1b1"],
+    ["build/three-0.185.1/readme_moodle.txt", "f8c92d204271bd62af323fe9206629296978e1e743e83fd5c6c195bd799ccbc7"],
+    ["build/three-0.185.1/three.core.js", "3718df126d69c125362a03340913204470d8c50238605150e57f808840fb7759"],
+    ["build/three-0.185.1/three.module.js", "bbf5ed13fe4373f5bd38b14ea8e62e9f157327da5638edc6d3863e08b167c9c7"],
+    ["build/three-0.185.1/vendor-manifest.json", "e10f319c847495c7caf861db252ddb85254ccb81c28dc3cb47d35730f68a966e"],
+    ["geometry/composite-topology.js", "1801b6213e3a42342ec078bfeb4674e51ca2dc792278a3a2b125ee4684a4fe04"],
+    ["geometry/curved-net-layout.js", "6589af2c942a7b622c51c5318e3b6f2bb10a8a04c97bd981a18594b311193a85"],
+    ["geometry/curved-orthographic.js", "72039ca33eff4a69d9051c0dd8c8e0f9624f541783a24280d200ae836ca9608e"],
+    ["geometry/net-layout.js", "0cd24a686c11eb9ca28eac2dd009e0890bf78475544b62298c506f19dd0c4354"],
+    ["geometry/orthographic-views.js", "09d2439bd51ca08074c4a2f87ec81edb08e6c8ed3ae64d02ae1aaf01d12d3ecc"],
+    ["geometry/solid-topology.js", "e08263cb08d5c70ba5e3e9a88ed4c0adada59fe03a1b92b6f7ca02b3c1de8132"],
+    ["images/3DGeoGon-icon.svg", "4b4f4b0619d35ca2a2f33bad31f11b00adab26f56106da3b9c73875fd8421254"],
+    ["images/3DGeoGon-logo.svg", "f9fa5922eef9ab852f1bd2ab0ce952528f2360c718f1205be548e88586c1bdee"],
+    ["images/screenshot.png", "a84725dfc25d90d9c56767aeed5344afdffdddd05930af39ad165050fb73f245"],
+    ["index.html", "921efd4a3bef2101f9a12bb9d517dbc58f34e013eeee4e51ddaf9fe121250f79"],
+    ["manifest.json", "bffdf4920726278bafa4d5e80926d91f866533fd91bf4cde41c8222eb41804d9"],
+    ["style.css", "8c78695c860953a7c75927517aec89995c080174a2adc472d82d85fb6336d50c"],
+  ]),
+});
+const geoGonIntegrationFiles = new Map([
+  ["PATTERDRAW_VENDOR.md", "14afd52a71a97b6158c44e1cb510f54365b2da6cd8a4a1024e906aa90ad9f92a"],
+]);
+const threeVendor = Object.freeze({
+  integrity: "sha512-5aojFCXKwnjBRZvUnt3WFfEcvUJgkN5LlijRFN95hMy8WVkG4I0QNcJE+OuWvuJ0bOdStrbfXn0pkd6/QyiAlg==",
+  license: "MIT",
+  source: "https://registry.npmjs.org/three/-/three-0.185.1.tgz",
+  version: "0.185.1",
+});
+const geoGonBomRef = `vendor:3dgeogon@${geoGonVendor.version}#${geoGonVendor.sourceCommit}`;
+const threeBomRef = `vendor:3dgeogon/three@${threeVendor.version}`;
 
 function usage() {
   return `Usage:
@@ -133,6 +181,85 @@ async function npmVersion() {
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+function inventorySha256(files) {
+  const lines = [...files]
+    .sort(([left], [right]) => compareStrings(left, right))
+    .map(([relative, hash]) => `${hash}  ${relative}`);
+  return sha256(Buffer.from(`${lines.join("\n")}\n`, "utf8"));
+}
+
+function geoGonVendorVerificationMetadata() {
+  const threeFiles = new Map([...geoGonVendor.upstreamFiles]
+    .filter(([relative]) => relative.startsWith("build/three-0.185.1/"))
+    .map(([relative, hash]) => [relative.slice("build/three-0.185.1/".length), hash]));
+  const packagedFiles = new Map([
+    ...geoGonVendor.upstreamFiles,
+    ...geoGonIntegrationFiles,
+  ]);
+  return {
+    component: "3DGeoGon",
+    inventorySha256: inventorySha256(geoGonVendor.upstreamFiles),
+    license: geoGonVendor.license,
+    packagedFileCount: packagedFiles.size,
+    packagedInventorySha256: inventorySha256(packagedFiles),
+    sourceCommit: geoGonVendor.sourceCommit,
+    sourceRepository: geoGonVendor.repository,
+    upstreamFileCount: geoGonVendor.upstreamFiles.size,
+    version: geoGonVendor.version,
+    bundledThree: {
+      component: "Three.js",
+      inventorySha256: inventorySha256(threeFiles),
+      license: threeVendor.license,
+      source: threeVendor.source,
+      sourceIntegrity: threeVendor.integrity,
+      upstreamFileCount: threeFiles.size,
+      version: threeVendor.version,
+    },
+  };
+}
+
+async function verifyPackagedGeoGon(root, files) {
+  const expected = new Map([...geoGonVendor.upstreamFiles]
+    .map(([relative, hash]) => [`geogon/${relative}`, hash]));
+  const expectedIntegration = new Map([...geoGonIntegrationFiles]
+    .map(([relative, hash]) => [`geogon/${relative}`, hash]));
+  const geogonFiles = files.filter(({ relative }) => relative.startsWith("geogon/"));
+  const actual = new Map(geogonFiles.map((file) => [file.relative, file]));
+  const unexpected = geogonFiles
+    .filter(({ relative }) => !expected.has(relative) && !expectedIntegration.has(relative))
+    .map(({ relative }) => relative);
+  if (unexpected.length > 0) fail(`Packaged GeoGon contains unexpected files: ${unexpected.join(", ")}`);
+  for (const [relative, expectedHash] of expected) {
+    const file = actual.get(relative);
+    if (!file) fail(`Packaged GeoGon file is missing: ${relative}`);
+    if (file.sha256 !== expectedHash) fail(`Packaged GeoGon file differs from pinned upstream bytes: ${relative}`);
+  }
+  for (const [relative, expectedHash] of expectedIntegration) {
+    const file = actual.get(relative);
+    if (!file) fail(`Packaged GeoGon integration file is missing: ${relative}`);
+    if (file.sha256 !== expectedHash) fail(`Packaged GeoGon integration file differs from reviewed bytes: ${relative}`);
+  }
+  for (const [relative, expectedHash] of [
+    ["licenses/3dgeogon-GPL-3.0-or-later.txt", geoGonVendor.upstreamFiles.get("LICENSE")],
+    ["licenses/three-LICENSE.txt", geoGonVendor.upstreamFiles.get("build/three-0.185.1/LICENSE")],
+  ]) {
+    const file = files.find((candidate) => candidate.relative === relative);
+    if (!file || file.sha256 !== expectedHash) fail(`Packaged vendor license differs from pinned upstream bytes: ${relative}`);
+  }
+
+  const vendorRecord = await readFile(path.join(root, "geogon/PATTERDRAW_VENDOR.md"), "utf8");
+  for (const required of [
+    geoGonVendor.repository,
+    geoGonVendor.sourceCommit,
+    geoGonVendor.version,
+    geoGonVendor.license,
+    `Three.js version: \`${threeVendor.version}\``,
+  ]) {
+    if (!vendorRecord.includes(required)) fail(`Packaged GeoGon vendor record is missing pinned provenance: ${required}`);
+  }
+  return geoGonVendorVerificationMetadata();
 }
 
 async function ensureDirectory(directory, description) {
@@ -319,6 +446,57 @@ function dependencyLicense(expression) {
   return { expression: trimmed.replace(/^\((.*)\)$/, "$1") };
 }
 
+function buildVendoredSbomComponents() {
+  const verification = geoGonVendorVerificationMetadata();
+  return [
+    {
+      "bom-ref": geoGonBomRef,
+      name: "3DGeoGon",
+      type: "application",
+      version: geoGonVendor.version,
+      purl: `pkg:github/MaskwaSam/3dgeogon@${geoGonVendor.sourceCommit}`,
+      licenses: [{ license: { id: geoGonVendor.license } }],
+      externalReferences: [
+        { type: "vcs", url: `${geoGonVendor.repository}/tree/${geoGonVendor.sourceCommit}` },
+        { type: "license", url: `${geoGonVendor.repository}/blob/${geoGonVendor.sourceCommit}/LICENSE` },
+      ],
+      properties: [
+        { name: "patterdraw:dependencyType", value: "bundled-subapplication" },
+        { name: "patterdraw:vendorPath", value: "geogon/" },
+        { name: "patterdraw:sourceRepository", value: geoGonVendor.repository },
+        { name: "patterdraw:sourceCommit", value: geoGonVendor.sourceCommit },
+        { name: "patterdraw:inventorySha256", value: verification.inventorySha256 },
+        { name: "patterdraw:packagedInventorySha256", value: verification.packagedInventorySha256 },
+        { name: "patterdraw:hashScope", value: `sorted SHA-256 inventory of ${verification.upstreamFileCount} pinned upstream files` },
+      ],
+    },
+    {
+      "bom-ref": threeBomRef,
+      name: "three",
+      type: "library",
+      version: threeVendor.version,
+      purl: `pkg:npm/three@${threeVendor.version}`,
+      licenses: [{ license: { id: threeVendor.license } }],
+      externalReferences: [{ type: "distribution", url: threeVendor.source }],
+      properties: [
+        { name: "patterdraw:dependencyType", value: "bundled-transitive" },
+        { name: "patterdraw:vendorPath", value: `geogon/build/three-${threeVendor.version}/` },
+        { name: "patterdraw:resolved", value: threeVendor.source },
+        { name: "patterdraw:integrity", value: threeVendor.integrity },
+        { name: "patterdraw:inventorySha256", value: verification.bundledThree.inventorySha256 },
+        { name: "patterdraw:hashScope", value: `sorted SHA-256 inventory of ${verification.bundledThree.upstreamFileCount} bundled files` },
+      ],
+    },
+  ];
+}
+
+function buildVendoredSbomDependencies() {
+  return [
+    { ref: geoGonBomRef, dependsOn: [threeBomRef] },
+    { ref: threeBomRef, dependsOn: [] },
+  ];
+}
+
 function buildSbom({ lockfile, lockHash, packageInfo, source, toolchain }) {
   const rootPackage = lockfile.packages?.[""] || {};
   const directDependencies = new Map();
@@ -354,6 +532,7 @@ function buildSbom({ lockfile, lockHash, packageInfo, source, toolchain }) {
     if (entry.integrity) component.properties.push({ name: "patterdraw:integrity", value: String(entry.integrity) });
     components.push(component);
   }
+  components.push(...buildVendoredSbomComponents());
   components.sort((a, b) => compareStrings(a["bom-ref"], b["bom-ref"]));
   return {
     bomFormat: sbomSchema,
@@ -373,6 +552,7 @@ function buildSbom({ lockfile, lockHash, packageInfo, source, toolchain }) {
     specVersion: "1.5",
     version: 1,
     components,
+    dependencies: buildVendoredSbomDependencies(),
   };
 }
 
@@ -491,6 +671,7 @@ async function packageRelease(options) {
   }
   const sourceMaps = payload.filter((file) => file.relative.toLowerCase().endsWith(".map"));
   if (sourceMaps.length > 0) fail(`Source maps are not publishable release files: ${sourceMaps.map((file) => file.relative).join(", ")}`);
+  const vendoredComponents = await verifyPackagedGeoGon(distRoot, payload);
   const licenses = await licenseVerification({ distRoot, sourceRoot: repoRoot });
   const releaseMode = options.allowDirty ? "development" : "final";
 
@@ -519,6 +700,7 @@ async function packageRelease(options) {
     toolchain,
     package: { name: packageInfo.name, version: packageInfo.version },
     lockfile: { file: "package-lock.json", lockfileVersion: lockfile.lockfileVersion, sha256: lockHash },
+    vendoredComponents,
     artifact: { kind: "directory", path: artifactPath, payloadFileCount: payload.length, payloadBytes: totalBytes },
   };
   const sbom = buildSbom({ lockfile, lockHash, packageInfo, source, toolchain });
@@ -543,7 +725,12 @@ async function packageRelease(options) {
       algorithm: "sha256",
       covers: [...payloadManifest.map((file) => file.path), ...metadataFiles].sort(compareStrings),
     },
-    dependencies: { sbom: "sbom.cdx.json", componentCount: sbom.components.length, lockfileSha256: lockHash },
+    dependencies: {
+      sbom: "sbom.cdx.json",
+      componentCount: sbom.components.length,
+      lockfileSha256: lockHash,
+      vendoredComponents,
+    },
     licenses,
     package: { name: packageInfo.name, version: packageInfo.version },
     source: {
@@ -581,6 +768,16 @@ async function buildAndPackageRelease(options) {
   if (sourceBeforeBuild.dirty && !options.allowDirty) {
     fail("Refusing a final release build from a dirty worktree. Commit all source changes first, or pass --allow-dirty for a development artifact.");
   }
+  await command(process.execPath, ["scripts/verify-geogon-vendor.mjs"]);
+  const sourceAfterVendorVerify = await gitMetadata();
+  if (
+    sourceAfterVendorVerify.commit !== sourceBeforeBuild.commit
+    || sourceAfterVendorVerify.dirty !== sourceBeforeBuild.dirty
+    || sourceAfterVendorVerify.statusSha256 !== sourceBeforeBuild.statusSha256
+  ) {
+    fail("The source checkout changed while the pinned GeoGon vendor was being verified.");
+  }
+  console.log("Verified pinned GeoGon vendor source before release build.");
   await command("npm", ["run", "build", "--", "--emptyOutDir"]);
   const sourceAfterBuild = await gitMetadata();
   if (
@@ -726,6 +923,13 @@ async function verifyRelease(options) {
     if (!actual || actual.bytes !== file.bytes || actual.sha256 !== file.sha256) fail(`Manifest file entry mismatch: ${file.path}`);
     if (file.path.toLowerCase().endsWith(".map")) fail(`Source map present in release: ${file.path}`);
   }
+  const vendoredComponents = await verifyPackagedGeoGon(outputRoot, allEntries);
+  if (!sameJson(manifest.dependencies?.vendoredComponents, vendoredComponents)) {
+    fail("Release manifest vendored-component provenance is invalid.");
+  }
+  if (!sameJson(provenance.vendoredComponents, vendoredComponents)) {
+    fail("Release provenance does not match the packaged vendored components.");
+  }
   if (manifest.artifact.totalFileCount !== allEntries.length) fail("Manifest total file count is inconsistent.");
   if (manifest.artifact.totalFileCount !== manifest.artifact.payloadFileCount + metadataFiles.length + 1) {
     fail("Manifest artifact file totals are inconsistent.");
@@ -754,18 +958,35 @@ async function verifyRelease(options) {
   ) {
     fail("SBOM provenance properties do not match the release manifest.");
   }
+  const expectedVendoredSbomComponents = new Map(buildVendoredSbomComponents()
+    .map((component) => [component["bom-ref"], component]));
+  const foundVendoredSbomComponents = new Set();
   const componentRefs = new Set();
   for (const component of sbom.components) {
+    const componentRef = component?.["bom-ref"];
+    if (
+      !component
+      || typeof componentRef !== "string"
+      || componentRef.length === 0
+      || componentRefs.has(componentRef)
+    ) fail("SBOM contains an invalid or duplicate component.");
+    componentRefs.add(componentRef);
+
+    const expectedVendoredComponent = expectedVendoredSbomComponents.get(componentRef);
+    if (expectedVendoredComponent) {
+      if (!sameJson(component, expectedVendoredComponent)) {
+        fail(`SBOM vendored component does not match pinned provenance: ${componentRef}`);
+      }
+      foundVendoredSbomComponents.add(componentRef);
+      continue;
+    }
+
     const properties = Array.isArray(component?.properties) ? component.properties : [];
     const lockfilePath = properties.find((property) => (
       property?.name === "patterdraw:lockfilePath"
     ))?.value;
     if (
-      !component
-      || typeof component["bom-ref"] !== "string"
-      || component["bom-ref"].length === 0
-      || componentRefs.has(component["bom-ref"])
-      || typeof component.name !== "string"
+      typeof component.name !== "string"
       || component.name.length === 0
       || component.type !== "library"
       || typeof component.version !== "string"
@@ -776,7 +997,33 @@ async function verifyRelease(options) {
       || typeof lockfilePath !== "string"
       || !lockfilePath.startsWith("node_modules/")
     ) fail("SBOM contains an invalid or duplicate component.");
-    componentRefs.add(component["bom-ref"]);
+  }
+  for (const componentRef of expectedVendoredSbomComponents.keys()) {
+    if (!foundVendoredSbomComponents.has(componentRef)) {
+      fail(`SBOM is missing a pinned vendored component: ${componentRef}`);
+    }
+  }
+  if (!Array.isArray(sbom.dependencies)) fail("SBOM dependencies must be an array.");
+  const sbomDependencies = new Map();
+  for (const dependency of sbom.dependencies) {
+    if (
+      !dependency
+      || typeof dependency.ref !== "string"
+      || dependency.ref.length === 0
+      || sbomDependencies.has(dependency.ref)
+      || !Array.isArray(dependency.dependsOn)
+      || dependency.dependsOn.some((ref) => typeof ref !== "string" || ref.length === 0)
+      || new Set(dependency.dependsOn).size !== dependency.dependsOn.length
+    ) fail("SBOM contains an invalid or duplicate dependency relationship.");
+    if (!componentRefs.has(dependency.ref) || dependency.dependsOn.some((ref) => !componentRefs.has(ref))) {
+      fail("SBOM dependency relationship references an unknown component.");
+    }
+    sbomDependencies.set(dependency.ref, dependency);
+  }
+  for (const expected of buildVendoredSbomDependencies()) {
+    if (!sameJson(sbomDependencies.get(expected.ref), expected)) {
+      fail(`SBOM vendored dependency relationship is invalid: ${expected.ref}`);
+    }
   }
   if (provenance.releaseMode !== manifest.releaseMode
     || !sameJson(provenance.source, manifest.source)

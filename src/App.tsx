@@ -31,6 +31,7 @@ import { PresentationOverlay } from "./components/PresentationOverlay";
 import { StrokeWidthExtensions } from "./components/StrokeWidthExtensions";
 import { MathToolsMenuExtension } from "./components/MathToolsMenuExtension";
 import { MathToolsDialog } from "./components/MathToolsDialog";
+import { GeoGonDialog } from "./components/GeoGonDialog";
 import { MathInteractionOverlay, type CapturedMathPoint } from "./components/MathInteractionOverlay";
 import { ProbabilityRandomizer } from "./components/ProbabilityRandomizer";
 import { SpinnerPointerOverlay, type SpinnerPointerAnimation } from "./components/SpinnerPointerOverlay";
@@ -1018,6 +1019,7 @@ export default function App() {
   const [equationEditor, setEquationEditor] = useState<EquationEditorState | null>(null);
   const [mermaidEditor, setMermaidEditor] = useState<MermaidEditorState | null>(null);
   const [isMathToolsOpen, setIsMathToolsOpen] = useState(false);
+  const [isGeoGonOpen, setIsGeoGonOpen] = useState(false);
   const [mathToolEdit, setMathToolEdit] = useState<MathToolEditState | null>(null);
   const [mathInteraction, setMathInteraction] = useState<MathInteractionState | null>(null);
   const [isLassoActive, setIsLassoActive] = useState(false);
@@ -1792,14 +1794,14 @@ export default function App() {
   }, [api, hideConstrainedFramePreview]);
 
   useEffect(() => {
-    if (isMathToolsOpen || !focusAfterMathToolsRef.current) return;
+    if (isMathToolsOpen || isGeoGonOpen || !focusAfterMathToolsRef.current) return;
     const focusTarget = focusAfterMathToolsRef.current;
     focusAfterMathToolsRef.current = null;
     const selector = focusTarget === "editor"
       ? ".excalidraw"
       : ".App-toolbar__extra-tools-trigger";
     editorHostRef.current?.querySelector<HTMLElement>(selector)?.focus();
-  }, [isMathToolsOpen]);
+  }, [isGeoGonOpen, isMathToolsOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2760,6 +2762,7 @@ export default function App() {
     setLassoGeometryFactory(null);
     setLassoInitialSelection(null);
     setIsMathToolsOpen(false);
+    setIsGeoGonOpen(false);
     setMathToolEdit(null);
     setMathInteraction(null);
     setIsProbabilitySpinning(false);
@@ -3359,6 +3362,18 @@ export default function App() {
     focusAfterMathToolsRef.current = "trigger";
     setIsMathToolsOpen(false);
     setMathToolEdit(null);
+  }, []);
+
+  const openGeoGon = useCallback(() => {
+    focusAfterMathToolsRef.current = null;
+    setMathToolEdit(null);
+    setIsMathToolsOpen(false);
+    setIsGeoGonOpen(true);
+  }, []);
+
+  const closeGeoGon = useCallback(() => {
+    focusAfterMathToolsRef.current = "trigger";
+    setIsGeoGonOpen(false);
   }, []);
 
   const prepareLasso = useCallback(() => {
@@ -4879,10 +4894,10 @@ export default function App() {
     viewportPoint: { clientX: number; clientY: number },
     imageMimeHint?: LocalDropImageMime,
     customData?: Record<string, unknown>,
-  ) => {
-    if (!api) return;
+  ): Promise<boolean> => {
+    if (!api) return false;
     const operation = beginSceneOperation();
-    if (!operation) return;
+    if (!operation) return false;
     try {
       // PNG and SVG drops are wrapper-owned because Excalidraw otherwise
       // attempts to restore embedded scene metadata before its image hook.
@@ -4969,7 +4984,7 @@ export default function App() {
       });
       const fileIdValue = await generateSafeLocalImageFileId(persistedFile, operation.signal);
       const dataURL = await getDataURL(persistedBlob);
-      if (!isCurrentSceneOperation(operation)) return;
+      if (!isCurrentSceneOperation(operation)) return false;
       const appState = api.getAppState();
       const center = viewportCoordsToSceneCoords(viewportPoint, appState);
       const fileId = fileIdValue as FileId;
@@ -5000,14 +5015,41 @@ export default function App() {
         appState: { selectedElementIds: { [image.id]: true } },
         captureUpdate: CaptureUpdateAction.IMMEDIATELY,
       });
+      return true;
     } catch (error) {
       if (isCurrentSceneOperation(operation) && !isAbortLikeError(error)) {
         setErrorMessage(`Image could not be inserted: ${error instanceof Error ? error.message : String(error)}`);
       }
+      return false;
     } finally {
       finishSceneOperation(operation);
     }
   }, [api, beginSceneOperation, finishSceneOperation, isCurrentSceneOperation]);
+
+  const insertGeoGonSvg = useCallback(async (rawSvg: string): Promise<boolean> => {
+    const svg = geoGonSvgFromClipboardText(rawSvg);
+    if (!svg || !api) {
+      setErrorMessage("GeoGon returned a vector image that PatterDraw could not verify.");
+      return false;
+    }
+    setErrorMessage(null);
+    const appState = api.getAppState();
+    const inserted = await insertDroppedLocalImage(
+      new File([svg], "3DGeoGon-diagram.svg", { type: "image/svg+xml" }),
+      {
+        clientX: appState.offsetLeft + appState.width / 2,
+        clientY: appState.offsetTop + appState.height / 2,
+      },
+      "image/svg+xml",
+      { classroomGeoGon: { transfer: "svg", version: 1 } },
+    );
+    if (inserted) {
+      focusAfterMathToolsRef.current = "editor";
+      setIsGeoGonOpen(false);
+      api.setToast({ message: "3D GeoGon diagram inserted." });
+    }
+    return inserted;
+  }, [api, insertDroppedLocalImage]);
 
   const importDroppedLibrary = useCallback(async (file: File) => {
     if (!api) return;
@@ -6602,8 +6644,15 @@ export default function App() {
         <MathToolsDialog
           initialConfiguration={mathToolEdit?.initialConfiguration}
           onCancel={closeMathTools}
+          onOpenGeoGon={openGeoGon}
           onInsert={insertMathTool}
           onStartInteraction={startMathInteraction}
+        />
+      ) : null}
+      {featurePreferences.mathTools && isGeoGonOpen ? (
+        <GeoGonDialog
+          onCancel={closeGeoGon}
+          onInsert={insertGeoGonSvg}
         />
       ) : null}
       {busyMessage && <div className="busy-overlay" role="status"><span className="spinner" />{busyMessage}</div>}

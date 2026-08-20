@@ -37,6 +37,165 @@ export const remoteCssRules = [
   [/\burl\(\s*["']?\s*(?:https?:)?\/\//gi, "remote CSS asset"],
 ];
 
+function isRuntimeBindingIdentifier(node) {
+  if (!ts.isIdentifier(node)) return false;
+  const parent = node.parent;
+  return (
+    (ts.isBindingElement(parent) && parent.name === node)
+    || (ts.isVariableDeclaration(parent) && parent.name === node)
+    || (ts.isParameter(parent) && parent.name === node)
+    || (ts.isFunctionDeclaration(parent) && parent.name === node)
+    || (ts.isFunctionExpression(parent) && parent.name === node)
+    || (ts.isClassDeclaration(parent) && parent.name === node)
+    || (ts.isClassExpression(parent) && parent.name === node)
+    || (ts.isEnumDeclaration(parent) && parent.name === node)
+    || (ts.isImportClause(parent) && parent.name === node)
+    || (ts.isNamespaceImport(parent) && parent.name === node)
+    || (ts.isImportEqualsDeclaration(parent) && parent.name === node)
+    || (ts.isImportSpecifier(parent) && parent.name === node)
+  );
+}
+
+/**
+ * Prove that the sole GeoGon iframe calls the exact, unaliased named import.
+ * The deliberately narrow no-shadow rule avoids treating a lookalike local
+ * function as the reviewed same-origin URL resolver.
+ */
+export function hasReviewedLocalGeoGonFrameSourceBinding(source) {
+  const sourceFile = ts.createSourceFile(
+    "src/components/GeoGonDialog.tsx",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let reviewedImport = null;
+  let reviewedImportCount = 0;
+  let shadowed = false;
+  let reviewedFrameSourceCount = 0;
+
+  const stringAttributeMatches = (attributes, name, expected) => {
+    const matches = attributes.filter((property) => (
+      ts.isJsxAttribute(property) && property.name.getText(sourceFile) === name
+    ));
+    return matches.length === 1
+      && matches[0].initializer
+      && ts.isStringLiteral(matches[0].initializer)
+      && matches[0].initializer.text === expected;
+  };
+  const expressionAttributeText = (attributes, name) => {
+    const matches = attributes.filter((property) => (
+      ts.isJsxAttribute(property) && property.name.getText(sourceFile) === name
+    ));
+    if (
+      matches.length !== 1
+      || !matches[0].initializer
+      || !ts.isJsxExpression(matches[0].initializer)
+      || !matches[0].initializer.expression
+    ) return null;
+    return matches[0].initializer.expression.getText(sourceFile).replace(/\s+/g, "");
+  };
+
+  const visit = (node) => {
+    if (
+      ts.isImportDeclaration(node)
+      && ts.isStringLiteral(node.moduleSpecifier)
+      && node.moduleSpecifier.text === "../lib/local-geogon"
+      && !node.importClause?.isTypeOnly
+      && node.importClause?.namedBindings
+      && ts.isNamedImports(node.importClause.namedBindings)
+    ) {
+      for (const specifier of node.importClause.namedBindings.elements) {
+        if (
+          !specifier.isTypeOnly
+          && !specifier.propertyName
+          && specifier.name.text === "localGeoGonUrl"
+        ) {
+          reviewedImport = specifier.name;
+          reviewedImportCount += 1;
+        }
+      }
+    }
+
+    if (
+      ts.isIdentifier(node)
+      && node.text === "localGeoGonUrl"
+      && isRuntimeBindingIdentifier(node)
+      && node !== reviewedImport
+    ) shadowed = true;
+
+    if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(sourceFile) === "iframe") {
+      const attributes = [...node.attributes.properties];
+      const sourceAttributes = attributes.filter((property) => (
+        ts.isJsxAttribute(property) && property.name.getText(sourceFile) === "src"
+      ));
+      const sourceAttribute = sourceAttributes[0];
+      const expression = sourceAttributes.length === 1
+        && sourceAttribute
+        && ts.isJsxAttribute(sourceAttribute)
+        && sourceAttribute.initializer
+        && ts.isJsxExpression(sourceAttribute.initializer)
+        ? sourceAttribute.initializer.expression
+        : null;
+      const expectedAttributeNames = [
+        "key",
+        "ref",
+        "className",
+        "src",
+        "title",
+        "sandbox",
+        "referrerPolicy",
+        "tabIndex",
+        "onLoad",
+      ];
+      const exactReviewedAttributes = attributes.length === expectedAttributeNames.length
+        && expectedAttributeNames.every((name) => attributes.filter((property) => (
+          ts.isJsxAttribute(property) && property.name.getText(sourceFile) === name
+        )).length === 1);
+      if (
+        exactReviewedAttributes
+        && expressionAttributeText(attributes, "key") === "frameKey"
+        && expressionAttributeText(attributes, "ref") === "iframeRef"
+        && stringAttributeMatches(attributes, "className", "geogon-frame")
+        && stringAttributeMatches(attributes, "title", "Bundled 3D GeoGon editor")
+        && stringAttributeMatches(attributes, "sandbox", "allow-scripts allow-same-origin allow-downloads")
+        && stringAttributeMatches(attributes, "referrerPolicy", "no-referrer")
+        && expressionAttributeText(attributes, "tabIndex") === "0"
+        && expressionAttributeText(attributes, "onLoad") === "()=>voidhandleFrameLoad()"
+        && expression
+        && ts.isCallExpression(expression)
+        && expression.arguments.length === 0
+        && ts.isIdentifier(expression.expression)
+        && expression.expression.text === "localGeoGonUrl"
+      ) reviewedFrameSourceCount += 1;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return reviewedImportCount === 1 && !shadowed && reviewedFrameSourceCount === 1;
+}
+
+function isReviewedLocalGeoGonFrame(source, relativeFile, absoluteIndex, matchText) {
+  if (
+    relativeFile.replaceAll("\\", "/") !== "src/components/GeoGonDialog.tsx"
+    || matchText.toLowerCase() !== "<iframe"
+  ) return false;
+  const frames = [...source.matchAll(/<iframe\b/gi)];
+  if (frames.length !== 1 || frames[0].index !== absoluteIndex) return false;
+  const tagEnd = source.indexOf("/>", absoluteIndex);
+  if (tagEnd < 0) return false;
+  const tag = source.slice(absoluteIndex, tagEnd + 2);
+  return (
+    hasReviewedLocalGeoGonFrameSourceBinding(source)
+    // Keep a textual check beside the AST binding proof so the reviewed tag's
+    // security-sensitive attributes remain easy to audit in this exception.
+    && tag.includes("src={localGeoGonUrl()}")
+    && tag.includes('sandbox="allow-scripts allow-same-origin allow-downloads"')
+    && tag.includes('referrerPolicy="no-referrer"')
+    && tag.includes('title="Bundled 3D GeoGon editor"')
+  );
+}
+
 function addRuleFindings(
   source,
   relativeFile,
@@ -51,6 +210,10 @@ function addRuleFindings(
     pattern.lastIndex = 0;
     for (const match of candidate.matchAll(pattern)) {
       const absoluteIndex = start + match.index;
+      if (
+        label === "embedded web-content markup"
+        && isReviewedLocalGeoGonFrame(source, relativeFile, absoluteIndex, match[0])
+      ) continue;
       const findingKey = `${absoluteIndex}:${label}`;
       if (seen.has(findingKey)) continue;
       seen.add(findingKey);
@@ -94,6 +257,58 @@ function scriptKindForExtension(extension) {
   if (extension === ".jsx") return ts.ScriptKind.JSX;
   if (extension === ".js" || extension === ".mjs") return ts.ScriptKind.JS;
   return ts.ScriptKind.TS;
+}
+
+const iframeFactoryNames = new Set([
+  "createElement",
+  "createElementNS",
+  "h",
+  "jsx",
+  "jsxs",
+  "jsxDEV",
+  "_jsx",
+  "_jsxs",
+  "_jsxDEV",
+]);
+
+function calledFactoryName(expression) {
+  if (ts.isIdentifier(expression)) return expression.text;
+  if (ts.isPropertyAccessExpression(expression)) return expression.name.text;
+  if (
+    ts.isElementAccessExpression(expression)
+    && expression.argumentExpression
+    && ts.isStringLiteralLike(expression.argumentExpression)
+  ) return expression.argumentExpression.text;
+  return null;
+}
+
+function scriptEmbeddedContentFindings(source, relativeFile, extension) {
+  const sourceFile = ts.createSourceFile(
+    relativeFile,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKindForExtension(extension),
+  );
+  const findings = [];
+  const visit = (node) => {
+    if (ts.isCallExpression(node)) {
+      const factoryName = calledFactoryName(node.expression);
+      if (
+        factoryName
+        && iframeFactoryNames.has(factoryName)
+        && node.arguments.some((argument) => (
+          ts.isStringLiteralLike(argument) && argument.text.toLowerCase() === "iframe"
+        ))
+      ) {
+        const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+        findings.push(`${relativeFile}:${line} programmatic embedded web-content creation`);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return findings;
 }
 
 function isStyleJsxAttribute(node, sourceFile) {
@@ -281,6 +496,9 @@ export function findRemoteSourceReferences(source, relativeFile) {
     findings,
     seen,
   );
+  if ([".js", ".jsx", ".mjs", ".ts", ".tsx"].includes(extension)) {
+    findings.push(...scriptEmbeddedContentFindings(source, relativeFile, extension));
+  }
   const cssRanges = extension === ".css"
     ? [[0, source.length]]
     : extension === ".html"

@@ -4,7 +4,10 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
-import { findRemoteSourceFindings } from "./offline-source-scan.mjs";
+import {
+  findRemoteSourceFindings,
+  hasReviewedLocalGeoGonFrameSourceBinding,
+} from "./offline-source-scan.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const scanRoots = [
@@ -34,7 +37,7 @@ const expectedCsp = new Map([
   ["font-src", ["'self'", "data:"]],
   ["connect-src", ["'self'"]],
   ["media-src", ["'self'", "blob:", "data:"]],
-  ["frame-src", ["'none'"]],
+  ["frame-src", ["'self'"]],
   ["object-src", ["'none'"]],
   ["base-uri", ["'none'"]],
   ["form-action", ["'self'"]],
@@ -177,6 +180,42 @@ if (!appSource.includes("aiEnabled={false}") || !appSource.includes("MermaidDial
 }
 if (appSource.includes("openExternalWebLink") || !appSource.includes("External links are disabled")) {
   findings.push("src/App.tsx:1 external canvas links must remain blocked");
+}
+const geoGonDialogSource = await readFile(path.join(root, "src/components/GeoGonDialog.tsx"), "utf8");
+const localGeoGonSource = await readFile(path.join(root, "src/lib/local-geogon.ts"), "utf8");
+const embeddedContentPolicySource = await readFile(path.join(root, "src/lib/embedded-content-policy.ts"), "utf8");
+const productionServerSource = await readFile(path.join(root, "scripts/serve-production-dist.mjs"), "utf8");
+if (
+  !localGeoGonSource.includes('LOCAL_GEOGON_RELATIVE_PATH = "./geogon/index.html?host=patterdraw"')
+  || !localGeoGonSource.includes("url.origin !== baseUrl.origin")
+  || !localGeoGonSource.includes('url.pathname.endsWith("/geogon/index.html")')
+) {
+  findings.push("src/lib/local-geogon.ts:1 bundled GeoGon URL must remain exact and same-origin");
+}
+if (
+  (geoGonDialogSource.match(/<iframe\b/g) || []).length !== 1
+  || !hasReviewedLocalGeoGonFrameSourceBinding(geoGonDialogSource)
+  || !geoGonDialogSource.includes('sandbox="allow-scripts allow-same-origin allow-downloads"')
+  || !geoGonDialogSource.includes('referrerPolicy="no-referrer"')
+  || !appSource.includes("geoGonSvgFromClipboardText(rawSvg)")
+  || !appSource.includes('{ classroomGeoGon: { transfer: "svg", version: 1 } }')
+) {
+  findings.push("src/components/GeoGonDialog.tsx:1 reviewed local frame or sanitized SVG handoff changed");
+}
+if (
+  !embeddedContentPolicySource.includes('EMBEDDED_CONTENT_MODE = "disabled"')
+  || !embeddedContentPolicySource.includes('"iframe"')
+  || !embeddedContentPolicySource.includes('"magicframe"')
+) {
+  findings.push("src/lib/embedded-content-policy.ts:1 arbitrary scene embeds must remain disabled");
+}
+if (
+  !productionServerSource.includes("allowLocalGeoGonFrame ? geoGonContentSecurityPolicy : contentSecurityPolicy")
+  || !productionServerSource.includes('"connect-src \'none\'"')
+  || !productionServerSource.includes('"frame-ancestors \'self\'"')
+  || !productionServerSource.includes('allowLocalGeoGonFrame ? "SAMEORIGIN" : "DENY"')
+) {
+  findings.push("scripts/serve-production-dist.mjs:1 GeoGon child-frame response policy changed");
 }
 if (
   appSource.includes('import { importPdf } from "./lib/pdf/import-pdf"')

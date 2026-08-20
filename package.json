@@ -15,12 +15,15 @@
     "test": "vitest run",
     "test:browser": "playwright test",
     "test:browser:production": "playwright test --config=playwright.production.config.ts",
+    "test:deploy": "node --test deploy/*.test.mjs",
     "test:watch": "vitest",
     "release:package": "node scripts/package-release.mjs --build",
     "release:verify": "node scripts/package-release.mjs --verify",
+    "check:geogon-vendor": "node scripts/verify-geogon-vendor.mjs",
     "check:safety": "node scripts/check-offline-safety.mjs",
     "check:browser-types": "tsc -p tsconfig.browser.json",
-    "check": "npm run test && npm run build && npm run check:browser-types && npm run check:safety"
+    "check:deploy": "npm run test:deploy && node deploy/verify-config.mjs --config-only",
+    "check": "npm run test && npm run check:geogon-vendor && npm run build && npm run check:browser-types && npm run check:safety && npm run check:deploy"
   },
   "dependencies": {
     "@excalidraw/common": "0.18.0-e9c856d",

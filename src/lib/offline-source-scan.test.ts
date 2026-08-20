@@ -99,4 +99,131 @@ describe("offline source scanning", () => {
 
     expect(findings).toEqual([]);
   });
+
+  it("allows only the reviewed, sandboxed local GeoGon tool frame", () => {
+    const frameTag = "iframe";
+    const findings = findRemoteSourceReferences(`
+      import {
+        LOCAL_GEOGON_VERSION,
+        localGeoGonUrl,
+      } from "../lib/local-geogon";
+      export function GeoGonDialog() {
+        return <${frameTag}
+          key={frameKey}
+          ref={iframeRef}
+          className="geogon-frame"
+          src={localGeoGonUrl()}
+          title="Bundled 3D GeoGon editor"
+          sandbox="allow-scripts allow-same-origin allow-downloads"
+          referrerPolicy="no-referrer"
+          tabIndex={0}
+          onLoad={() => void handleFrameLoad()}
+        />;
+      }
+    `, "src/components/GeoGonDialog.tsx");
+
+    expect(findings).toEqual([]);
+  });
+
+  it("still rejects any unreviewed or additional frame", () => {
+    const frameTag = "iframe";
+    expect(findRemoteSourceReferences(`
+      import {
+        LOCAL_GEOGON_VERSION,
+        localGeoGonUrl,
+      } from "../lib/local-geogon";
+      const unsafe = <${frameTag} src="./other/index.html" />;
+    `, "src/components/GeoGonDialog.tsx")).toEqual([
+      "src/components/GeoGonDialog.tsx:6 embedded web-content markup",
+    ]);
+    expect(findRemoteSourceReferences(
+      `<${frameTag} src="./geogon/index.html" />`,
+      "src/components/OtherDialog.tsx",
+    )).toEqual(["src/components/OtherDialog.tsx:1 embedded web-content markup"]);
+  });
+
+  it("rejects a spoofed GeoGon frame source even when the safe resolver is present", () => {
+    const frameTag = "iframe";
+    expect(findRemoteSourceReferences(`
+      import { localGeoGonUrl } from "../lib/local-geogon";
+      export function GeoGonDialog() {
+        void localGeoGonUrl();
+        const source = window.name;
+        return <${frameTag}
+          src={source}
+          title="Bundled 3D GeoGon editor"
+          sandbox="allow-scripts allow-same-origin allow-downloads"
+          referrerPolicy="no-referrer"
+        />;
+      }
+    `, "src/components/GeoGonDialog.tsx")).toEqual([
+      "src/components/GeoGonDialog.tsx:6 embedded web-content markup",
+    ]);
+  });
+
+  it("rejects a GeoGon resolver shadowed inside the dialog", () => {
+    const frameTag = "iframe";
+    expect(findRemoteSourceReferences(`
+      import { localGeoGonUrl } from "../lib/local-geogon";
+      export function GeoGonDialog() {
+        const localGeoGonUrl = () => window.name;
+        return <${frameTag}
+          src={localGeoGonUrl()}
+          title="Bundled 3D GeoGon editor"
+          sandbox="allow-scripts allow-same-origin allow-downloads"
+          referrerPolicy="no-referrer"
+        />;
+      }
+    `, "src/components/GeoGonDialog.tsx")).toEqual([
+      "src/components/GeoGonDialog.tsx:5 embedded web-content markup",
+    ]);
+  });
+
+  it("rejects GeoGon iframe spread overrides and srcDoc", () => {
+    const frameTag = "iframe";
+    const source = (extra: string) => `
+      import { localGeoGonUrl } from "../lib/local-geogon";
+      export function GeoGonDialog() {
+        return <${frameTag}
+          key={frameKey}
+          ref={iframeRef}
+          className="geogon-frame"
+          src={localGeoGonUrl()}
+          title="Bundled 3D GeoGon editor"
+          sandbox="allow-scripts allow-same-origin allow-downloads"
+          referrerPolicy="no-referrer"
+          tabIndex={0}
+          onLoad={() => void handleFrameLoad()}
+          ${extra}
+        />;
+      }
+    `;
+    for (const extra of [
+      "{...{ src: window.name }}",
+      "srcDoc={window.name}",
+    ]) {
+      expect(findRemoteSourceReferences(
+        source(extra),
+        "src/components/GeoGonDialog.tsx",
+      )).toEqual([
+        "src/components/GeoGonDialog.tsx:4 embedded web-content markup",
+      ]);
+    }
+  });
+
+  it("rejects programmatic iframe creation outside the reviewed dialog", () => {
+    const frameTag = "iframe";
+    const findings = findRemoteSourceReferences(`
+      const domFrame = document.createElement("${frameTag}");
+      const reactFrame = React.createElement("${frameTag}", { src: window.name });
+      const runtimeFrame = jsx("${frameTag}", { src: window.name });
+      const bracketFrame = React["createElement"]("${frameTag}", {});
+    `, "src/programmatic-frame.tsx");
+    expect(findings).toEqual([
+      "src/programmatic-frame.tsx:2 programmatic embedded web-content creation",
+      "src/programmatic-frame.tsx:3 programmatic embedded web-content creation",
+      "src/programmatic-frame.tsx:4 programmatic embedded web-content creation",
+      "src/programmatic-frame.tsx:5 programmatic embedded web-content creation",
+    ]);
+  });
 });

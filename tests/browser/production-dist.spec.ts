@@ -79,6 +79,7 @@ function expectSecurityHeaders(headers: Record<string, string>) {
   expect(headers["content-security-policy"]).toContain("default-src 'self' blob: data:");
   expect(headers["content-security-policy"]).toContain("worker-src 'self' blob:");
   expect(headers["content-security-policy"]).toContain("connect-src 'self'");
+  expect(headers["content-security-policy"]).toContain("frame-src 'self'");
   expect(headers["content-security-policy"]).toContain("frame-ancestors 'none'");
   expect(headers["x-content-type-options"]).toBe("nosniff");
   expect(headers["referrer-policy"]).toBe("no-referrer");
@@ -171,6 +172,22 @@ test("applies offline security headers without pinning plain localhost to HSTS",
   expectSecurityHeaders(entry.headers());
 
   const missing = await request.get(`${productionOrigin}${productionRoute}assets/missing-security-probe.js`);
+  expect(missing.status()).toBe(404);
+  expectSecurityHeaders(missing.headers());
+});
+
+test("allows only the bundled GeoGon path to be framed by the same origin", async ({ request }) => {
+  const entry = await request.get(`${productionOrigin}${productionRoute}geogon/index.html?host=patterdraw`);
+  expect(entry.status()).toBe(200);
+  const headers = entry.headers();
+  expect(headers["content-security-policy"]).toContain("default-src 'self'");
+  expect(headers["content-security-policy"]).toContain("script-src 'self' 'unsafe-inline'");
+  expect(headers["content-security-policy"]).toContain("connect-src 'none'");
+  expect(headers["content-security-policy"]).toContain("frame-ancestors 'self'");
+  expect(headers["x-frame-options"]).toBe("SAMEORIGIN");
+  expect(headers["referrer-policy"]).toBe("no-referrer");
+
+  const missing = await request.get(`${productionOrigin}${productionRoute}geogon/missing.html`);
   expect(missing.status()).toBe(404);
   expectSecurityHeaders(missing.headers());
 });

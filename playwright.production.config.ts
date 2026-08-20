@@ -1,4 +1,4 @@
-import { defineConfig } from "@playwright/test";
+import { defineConfig, devices } from "@playwright/test";
 
 const productionPort = Number(process.env.PW_PRODUCTION_PORT || 4174);
 if (!Number.isInteger(productionPort) || productionPort < 1024 || productionPort > 65_535) {
@@ -11,6 +11,7 @@ const reuseExistingProductionServer = process.env.PW_PRODUCTION_REUSE_SERVER ===
 const productionDistSpec = "**/production-dist.spec.ts";
 const productionUxSpec = "**/production-ux.spec.ts";
 const imageEmbedSafetySpec = "**/image-embed-safety.spec.ts";
+const geoGonFunctionalTest = /builds in the bundled GeoGon dialog and persists only its local vector handoff$/;
 
 export default defineConfig({
   testDir: "./tests/browser",
@@ -62,6 +63,12 @@ export default defineConfig({
       name: "webkit-ux",
       testMatch: productionUxSpec,
       use: { browserName: "webkit" },
+    },
+    {
+      name: "webkit-geogon-iphone",
+      testMatch: imageEmbedSafetySpec,
+      grep: geoGonFunctionalTest,
+      use: { ...devices["iPhone 13"], browserName: "webkit" },
     },
     {
       name: "chromium-mobile-320",

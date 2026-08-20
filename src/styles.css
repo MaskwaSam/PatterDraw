@@ -1604,6 +1604,18 @@ button { color: inherit; }
   object-fit: contain;
   filter: drop-shadow(0 2px 4px rgb(60 45 5 / 14%));
 }
+.geogon-math-tool-preview {
+  width: 100%;
+  height: 100px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: radial-gradient(circle at 50% 46%, #f8fbff 0 28%, #edf3ff 72%);
+}
+.geogon-math-tool-preview svg { width: min(210px, 92%); height: 94px; overflow: visible; }
+.geogon-math-tool-preview path { fill: rgb(79 123 220 / 9%); stroke: #315fae; stroke-width: 2; stroke-linejoin: round; }
+.geogon-math-tool-preview path + path { fill: none; stroke-width: 1.6; }
+.geogon-math-tool-preview circle { fill: #fff; stroke: #204aa5; stroke-width: 2; }
 .math-tool-card > span:not(.math-tool-card-heading) { font-size: 12px; font-weight: 700; }
 .math-tools-empty { grid-column: 1 / -1; margin: 0; padding: 42px 20px; border: 1px dashed #c9d1de; border-radius: 10px; color: var(--muted); text-align: center; font-size: 13px; }
 .math-tool-config { display: grid; gap: 14px; }
@@ -1630,6 +1642,59 @@ button { color: inherit; }
 .math-tool-config-actions .dialog-cancel { margin: 0; }
 .math-tool-config-actions .primary-button { min-width: 88px; padding: 8px 14px; border: 1px solid #204aa5; border-radius: 7px; background: #2859c5; color: #fff; font-weight: 720; cursor: pointer; }
 .math-tool-config-actions .primary-button:disabled { opacity: .45; cursor: default; }
+
+.geogon-dialog {
+  width: min(1180px, 100%);
+  height: min(820px, calc(100dvh - 40px));
+  min-height: min(520px, calc(100dvh - 40px));
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 18px;
+  overflow: hidden;
+  border: 1px solid #cfd5df;
+  border-radius: 11px;
+  background: #fff;
+  box-shadow: 0 18px 60px rgb(15 23 42 / 25%);
+}
+.geogon-dialog-heading { min-width: 0; }
+.geogon-dialog-description { margin: -4px 0 0; color: var(--muted); font-size: 12px; }
+.geogon-frame-shell {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid #cbd3df;
+  border-radius: 9px;
+  background: #0e1520;
+}
+.geogon-frame { width: 100%; height: 100%; display: block; border: 0; background: #111827; }
+.geogon-frame-state {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  padding: 24px;
+  background: rgb(248 250 252 / 96%);
+  color: #34405a;
+  text-align: center;
+}
+.geogon-frame-state p { max-width: 520px; margin: 0; font-size: 13px; line-height: 1.45; }
+.geogon-frame-state button { min-height: 38px; padding: 8px 14px; border: 1px solid #b8c3d4; border-radius: 7px; background: #fff; color: #263249; font-weight: 700; cursor: pointer; }
+.geogon-frame-state.is-error { color: #9c2f2f; }
+.geogon-dialog-actions {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+}
+.geogon-dialog-status { min-width: 0; overflow: hidden; color: var(--muted); font-size: 11px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.geogon-dialog-status.is-error { color: #a72e2e; white-space: normal; }
+.geogon-dialog-actions .dialog-cancel { min-height: 40px; margin: 0; }
+.geogon-dialog-actions .primary-button { min-height: 40px; padding: 8px 14px; border: 1px solid #204aa5; border-radius: 7px; background: #2859c5; color: #fff; font-weight: 720; cursor: pointer; }
+.geogon-dialog-actions .primary-button:disabled { opacity: .45; cursor: default; }
 .math-interaction-overlay { position: absolute; inset: 0; z-index: 30; pointer-events: none; }
 .probability-randomizer {
   position: absolute;
@@ -1951,6 +2016,7 @@ button { color: inherit; }
   .statusbar,
   .export-dialog,
   .math-tools-dialog,
+  .geogon-dialog,
   .equation-dialog,
   .mermaid-dialog,
   .math-interaction-panel,
@@ -2318,6 +2384,14 @@ button { color: inherit; }
   color: #c7d6ff;
 }
 .app-shell[data-theme="dark"] .math-tool-card-heading svg { color: #a9c2ff; }
+.app-shell[data-theme="dark"] .geogon-math-tool-preview { background: radial-gradient(circle at 50% 46%, #263753 0 28%, #18263d 72%); }
+.app-shell[data-theme="dark"] .geogon-math-tool-preview path { fill: rgb(127 167 255 / 12%); stroke: #91b2fa; }
+.app-shell[data-theme="dark"] .geogon-math-tool-preview circle { fill: #182131; stroke: #a9c2ff; }
+.app-shell[data-theme="dark"] .geogon-frame-shell { border-color: #45536b; }
+.app-shell[data-theme="dark"] .geogon-frame-state { background: rgb(24 33 49 / 96%); color: #d8e2f1; }
+.app-shell[data-theme="dark"] .geogon-frame-state button { border-color: #52617a; background: #111a28; color: #e7edf7; }
+.app-shell[data-theme="dark"] .geogon-frame-state.is-error,
+.app-shell[data-theme="dark"] .geogon-dialog-status.is-error { color: #ffb4b4; }
 .app-shell[data-theme="dark"] :is(
   .pdf-add-page,
   .slide-add-button,
@@ -2531,6 +2605,21 @@ button { color: inherit; }
   .modal-backdrop { padding: 10px; }
   .equation-dialog { padding: 16px; }
   .math-tools-dialog { max-height: calc(100dvh - 20px); padding: 16px; }
+  .geogon-backdrop {
+    padding: calc(8px + var(--safe-area-top)) calc(8px + var(--safe-area-right)) calc(8px + var(--safe-area-bottom)) calc(8px + var(--safe-area-left));
+  }
+  .geogon-dialog {
+    width: 100%;
+    height: calc(100dvh - var(--safe-area-top) - var(--safe-area-bottom) - 16px);
+    min-height: 0;
+    padding: 12px;
+    gap: 8px;
+    border-radius: 9px;
+  }
+  .geogon-dialog-description { margin-top: -2px; }
+  .geogon-dialog-actions { grid-template-columns: 1fr 1fr; }
+  .geogon-dialog-status { grid-column: 1 / -1; white-space: normal; }
+  .geogon-dialog-actions :is(.dialog-cancel, .primary-button) { min-height: 44px; width: 100%; }
   .math-tools-experimental-toggle { align-items: flex-start; gap: 10px; padding: 11px 12px; }
   .math-tool-categories { overflow-x: auto; }
   .math-tool-categories button { min-width: max-content; }

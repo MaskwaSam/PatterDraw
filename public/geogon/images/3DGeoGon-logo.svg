@@ -1,0 +1,18 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright 2026 MaskwaSam <136355328+MaskwaSam@users.noreply.github.com> -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 170" role="img" aria-labelledby="title desc">
+  <title id="title">3DGeoGon</title>
+  <desc id="desc">3DGeoGon wordmark with an original layered-pentagon geometry mark.</desc>
+  <rect x="6" y="12" width="748" height="146" rx="24" fill="#10283a"/>
+  <rect x="9" y="15" width="742" height="140" rx="22" fill="none" stroke="#3d7480" stroke-width="2"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M72 42 124 25 166 61 147 116 91 124Z" stroke="#56d6c1" stroke-width="7"/>
+    <path d="M52 67 104 50 146 86 127 141 71 149Z" stroke="#ff806e" stroke-width="7"/>
+    <path d="M72 42 52 67M166 61 146 86M147 116 127 141M91 124 71 149" stroke="#b9acf7" stroke-width="5"/>
+    <path d="M104 50 124 25M104 50 146 86M104 50 71 149" stroke="#f8f7ff" stroke-opacity=".72" stroke-width="3"/>
+  </g>
+  <circle cx="104" cy="50" r="7" fill="#ffd166"/>
+  <circle cx="127" cy="141" r="6" fill="#ffd166"/>
+  <text x="205" y="86" fill="#fbfaff" font-family="system-ui, -apple-system, BlinkMacSystemFont, sans-serif" font-size="58" font-weight="800">3DGeoGon</text>
+  <text x="209" y="121" fill="#83e5d1" font-family="system-ui, -apple-system, BlinkMacSystemFont, sans-serif" font-size="19" font-weight="700" letter-spacing="3">SPATIAL GEOMETRY CANVAS</text>
+</svg>

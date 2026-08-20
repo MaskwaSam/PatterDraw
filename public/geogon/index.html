@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright 2026 MaskwaSam <136355328+MaskwaSam@users.noreply.github.com> -->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'self'; worker-src 'none'; manifest-src 'self'; base-uri 'none'; form-action 'none'">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#004A6E">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="3DGeoGon 3D Geometry Canvas">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="description" content="3DGeoGon is a classroom 3D geometry canvas for building, saving, importing, and embedding geometry diagrams.">
+    <meta name="keywords" content="3DGeoGon, 3D geometry canvas, classroom geometry visualizer, trigonometry diagrams, Pythagoras diagrams, teacher whiteboard tool">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="3DGeoGon">
+    <meta property="og:title" content="3DGeoGon 3D Geometry Canvas">
+    <meta property="og:description" content="Build, save, import, and embed classroom 3D geometry diagrams.">
+    <meta property="og:image" content="./images/screenshot.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:type" content="image/png">
+    <meta property="og:image:alt" content="3DGeoGon 3D geometry canvas interface screenshot">
+    <meta property="og:locale" content="en_GB">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="3DGeoGon 3D Geometry Canvas">
+    <meta name="twitter:description" content="Build, save, import, and embed classroom 3D geometry diagrams.">
+    <meta name="twitter:image" content="./images/screenshot.png">
+    <meta name="twitter:image:alt" content="3DGeoGon 3D geometry canvas interface screenshot">
+    <title>3DGeoGon 3D Geometry Canvas</title>
+    <link rel="icon" type="image/svg+xml" href="images/3DGeoGon-icon.svg">
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="images/3DGeoGon-icon.svg">
+    <link rel="stylesheet" href="style.css?v=21">
+</head>
+<body>
+    <h1 class="sr-only">3DGeoGon: Build, Save, and Embed 3D Geometry Diagrams</h1>
+    <div id="title-screen" class="title-screen">
+        <div class="title-content">
+            <img src="images/3DGeoGon-logo.svg" alt="3DGeoGon" class="title-logo" draggable="false">
+            <div class="title-goodie" aria-hidden="true">
+                <svg class="title-goodie-svg" viewBox="0 0 220 170" role="presentation" focusable="false">
+                    <g class="goodie-turntable" data-splash-turn>
+                        <g class="goodie-solid" data-splash-solid>
+                            <g class="goodie-facets">
+                                <polygon class="goodie-facet goodie-facet--back" points="72,34 132,17 178,58 157,122 92,132"></polygon>
+                                <polygon class="goodie-facet goodie-facet--side goodie-facet--side-1" points="72,34 132,17 108,46 48,63"></polygon>
+                                <polygon class="goodie-facet goodie-facet--side goodie-facet--side-2" points="132,17 178,58 154,87 108,46"></polygon>
+                                <polygon class="goodie-facet goodie-facet--side goodie-facet--side-3" points="178,58 157,122 133,151 154,87"></polygon>
+                                <polygon class="goodie-facet goodie-facet--side goodie-facet--side-4" points="157,122 92,132 68,161 133,151"></polygon>
+                                <polygon class="goodie-facet goodie-facet--side goodie-facet--side-5" points="92,132 72,34 48,63 68,161"></polygon>
+                                <polygon class="goodie-facet goodie-facet--front" points="48,63 108,46 154,87 133,151 68,161"></polygon>
+                            </g>
+                            <g class="goodie-edges">
+                                <path class="goodie-edge goodie-polygon-back" data-edge-count="5" d="M72 34 132 17 178 58 157 122 92 132Z"></path>
+                                <g class="goodie-connectors">
+                                    <line class="goodie-edge goodie-connector" data-edge-count="1" x1="72" y1="34" x2="48" y2="63"></line>
+                                    <line class="goodie-edge goodie-connector" data-edge-count="1" x1="132" y1="17" x2="108" y2="46"></line>
+                                    <line class="goodie-edge goodie-connector" data-edge-count="1" x1="178" y1="58" x2="154" y2="87"></line>
+                                    <line class="goodie-edge goodie-connector" data-edge-count="1" x1="157" y1="122" x2="133" y2="151"></line>
+                                    <line class="goodie-edge goodie-connector" data-edge-count="1" x1="92" y1="132" x2="68" y2="161"></line>
+                                </g>
+                                <path class="goodie-edge goodie-polygon-front" data-edge-count="5" d="M48 63 108 46 154 87 133 151 68 161Z"></path>
+                            </g>
+                            <g class="goodie-traces" data-splash-construction>
+                                <g class="goodie-trace-ring goodie-trace-ring--back">
+                                    <line class="goodie-trace goodie-trace-back" pathLength="1" x1="72" y1="34" x2="132" y2="17"></line>
+                                    <line class="goodie-trace goodie-trace-back" pathLength="1" x1="132" y1="17" x2="178" y2="58"></line>
+                                    <line class="goodie-trace goodie-trace-back" pathLength="1" x1="178" y1="58" x2="157" y2="122"></line>
+                                    <line class="goodie-trace goodie-trace-back" pathLength="1" x1="157" y1="122" x2="92" y2="132"></line>
+                                    <line class="goodie-trace goodie-trace-back" pathLength="1" x1="92" y1="132" x2="72" y2="34"></line>
+                                </g>
+                                <g class="goodie-trace-connectors">
+                                    <line class="goodie-trace" pathLength="1" x1="72" y1="34" x2="48" y2="63"></line>
+                                    <line class="goodie-trace" pathLength="1" x1="132" y1="17" x2="108" y2="46"></line>
+                                    <line class="goodie-trace" pathLength="1" x1="178" y1="58" x2="154" y2="87"></line>
+                                    <line class="goodie-trace" pathLength="1" x1="157" y1="122" x2="133" y2="151"></line>
+                                    <line class="goodie-trace" pathLength="1" x1="92" y1="132" x2="68" y2="161"></line>
+                                </g>
+                                <g class="goodie-trace-ring goodie-trace-ring--front">
+                                    <line class="goodie-trace goodie-trace-front" pathLength="1" x1="48" y1="63" x2="108" y2="46"></line>
+                                    <line class="goodie-trace goodie-trace-front" pathLength="1" x1="108" y1="46" x2="154" y2="87"></line>
+                                    <line class="goodie-trace goodie-trace-front" pathLength="1" x1="154" y1="87" x2="133" y2="151"></line>
+                                    <line class="goodie-trace goodie-trace-front" pathLength="1" x1="133" y1="151" x2="68" y2="161"></line>
+                                    <line class="goodie-trace goodie-trace-front" pathLength="1" x1="68" y1="161" x2="48" y2="63"></line>
+                                </g>
+                            </g>
+                            <g class="goodie-vertices">
+                                <circle class="goodie-node goodie-node--back" cx="72" cy="34" r="2.4"></circle>
+                                <circle class="goodie-node goodie-node--back" cx="132" cy="17" r="2.4"></circle>
+                                <circle class="goodie-node goodie-node--back" cx="178" cy="58" r="2.4"></circle>
+                                <circle class="goodie-node goodie-node--back" cx="157" cy="122" r="2.4"></circle>
+                                <circle class="goodie-node goodie-node--back" cx="92" cy="132" r="2.4"></circle>
+                                <circle class="goodie-node goodie-node--front" cx="48" cy="63" r="2.8"></circle>
+                                <circle class="goodie-node goodie-node--front goodie-node--accent" cx="108" cy="46" r="4.8"></circle>
+                                <circle class="goodie-node goodie-node--front" cx="154" cy="87" r="2.8"></circle>
+                                <circle class="goodie-node goodie-node--front goodie-node--accent" cx="133" cy="151" r="4"></circle>
+                                <circle class="goodie-node goodie-node--front" cx="68" cy="161" r="2.8"></circle>
+                            </g>
+                        </g>
+                    </g>
+                </svg>
+            </div>
+            <p class="title-tagline">Build it. Save it. Play!</p>
+            <div class="title-actions">
+                <button id="start-btn" class="start-btn">Start</button>
+            </div>
+            <p class="copyright">3DGeoGon classroom geometry resource</p>
+        </div>
+    </div>
+
+    <div id="startup-error-overlay" class="startup-error-overlay" role="alertdialog" aria-modal="true" aria-labelledby="startup-error-title" aria-describedby="startup-error-message" hidden>
+        <div class="startup-error-card">
+            <h2 id="startup-error-title">3D graphics unavailable</h2>
+            <p id="startup-error-message"></p>
+            <button id="startup-error-retry" class="startup-error-retry" type="button">Try Again</button>
+        </div>
+    </div>
+
+    <div id="main-app" class="main-app" style="display: none;">
+        <button id="panel-toggle-btn" class="panel-toggle-btn active" aria-label="Toggle control panel">
+            <span></span>
+            <span></span>
+            <span></span>
+        </button>
+
+        <div class="container">
+            <aside class="control-panel">
+                <img src="images/3DGeoGon-logo.svg" alt="3DGeoGon" class="panel-logo" draggable="false">
+
+                <div class="top-button-row three-col-row panel-top-controls">
+                    <button id="add-btn" class="add-button" title="Add 3-D object" type="button" aria-expanded="false" aria-controls="add-dropdown">
+                        <svg class="add-plus-icon" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                            <line x1="6" y1="1.8" x2="6" y2="10.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></line>
+                            <line x1="1.8" y1="6" x2="10.2" y2="6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></line>
+                        </svg>
+                        Add
+                        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" style="margin-left: 4px;" aria-hidden="true">
+                            <polyline points="2,4 6,8 10,4"></polyline>
+                        </svg>
+                    </button>
+                    <button id="reset-view-btn" class="top-btn" type="button">RESET<br>VIEW</button>
+                    <button id="clear-objects-btn" class="top-btn" type="button" title="Delete all objects">CLEAR<br>ALL</button>
+
+                    <div id="add-dropdown" class="add-dropdown" aria-label="Add a shape or example" style="display: none;">
+                        <button class="dropdown-item" data-primitive="cuboid" type="button"><strong>+</strong> Right Rectangular Prism</button>
+                        <button class="dropdown-item" data-primitive="right-triangle-prism" type="button"><strong>+</strong> Triangular Prism</button>
+                        <button class="dropdown-item" data-primitive="rectangular-pyramid" type="button"><strong>+</strong> Rectangular Pyramid</button>
+                        <button class="dropdown-item" data-primitive="pentagonal-prism" type="button"><strong>+</strong> Pentagonal Prism</button>
+                        <button class="dropdown-item" data-primitive="pentagonal-pyramid" type="button"><strong>+</strong> Pentagonal Pyramid</button>
+                        <button class="dropdown-item" data-primitive="hexagonal-prism" type="button"><strong>+</strong> Hexagonal Prism</button>
+                        <button class="dropdown-item" data-primitive="hexagonal-pyramid" type="button"><strong>+</strong> Hexagonal Pyramid</button>
+                        <button class="dropdown-item" data-primitive="septagonal-prism" type="button"><strong>+</strong> Septagonal Prism</button>
+                        <button class="dropdown-item" data-primitive="septagonal-pyramid" type="button"><strong>+</strong> Septagonal Pyramid</button>
+                        <button class="dropdown-item" data-primitive="octagonal-prism" type="button"><strong>+</strong> Octagonal Prism</button>
+                        <button class="dropdown-item" data-primitive="octagonal-pyramid" type="button"><strong>+</strong> Octagonal Pyramid</button>
+                        <button class="dropdown-item" data-primitive="tetrahedron" type="button"><strong>+</strong> Tetrahedron (Triangular Pyramid)</button>
+                        <button class="dropdown-item" data-primitive="sphere" type="button"><strong>+</strong> Sphere</button>
+                        <button class="dropdown-item" data-primitive="hemisphere" type="button"><strong>+</strong> Hemisphere (Half-Sphere)</button>
+                        <button class="dropdown-item" data-primitive="cylinder" type="button"><strong>+</strong> Cylinder</button>
+                        <button class="dropdown-item" data-primitive="cone" type="button"><strong>+</strong> Cone</button>
+                    </div>
+                </div>
+
+                <div class="top-button-row three-col-row panel-top-controls-secondary">
+                    <div class="top-half-buttons" role="group" aria-label="Grid and point marker controls">
+                        <button id="grid-toggle-btn" class="top-btn top-half-btn" type="button" title="Toggle Grid">
+                            <div style="display: flex; align-items: center; justify-content: center;">
+                                <svg class="grid-icon" id="grid-icon" width="20" height="20" viewBox="0 0 24 24">
+                                    <rect x="3" y="3" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" />
+                                    <line x1="9" y1="3" x2="9" y2="21" stroke="currentColor" stroke-width="1.5" />
+                                    <line x1="15" y1="3" x2="15" y2="21" stroke="currentColor" stroke-width="1.5" />
+                                    <line x1="3" y1="9" x2="21" y2="9" stroke="currentColor" stroke-width="1.5" />
+                                    <line x1="3" y1="15" x2="21" y2="15" stroke="currentColor" stroke-width="1.5" />
+                                </svg>
+                            </div>
+                        </button>
+                        <button id="point-marker-toggle-btn" class="top-btn top-half-btn" type="button" title="Point markers visible (click to hide)">
+                            <div style="display: flex; align-items: center; justify-content: center;">
+                                <svg class="point-marker-icon point-marker-active" id="point-filled-icon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                                    <circle cx="12" cy="12" r="7"/>
+                                </svg>
+                                <svg class="point-marker-icon" id="point-hollow-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                                    <circle cx="12" cy="12" r="7"/>
+                                </svg>
+                            </div>
+                        </button>
+                    </div>
+                    <button id="label-badge-toggle-btn" class="top-btn" type="button" title="Labels with badges (click for plain)">
+                        <div style="display: flex; align-items: center; gap: 5px;">
+                            <span class="label-badge-icon" id="label-plain-icon" aria-hidden="true">V</span>
+                            <span class="label-badge-separator">|</span>
+                            <span class="label-badge-icon label-badge-active" id="label-badge-icon" aria-hidden="true">V</span>
+                            <span class="label-badge-separator">|</span>
+                            <span class="label-badge-icon label-off-option" id="label-off-icon" aria-hidden="true">OFF</span>
+                        </div>
+                    </button>
+                    <button id="ghost-toggle-btn" class="top-btn" type="button" title="Transparent faces enabled (click for solid faces)">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <svg class="ghost-icon ghost-active" id="ghost-wire-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
+                                <polygon points="12,3 20,7.5 12,12 4,7.5"></polygon>
+                                <polyline points="4,7.5 4,16.5 12,21 20,16.5 20,7.5"></polyline>
+                                <line x1="12" y1="12" x2="12" y2="21"></line>
+                            </svg>
+                            <span class="ghost-separator">|</span>
+                            <svg class="ghost-icon" id="ghost-solid-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-linecap="round">
+                                <polygon points="12,3 20,7.5 12,12 4,7.5" fill="currentColor" fill-opacity="0.95"></polygon>
+                                <polygon points="4,7.5 12,12 12,21 4,16.5" fill="currentColor" fill-opacity="0.78"></polygon>
+                                <polygon points="20,7.5 12,12 12,21 20,16.5" fill="currentColor" fill-opacity="0.62"></polygon>
+                                <polygon points="12,3 20,7.5 12,12 4,7.5" stroke-width="2.2"></polygon>
+                                <polyline points="4,7.5 4,16.5 12,21 20,16.5 20,7.5" stroke-width="2.2"></polyline>
+                                <line x1="12" y1="12" x2="12" y2="21" stroke-width="2.2"></line>
+                            </svg>
+                        </div>
+                    </button>
+                </div>
+
+                <div class="panel-major-divider"></div>
+
+                <div class="panel-section">
+                    <div id="primitive-section-header" class="section-heading-row collapsible-section-header" role="button" tabindex="0" aria-expanded="true">
+                        <span class="group-arrow" id="primitive-section-arrow">&#x25BC;&#xFE0E;</span>
+                           <h3>3-D Objects</h3>
+                    </div>
+                    <div id="primitive-section-content" class="collapsible-section-content">
+                        <select id="primitive-select" class="panel-input primitive-selector-hidden" aria-hidden="true" tabindex="-1">
+                            <option value="cuboid">Right Rectangular Prism</option>
+                            <option value="right-triangle-prism">Triangular Prism</option>
+                            <option value="rectangular-pyramid">Rectangular Pyramid</option>
+                            <option value="pentagonal-prism">Pentagonal Prism</option>
+                            <option value="pentagonal-pyramid">Pentagonal Pyramid</option>
+                            <option value="hexagonal-prism">Hexagonal Prism</option>
+                            <option value="hexagonal-pyramid">Hexagonal Pyramid</option>
+                            <option value="septagonal-prism">Septagonal Prism</option>
+                            <option value="septagonal-pyramid">Septagonal Pyramid</option>
+                            <option value="octagonal-prism">Octagonal Prism</option>
+                            <option value="octagonal-pyramid">Octagonal Pyramid</option>
+                            <option value="tetrahedron">Tetrahedron (Triangular Pyramid)</option>
+                            <option value="sphere">Sphere</option>
+                            <option value="hemisphere">Hemisphere (Half-Sphere)</option>
+                            <option value="cylinder">Cylinder</option>
+                            <option value="cone">Cone</option>
+                        </select>
+
+                        <div id="primitive-cards-list" class="objects-list"></div>
+                    </div>
+                </div>
+
+                <div class="panel-separator"></div>
+
+                <div class="panel-section">
+                    <div id="points-section-header" class="section-heading-row collapsible-section-header" role="button" tabindex="0" aria-expanded="true">
+                        <span class="group-arrow" id="points-section-arrow">&#x25BC;&#xFE0E;</span>
+                        <h3>Vertices &amp; Points</h3>
+                    </div>
+                    <div id="points-section-content" class="collapsible-section-content">
+                        <div id="points-list" class="points-list"></div>
+                        <div id="selection-summary" class="selection-summary empty"></div>
+                        <div id="actions-list" class="actions-list"></div>
+                    </div>
+                </div>
+
+                <div class="panel-separator"></div>
+
+                <div class="panel-section">
+                    <div id="triangles-section-header" class="section-heading-row collapsible-section-header" role="button" tabindex="0" aria-expanded="true">
+                        <span class="group-arrow" id="triangles-section-arrow">&#x25BC;&#xFE0E;</span>
+                        <h3>Triangles</h3>
+                    </div>
+                    <div id="triangles-section-content" class="collapsible-section-content">
+                        <div id="triangles-list" class="objects-list"></div>
+                    </div>
+                </div>
+
+                <div class="panel-separator"></div>
+
+                <div class="panel-section">
+                    <div id="segments-section-header" class="section-heading-row collapsible-section-header" role="button" tabindex="0" aria-expanded="true">
+                        <span class="group-arrow" id="segments-section-arrow">&#x25BC;&#xFE0E;</span>
+                        <h3>Line Segments</h3>
+                    </div>
+                    <div id="segments-section-content" class="collapsible-section-content">
+                        <div id="segments-list" class="objects-list"></div>
+                    </div>
+                </div>
+
+                <div class="panel-separator"></div>
+
+                <div class="panel-section">
+                    <div id="angles-section-header" class="section-heading-row collapsible-section-header" role="button" tabindex="0" aria-expanded="true">
+                        <span class="group-arrow" id="angles-section-arrow">&#x25BC;&#xFE0E;</span>
+                        <h3>Angles</h3>
+                    </div>
+                    <div id="angles-section-content" class="collapsible-section-content">
+                        <div id="angles-list" class="objects-list"></div>
+                    </div>
+                </div>
+
+                <div class="panel-separator"></div>
+
+                <div class="panel-section">
+                    <div id="planes-section-header" class="section-heading-row collapsible-section-header" role="button" tabindex="0" aria-expanded="true">
+                        <span class="group-arrow" id="planes-section-arrow">&#x25BC;&#xFE0E;</span>
+                        <h3>Quadrilaterals</h3>
+                    </div>
+                    <div id="planes-section-content" class="collapsible-section-content">
+                        <div id="planes-list" class="objects-list"></div>
+                    </div>
+                </div>
+
+                <div class="panel-separator"></div>
+
+                <div class="panel-section">
+                    <div id="base-highlights-section-header" class="section-heading-row collapsible-section-header" role="button" tabindex="0" aria-expanded="true">
+                        <span class="group-arrow" id="base-highlights-section-arrow">&#x25BC;&#xFE0E;</span>
+                        <h3>Base &amp; Section Highlights</h3>
+                    </div>
+                    <div id="base-highlights-section-content" class="collapsible-section-content">
+                        <div id="base-highlights-list" class="objects-list"></div>
+                    </div>
+                </div>
+
+                <div class="panel-separator"></div>
+
+                <div class="panel-section">
+                    <div id="labels-section-header" class="section-heading-row collapsible-section-header" role="button" tabindex="0" aria-expanded="true">
+                        <span class="group-arrow" id="labels-section-arrow">&#x25BC;&#xFE0E;</span>
+                        <h3>Labels</h3>
+                    </div>
+                    <div id="labels-section-content" class="collapsible-section-content">
+                        <div id="labels-list" class="objects-list"></div>
+                    </div>
+                </div>
+
+                <div class="panel-major-divider"></div>
+
+                <div class="panel-separator"></div>
+
+                <div class="top-button-row three-col-row bottom-controls-row">
+                    <div class="bottom-half-buttons">
+                        <button id="help-button" class="top-btn bottom-half-btn" type="button" title="How to Use" aria-label="How to Use">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+                                <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                            </svg>
+                        </button>
+                    </div>
+
+                    <button id="display-size-toggle-btn" class="top-btn" type="button" title="Toggle display size">
+                        <div style="display: flex; align-items: center; gap: 6px;">
+                            <span class="size-option size-active" id="size-small" style="font-size: 11px;">A</span>
+                            <span class="size-separator">|</span>
+                            <span class="size-option" id="size-large" style="font-size: 16px;">A</span>
+                            <span class="size-separator">|</span>
+                            <span class="size-option" id="size-xlarge" style="font-size: 21px;">A</span>
+                        </div>
+                    </button>
+
+                    <button id="theme-toggle" class="top-btn" type="button" title="Toggle Theme">
+                        <div style="display: flex; align-items: center; gap: 6px;">
+                            <svg id="light-icon" class="theme-icon theme-active" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <circle cx="12" cy="12" r="5"></circle>
+                                <line x1="12" y1="1" x2="12" y2="3"></line>
+                                <line x1="12" y1="21" x2="12" y2="23"></line>
+                                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                                <line x1="1" y1="12" x2="3" y2="12"></line>
+                                <line x1="21" y1="12" x2="23" y2="12"></line>
+                                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+                            </svg>
+                            <span class="theme-separator">|</span>
+                            <svg id="dark-icon" class="theme-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                            </svg>
+                        </div>
+                    </button>
+                </div>
+
+                <div class="two-d-views-control-row">
+                    <button id="open-2d-views-btn" class="top-btn two-d-views-control-btn" type="button" title="Open 2-D Views and Nets" aria-label="Open 2-D Views and Nets">2-D VIEWS</button>
+                </div>
+
+                <div class="top-button-row three-col-row resource-controls-row" aria-label="File and embed controls">
+                    <button id="export-json-btn" class="top-btn resource-tool-btn" type="button" title="Export this diagram as JSON">EXPORT<br>JSON</button>
+                    <button id="import-json-btn" class="top-btn resource-tool-btn" type="button" title="Import a diagram JSON file">IMPORT<br>JSON</button>
+                    <button id="embed-script-btn" class="top-btn resource-tool-btn" type="button" title="Copy embed script for this diagram">EMBED<br>SCRIPT</button>
+                </div>
+                <div class="top-button-row three-col-row resource-controls-row" aria-label="Share and image controls">
+                    <button id="share-link-btn" class="top-btn resource-tool-btn" type="button" title="Copy a share link for this diagram">SHARE<br>LINK</button>
+                    <button id="copy-json-btn" class="top-btn resource-tool-btn" type="button" title="Copy this diagram JSON to the clipboard">COPY<br>JSON</button>
+                    <button id="export-png-btn" class="top-btn resource-tool-btn" type="button" title="Export the current canvas view as PNG">EXPORT<br>PNG</button>
+                </div>
+                <div class="top-button-row two-col-row resource-controls-row resource-controls-row-secondary" aria-label="Moodle SVG image controls">
+                    <button id="export-svg-btn" class="top-btn resource-tool-btn" type="button" title="Export the current viewport as an SVG image">EXPORT<br>SVG</button>
+                    <button id="copy-svg-html-btn" class="top-btn resource-tool-btn" type="button" title="Copy inline SVG HTML for Moodle">COPY SVG<br>HTML</button>
+                </div>
+                <input id="import-json-input" type="file" accept=".json,application/json" hidden>
+
+            </aside>
+
+            <main class="canvas-container">
+                <canvas id="three-canvas" aria-label="3DGeoGon 3D geometry canvas"></canvas>
+            </main>
+        </div>
+    </div>
+
+    <div id="two-d-views-overlay" class="two-d-views-overlay" aria-hidden="true">
+        <div id="two-d-views-dialog" class="two-d-views-dialog" role="dialog" aria-modal="true" aria-labelledby="two-d-views-title">
+            <div class="two-d-views-header">
+                <h2 id="two-d-views-title">2-D Views</h2>
+                <button id="two-d-views-close" class="two-d-views-close" type="button" aria-label="Close 2-D Views">&times;</button>
+            </div>
+
+            <div id="two-d-views-tabs" class="two-d-views-tabs" role="tablist" aria-label="2-D view selection">
+                <button id="two-d-view-tab-front" class="two-d-views-tab" type="button" role="tab" data-view="front" aria-controls="two-d-views-stage" aria-selected="true" tabindex="0">Front</button>
+                <button id="two-d-view-tab-top" class="two-d-views-tab" type="button" role="tab" data-view="top" aria-controls="two-d-views-stage" aria-selected="false" tabindex="-1">Top</button>
+                <button id="two-d-view-tab-right" class="two-d-views-tab" type="button" role="tab" data-view="right" aria-controls="two-d-views-stage" aria-selected="false" tabindex="-1">Right Side</button>
+                <button id="two-d-view-tab-three" class="two-d-views-tab" type="button" role="tab" data-view="three" aria-controls="two-d-views-stage" aria-selected="false" tabindex="-1">3 Views</button>
+                <button id="two-d-view-tab-net" class="two-d-views-tab" type="button" role="tab" data-view="net" aria-controls="two-d-views-stage" aria-selected="false" tabindex="-1">Net</button>
+            </div>
+
+            <div class="two-d-views-options">
+                <label class="two-d-show-hidden-edges-label" for="two-d-show-hidden-edges">
+                    <input id="two-d-show-hidden-edges" type="checkbox">
+                    <span>Show hidden edges</span>
+                </label>
+                <p id="two-d-views-status" class="two-d-views-status" role="status" aria-live="polite">Front view</p>
+            </div>
+
+            <div id="two-d-views-stage" class="two-d-views-stage" role="tabpanel" aria-labelledby="two-d-view-tab-front" tabindex="0">
+                <svg id="two-d-view-svg" class="two-d-view-svg" viewBox="0 0 1000 760" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Front 2-D view"></svg>
+            </div>
+
+            <div class="two-d-views-actions">
+                <button id="two-d-view-export-current" class="two-d-views-action" type="button">Export Current View</button>
+                <button id="two-d-view-export-sheet" class="two-d-views-action" type="button">Export View Sheet</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="custom-modal-overlay" class="custom-modal-overlay" aria-hidden="true">
+        <div class="custom-modal" role="dialog" aria-modal="true" aria-labelledby="custom-modal-message">
+            <p id="custom-modal-message" class="custom-modal-message"></p>
+            <input id="custom-modal-input" class="custom-modal-input" type="text" autocomplete="off" spellcheck="false" aria-labelledby="custom-modal-message" aria-describedby="custom-modal-error" />
+            <div id="custom-modal-ratio-fields" class="custom-modal-ratio-fields" hidden>
+                <input id="custom-modal-ratio-left" class="custom-modal-input custom-modal-ratio-input" type="number" inputmode="numeric" min="1" step="1" autocomplete="off" spellcheck="false" aria-label="Left side of ratio" aria-describedby="custom-modal-message custom-modal-error" />
+                <span class="custom-modal-ratio-separator">:</span>
+                <input id="custom-modal-ratio-right" class="custom-modal-input custom-modal-ratio-input" type="number" inputmode="numeric" min="1" step="1" autocomplete="off" spellcheck="false" aria-label="Right side of ratio" aria-describedby="custom-modal-message custom-modal-error" />
+            </div>
+            <div id="custom-modal-symbols" class="custom-modal-symbols" hidden>
+                <button type="button" class="custom-modal-symbol-btn" data-symbol-key="alpha">&alpha;</button>
+                <button type="button" class="custom-modal-symbol-btn" data-symbol-key="beta">&beta;</button>
+                <button type="button" class="custom-modal-symbol-btn" data-symbol-key="gamma">&gamma;</button>
+                <button type="button" class="custom-modal-symbol-btn" data-symbol-key="delta">&delta;</button>
+                <button type="button" class="custom-modal-symbol-btn" data-symbol-key="theta">&theta;</button>
+                <button type="button" class="custom-modal-symbol-btn" data-symbol-key="phi">&phi;</button>
+                <button type="button" class="custom-modal-symbol-btn" data-symbol-key="degree">&deg;</button>
+            </div>
+            <div id="custom-modal-color-picker" class="custom-modal-color-picker" hidden></div>
+            <p id="custom-modal-error" class="custom-modal-error" aria-live="polite"></p>
+            <div class="custom-modal-actions">
+                <button id="custom-modal-cancel" class="custom-modal-btn custom-modal-btn-cancel" type="button">Cancel</button>
+                <button id="custom-modal-confirm" class="custom-modal-btn custom-modal-btn-confirm" type="button">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="crash-report-overlay" class="crash-report-overlay" aria-hidden="true">
+        <div class="crash-report-modal" role="dialog" aria-modal="true" aria-labelledby="crash-report-title">
+            <div class="crash-report-header">
+                <h2 id="crash-report-title">Crash Report</h2>
+                <div class="crash-report-actions">
+                    <button id="crash-report-refresh" class="crash-report-btn" type="button">Refresh</button>
+                    <button id="crash-report-copy" class="crash-report-btn" type="button">Copy</button>
+                    <button id="crash-report-close" class="crash-report-btn" type="button">Close</button>
+                </div>
+            </div>
+            <pre id="crash-report-content" class="crash-report-content"></pre>
+        </div>
+    </div>
+
+    <div id="help-overlay" class="help-overlay" aria-hidden="true">
+        <div class="help-content" role="dialog" aria-modal="true" aria-labelledby="help-title">
+            <div class="help-header">
+                <h2 id="help-title">How To Use 3DGeoGon</h2>
+                <button id="close-help-btn" class="help-close-btn" type="button" aria-label="Close help">&times;</button>
+            </div>
+            <div class="help-section">
+                <p>Click <strong>Add</strong> to place a 3-D object, then adjust its dimensions in <strong>3-D Objects</strong>.</p>
+                <p>Select labelled vertices and other points in order from <strong>Vertices &amp; Points</strong>; available actions appear only for valid selections.</p>
+                <p>Shape corners are vertices. Centres, midpoints, intersections, and other constructed locations are points.</p>
+                <p>Use the lists to hide, show, or delete created line segments, triangles, quadrilaterals, angles, and labels.</p>
+                <p>Use <strong>INSPECT</strong> on triangles, quadrilaterals, and base or section highlights to open an extracted 2-D view for closer analysis.</p>
+                <p>Use <strong>2-D VIEWS</strong> to open Front, Top, and Right Side views or an unfolded net of the current solid.</p>
+                <p>If the view gets awkward, use <strong>Reset View</strong>.</p>
+                <p>Desktop controls: left click + drag rotates, right click + drag pans, mouse wheel zooms, arrow keys rotate, and <strong>+</strong>/<strong>-</strong> zoom in/out.</p>
+                <p>On touch devices: drag to rotate, pinch to zoom, and use two-finger drag to pan.</p>
+                <p>For angle notation, <strong>ABC</strong> means the angle at <strong>B</strong>.</p>
+            </div>
+        </div>
+    </div>
+
+    <div id="triangle-extract-overlay" class="triangle-extract-overlay" aria-hidden="true">
+        <svg id="triangle-extract-flight-svg" class="triangle-extract-flight-svg" viewBox="0 0 100 100" aria-hidden="true">
+            <polygon id="triangle-extract-flight-polygon" class="triangle-extract-flight-polygon" points=""></polygon>
+            <polyline id="triangle-extract-flight-outline" class="triangle-extract-flight-outline" points=""></polyline>
+        </svg>
+        <div id="triangle-extract-modal" class="triangle-extract-modal" role="dialog" aria-modal="true" aria-labelledby="triangle-extract-title">
+            <div class="triangle-extract-header">
+                <div class="triangle-extract-copy">
+                    <h2 id="triangle-extract-title">Triangle</h2>
+                </div>
+                <div class="triangle-extract-header-actions">
+                    <button id="triangle-extract-rotate" class="triangle-extract-action-btn" type="button" aria-label="Rotate extracted shape 90 degrees" disabled>Rotate</button>
+                    <button id="triangle-extract-flip" class="triangle-extract-action-btn" type="button" aria-label="Flip extracted shape horizontally" aria-pressed="false" disabled>Flip</button>
+                </div>
+                <button id="triangle-extract-close" class="triangle-extract-close" type="button" aria-label="Close extracted triangle">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+            <div id="triangle-extract-stage" class="triangle-extract-stage">
+                <svg id="triangle-extract-svg" class="triangle-extract-svg" viewBox="0 0 1000 760" aria-label="Extracted triangle 2D view" role="img">
+                    <path id="triangle-extract-right-angle" class="triangle-extract-right-angle" d="" hidden></path>
+                    <polygon id="triangle-extract-polygon" class="triangle-extract-polygon" points=""></polygon>
+                    <polyline id="triangle-extract-outline" class="triangle-extract-outline" points=""></polyline>
+                    <g id="triangle-extract-dynamic-markers-group"></g>
+                    <g id="triangle-extract-dynamic-side-labels-group"></g>
+                    <g id="triangle-extract-angles-group"></g>
+                    <g id="triangle-extract-dynamic-labels-group"></g>
+                    <text id="triangle-extract-label-a" class="triangle-extract-label" x="0" y="0"></text>
+                    <text id="triangle-extract-label-b" class="triangle-extract-label" x="0" y="0"></text>
+                    <text id="triangle-extract-label-c" class="triangle-extract-label" x="0" y="0"></text>
+                    <text id="triangle-extract-label-d" class="triangle-extract-label" x="0" y="0"></text>
+                    <text id="triangle-extract-side-ab" class="triangle-extract-side-label" x="0" y="0"></text>
+                    <text id="triangle-extract-side-bc" class="triangle-extract-side-label" x="0" y="0"></text>
+                    <text id="triangle-extract-side-ca" class="triangle-extract-side-label" x="0" y="0"></text>
+                    <text id="triangle-extract-side-cd" class="triangle-extract-side-label" x="0" y="0"></text>
+                    <text id="triangle-extract-side-da" class="triangle-extract-side-label" x="0" y="0"></text>
+                </svg>
+            </div>
+
+        </div>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "./build/three-0.185.1/three.module.js",
+            "three/addons/controls/": "./build/three-0.185.1/controls/",
+            "three/addons/lines/": "./build/three-0.185.1/lines/"
+        }
+    }
+    </script>
+    <script type="module" src="app.js?v=23"></script>
+</body>
+</html>

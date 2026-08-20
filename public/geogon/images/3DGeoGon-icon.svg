@@ -1,0 +1,15 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright 2026 MaskwaSam <136355328+MaskwaSam@users.noreply.github.com> -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">3DGeoGon Icon</title>
+  <desc id="desc">Original layered-pentagon mark for the 3DGeoGon geometry canvas.</desc>
+  <rect width="512" height="512" rx="108" fill="#10283a"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M170 100 286 62 386 146 342 272 216 292Z" stroke="#56d6c1" stroke-width="24"/>
+    <path d="M124 164 240 126 340 210 296 336 170 356Z" stroke="#ff806e" stroke-width="24"/>
+    <path d="M170 100 124 164M386 146 340 210M342 272 296 336M216 292 170 356" stroke="#b9acf7" stroke-width="17"/>
+    <path d="M240 126 286 62M240 126 340 210M240 126 170 356" stroke="#f8f7ff" stroke-opacity=".78" stroke-width="12"/>
+  </g>
+  <circle cx="240" cy="126" r="20" fill="#ffd166"/>
+  <circle cx="296" cy="336" r="17" fill="#ffd166"/>
+</svg>

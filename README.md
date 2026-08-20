@@ -14,7 +14,7 @@ This repository is intentionally independent from PolyPad. Nothing here patches 
 - Board-first workspace with an accessible **Slides** toggle. The live editor stays mounted, so switching modes does not discard selections, history, or canvas position.
 - Offline LaTeX equations rendered to movable Excalidraw image elements by a locally bundled MathJax 4.1.3. Select an equation and press **Equation** to edit its original LaTeX.
 - Offline, no-AI Mermaid diagrams with explicit **Preview** and **Insert** actions. Flowchart, sequence, class, ER, and state diagrams become editable Excalidraw objects and can be reopened from a selected diagram.
-- Local 3DGeoGon handoff: use **COPY SVG HTML** in 3DGeoGon, then paste into PatterDraw to insert its self-contained vector view. Exported GeoGon PNG/SVG files can also be dropped on the board. Inserted views are ordinary local images included in autosave and `.patterdraw` backups; live web embeds remain disabled.
+- Default-off experimental **3D GeoGon** tool workspace, bundled and integrity-pinned locally. Enable experimental Math Tools, build in the controlled dialog, then choose **Insert into PatterDraw** to add a sanitized vector image. Copy/paste and dropped GeoGon PNG/SVG files remain supported. Inserted views are ordinary local images included in autosave and `.patterdraw` backups; live board embeds remain disabled.
 - Browser autosave plus portable `.patterdraw` project files containing scene data and original PDF bytes. Existing `.canvasclassroom` files remain supported for import.
 - One-click **Export all** downloads every object on the current board as a shareable PNG, including off-screen and off-page content. Editable Excalidraw scene data is embedded when the receiving image workflow preserves PNG metadata.
 - A device-wide, locally persisted Excalidraw library supports adding and reusing canvas objects plus importing and exporting standard `.excalidrawlib` files without enabling public-library browsing or publishing.
@@ -79,15 +79,21 @@ npm run release:package
 npm run release:verify
 ```
 
-`npm run release:package` empties and rebuilds `dist/` before recording source
-provenance, so a stale ignored bundle cannot be attributed to the current
-commit. Final packaging requires a clean git worktree. The release directory remains a
-complete deployable static root and includes `release-manifest.json`,
-`provenance.json`, a CycloneDX `sbom.cdx.json`, and `SHA256SUMS`. Payload paths
-and metadata are sorted and timestamped from `SOURCE_DATE_EPOCH` or the HEAD
-commit time; the checksum file covers every payload and metadata file except
-itself. The manifest records `releaseMode: "final"` or `"development"` and
-source maps are rejected because they are diagnostic-only artifacts.
+`npm run release:package` independently verifies the pinned GeoGon source,
+then empties and rebuilds `dist/` before recording source provenance, so a stale
+ignored bundle cannot be attributed to the current commit. Final packaging
+requires a clean git worktree. The release directory remains a complete
+deployable static root and includes `release-manifest.json`, `provenance.json`,
+a CycloneDX `sbom.cdx.json`, and `SHA256SUMS`. The SBOM identifies GeoGon
+0.2.10 and its bundled Three.js 0.185.1 runtime with their licenses, exact
+source provenance, deterministic inventory hashes, and their formal dependency
+relationship. Release verification
+checks those pinned hashes directly against the packaged files and does not
+trust a mutable `public/geogon/` checkout. Payload paths and metadata are sorted
+and timestamped from `SOURCE_DATE_EPOCH` or the HEAD commit time; the checksum
+file covers every payload and metadata file except itself. The manifest records
+`releaseMode: "final"` or `"development"` and source maps are rejected because
+they are diagnostic-only artifacts.
 
 For a local development check while source changes are uncommitted, make the
 dirty state explicit in the recorded provenance:
@@ -102,7 +108,7 @@ Do not distribute a bundle whose manifest records `source.dirty: true`.
 ## Student-safety boundary
 
 - All runtime scripts, fonts, MathJax equation support, PDF support, and workers are bundled locally.
-- The page CSP blocks external connections and frames.
+- The page CSP blocks external connections and external frames. The only reviewed iframe is the same-origin, version-pinned GeoGon tool dialog; it is never stored in a board or project.
 - Imported scene links are removed, iframe/embeddable elements are rejected, and remote URL/HTML paste is blocked.
 - LaTeX input is length- and complexity-limited, blocks links, HTML, external files, extension loading, external SVG paint values, and custom command definitions, and its generated SVG is reduced to explicit tag, attribute, node-count, and byte-size allowlists.
 - Mermaid is wrapper-limited to five editable diagram families and rejects frontmatter, configuration directives, links, callbacks, HTML, custom CSS, remote resources, unsafe geometry, and SVG-image fallback. The heavy converter loads only when Preview is pressed; AI remains disabled.
@@ -113,4 +119,11 @@ Read [GITHUB_SCAN.md](GITHUB_SCAN.md) for the July 2026 upstream survey and [doc
 
 ## License
 
-The standalone application is MIT licensed. A future Moodle activity under `moodle/mod_patterdraw` will be GPL-3.0-or-later as required for Moodle plugins. Third-party licenses are summarized in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); production builds copy the application and third-party notices into `dist/licenses/`.
+The PatterDraw application shell and source under `src/` are MIT licensed. The
+locally bundled 3DGeoGon subapplication under `public/geogon/` is a distinct
+component that remains GPL-3.0-or-later; its unminified source, license,
+third-party notices, and pinned provenance ship beside its runtime files. A
+future Moodle activity under `moodle/mod_patterdraw` will be GPL-3.0-or-later as
+required for Moodle plugins. Third-party licenses are summarized in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); production builds copy the
+application and notices into the release payload.

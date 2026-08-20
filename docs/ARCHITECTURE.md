@@ -69,14 +69,20 @@ AI stays disabled at the Excalidraw component boundary. A wrapper-owned Mermaid 
 
 The source is capped at 10,000 characters and 400 lines. Frontmatter, Mermaid configuration directives, links, callbacks, HTML, custom CSS/style directives, URLs, images, and icons are rejected before parsing. Mermaid is fixed to strict security, local-only settings and conservative edge limits. Converter output is rejected if it contains files or image fallback, unsafe element types, links, non-finite geometry, too many elements, or excessive bounds. Every inserted element stores an inert `customData.classroomMermaid` source record so a selected diagram can be revalidated and edited later.
 
+## 3D GeoGon tool workspace
+
+GeoGon 0.2.10 is copied byte-for-byte from a pinned upstream commit into `public/geogon/` and verified by a per-file hash inventory. A default-off experimental Math Tools card opens it in one wrapper-owned, same-origin dialog with only the sandbox capabilities its local editor and download controls require. Production responses give that local subapplication a separate CSP with `connect-src 'none'` and allow only same-origin framing; the main PatterDraw document remains non-frameable. Because the direct export handoff requires both `allow-scripts` and `allow-same-origin`, GeoGon is trusted, integrity-pinned vendor code rather than a hostile-content isolation boundary; the hash gate and child CSP are the controlling safeguards.
+
+The live editor is not an Excalidraw element and no iframe or editable GeoGon state enters `.patterdraw`. **Insert into PatterDraw** reads the pinned same-origin export API, requires GeoGon's true-vector marker, applies the ordinary SVG resource and size preflight, and stores the result as a local image with inert `customData.classroomGeoGon` provenance. GeoGon's own device-local working state is separate from project persistence. Arbitrary URLs and Excalidraw iframe, embeddable, and magic-frame elements remain blocked at every import, paste, live-scene, library, autosave, and export boundary.
+
 ## Full-board export
 
 The primary **Export all** action sends all live, non-deleted elements and local files to Excalidraw's PNG exporter rather than using viewport state. Frame clipping is disabled so objects extending beyond frames remain visible. Output dimensions are scaled, never cropped, to stay within an 8,192-pixel edge and 16-megapixel browser-canvas budget. The PNG embeds editable scene metadata where supported; `.patterdraw` remains the authoritative multi-scene project backup.
 
 ## Safety layers
 
-1. Build-time source check rejects direct remote scripts, styles, imports, fetches, live channels, telemetry, iframes, collaboration UI, and remote-library routing.
-2. CSP limits connections to the current origin and blocks frames, objects, and external navigation helpers.
+1. Build-time source check rejects direct remote scripts, styles, imports, fetches, live channels, telemetry, collaboration UI, remote-library routing, and every iframe except the exact reviewed local GeoGon dialog.
+2. CSP limits connections to the current origin, blocks external frames and objects, and gives the bundled GeoGon response a separate no-connect, same-origin-frame-only policy.
 3. Imports strip links and reject iframe/embeddable elements and non-local image sources.
 4. Paste and link-open hooks block remote URLs and embedded HTML.
 5. PDF.js receives local bytes; the app never instantiates its scripting manager or invokes PDF JavaScript APIs, and the exporter creates a fresh output document.

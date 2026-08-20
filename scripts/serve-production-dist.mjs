@@ -10,6 +10,7 @@ const routePrefix = "/classroom/math/unit-01/patterdraw/";
 const staticAssetPrefixes = [
   "assets/",
   "excalidraw-assets/",
+  "geogon/",
   "licenses/",
   "mathjax/",
   "mathjax-fonts/",
@@ -74,22 +75,45 @@ const contentSecurityPolicy = [
   "font-src 'self' data:",
   "connect-src 'self'",
   "media-src 'self' blob: data:",
-  "frame-src 'none'",
+  "frame-src 'self'",
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'self'",
   "frame-ancestors 'none'",
 ].join("; ");
 
-function setSecurityHeaders(response) {
-  response.setHeader("Content-Security-Policy", contentSecurityPolicy);
+// GeoGon is a reviewed, pinned local subapplication. Its HTML needs an inline
+// import map, but it cannot connect to a network endpoint or frame another
+// origin. Only this path may be embedded by the PatterDraw parent.
+const geoGonContentSecurityPolicy = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "worker-src 'none'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' blob: data:",
+  "font-src 'self'",
+  "connect-src 'none'",
+  "media-src 'none'",
+  "frame-src 'self'",
+  "object-src 'none'",
+  "manifest-src 'self'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'self'",
+].join("; ");
+
+function setSecurityHeaders(response, allowLocalGeoGonFrame = false) {
+  response.setHeader(
+    "Content-Security-Policy",
+    allowLocalGeoGonFrame ? geoGonContentSecurityPolicy : contentSecurityPolicy,
+  );
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("Referrer-Policy", "no-referrer");
   response.setHeader(
     "Permissions-Policy",
     "accelerometer=(), autoplay=(), camera=(), geolocation=(), microphone=(), payment=(), usb=()",
   );
-  response.setHeader("X-Frame-Options", "DENY");
+  response.setHeader("X-Frame-Options", allowLocalGeoGonFrame ? "SAMEORIGIN" : "DENY");
 }
 
 function decodeRequestPath(rawUrl) {
@@ -165,12 +189,13 @@ async function serveFile(response, filePath, requestMethod) {
     return false;
   }
   if (!fileStats.isFile()) return false;
+  const relativePath = path.relative(realDistRoot, resolvedFilePath).split(path.sep).join("/");
+  const isLocalGeoGonFile = relativePath.startsWith("geogon/");
   response.statusCode = 200;
-  setSecurityHeaders(response);
+  setSecurityHeaders(response, isLocalGeoGonFile);
   response.setHeader("Content-Type", contentTypes[path.extname(resolvedFilePath).toLowerCase()] || "application/octet-stream");
   response.setHeader("Content-Length", String(fileStats.size));
   response.setHeader("X-PatterDraw-Production-Dist", "1");
-  const relativePath = path.relative(realDistRoot, resolvedFilePath).split(path.sep).join("/");
   const isHashedBuildAsset = relativePath.startsWith("assets/")
     && /-[A-Za-z0-9_-]{8,}\.[^.]+$/.test(path.basename(relativePath));
   response.setHeader(
