@@ -157,10 +157,10 @@ const nginxServerNames = [...nginx.matchAll(/^\s*server_name\s+([^;]+);\s*$/gm)]
 if (
   nginxServerNames.length !== 2
   || nginxServerNames[0] !== "_"
-  || nginxServerNames[1] !== "draw.spatterson.ca patterdraw.spatterson.ca"
+  || nginxServerNames[1] !== "draw.spatterson.ca"
 ) {
   throw new Error(
-    "NGINX must recognize exactly draw.spatterson.ca and patterdraw.spatterson.ca after its rejecting default server.",
+    "NGINX must recognize exactly draw.spatterson.ca after its rejecting default server.",
   );
 }
 requireMatch(nginx, /return 444;/, "NGINX must reject unknown Host headers.");

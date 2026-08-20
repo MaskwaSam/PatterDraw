@@ -165,7 +165,7 @@ jobs:
             done
           }
 
-          accepted_hosts=(draw.spatterson.ca patterdraw.spatterson.ca)
+          accepted_hosts=(draw.spatterson.ca)
           for accepted_host in "${accepted_hosts[@]}"; do
             entry_headers="artifacts/production/nginx-entry-${accepted_host}.headers"
             entry_body="artifacts/production/nginx-entry-${accepted_host}.html"
