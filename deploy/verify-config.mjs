@@ -134,8 +134,23 @@ requireMatch(dockerfile, /"releaseMode"/, "The image build must reject a non-fin
 requireMatch(dockerfile, /"dirty"/, "The image build must reject dirty release provenance.");
 
 requireMatch(nginx, /listen 8080 default_server;/, "NGINX must have a rejecting default server.");
-requireMatch(nginx, /server_name draw\.spatterson\.ca;/, "NGINX must recognize only the draw hostname.");
+const nginxServerNames = [...nginx.matchAll(/^\s*server_name\s+([^;]+);\s*$/gm)]
+  .map((match) => match[1].trim());
+if (
+  nginxServerNames.length !== 2
+  || nginxServerNames[0] !== "_"
+  || nginxServerNames[1] !== "draw.spatterson.ca patterdraw.spatterson.ca"
+) {
+  throw new Error(
+    "NGINX must recognize exactly draw.spatterson.ca and patterdraw.spatterson.ca after its rejecting default server.",
+  );
+}
 requireMatch(nginx, /return 444;/, "NGINX must reject unknown Host headers.");
+requireMatch(
+  nginx,
+  /include \/etc\/nginx\/mime\.types;\s*types\s*\{\s*application\/javascript\s+mjs;\s*\}\s*default_type application\/octet-stream;/,
+  "NGINX must explicitly serve .mjs files as application/javascript.",
+);
 for (const [routeName, routePattern] of [
   ["root", /location = \/ \{[^}]*add_header Cache-Control "no-store, no-transform" always;[^}]*\}/],
   ["direct index", /location = \/index\.html \{[^}]*add_header Cache-Control "no-store, no-transform" always;[^}]*\}/],

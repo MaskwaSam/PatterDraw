@@ -385,8 +385,7 @@ test("imports a PDF through the local worker, draws an annotation, and exports i
   await page.goto(productionRoute, { waitUntil: "domcontentloaded" });
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
   const workerResponse = page.waitForResponse(
-    (response) => /\/assets\/pdf\.worker(?:\.min)?[-A-Za-z0-9_]*\.(?:mjs|js)(?:\?.*)?$/.test(new URL(response.url()).pathname)
-      && response.status() === 200,
+    (response) => /\/assets\/pdf\.worker(?:\.min)?[-A-Za-z0-9_]*\.(?:mjs|js)$/.test(new URL(response.url()).pathname),
     { timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT },
   );
   await page.getByLabel("Open project file").setInputFiles({
@@ -396,7 +395,14 @@ test("imports a PDF through the local worker, draws an annotation, and exports i
   });
   await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, { timeout: 30_000 });
   await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1, { timeout: 30_000 });
-  expect((await workerResponse).status()).toBe(200);
+  const loadedWorkerResponse = await workerResponse;
+  expect(loadedWorkerResponse.status()).toBe(200);
+  expect(loadedWorkerResponse.headers()["content-type"]).toMatch(
+    /^(?:application|text)\/javascript(?:;|$)/i,
+  );
+  expect(new URL(loadedWorkerResponse.url()).searchParams.get("patterdraw-worker")).toBe(
+    "mjs-mime-v1",
+  );
 
   await page.getByTestId("toolbar-rectangle").check({ force: true });
   const editorBounds = await page.locator(".editor-host").boundingBox();

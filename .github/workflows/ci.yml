@@ -103,6 +103,114 @@ jobs:
           sha256sum dist/release/release-manifest.json dist/release/provenance.json dist/release/sbom.cdx.json dist/release/SHA256SUMS > "$production_diag_dir/release-second.sha256"
           diff -u "$production_diag_dir/release-first.sha256" "$production_diag_dir/release-second.sha256"
           npm run release:verify 2>&1 | tee "$production_diag_dir/package-verify.log"
+      - name: Smoke-test the release through its NGINX container
+        if: ${{ always() && steps.production-package.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/production
+          deploy_env="$RUNNER_TEMP/patterdraw-deploy.env"
+          node deploy/verify-config.mjs | grep '^PATTERDRAW_' > "$deploy_env"
+          set -a
+          source "$deploy_env"
+          set +a
+          docker compose --env-file "$deploy_env" -f deploy/compose.yaml build patterdraw
+
+          container="patterdraw-nginx-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'docker rm --force "$container" >/dev/null 2>&1 || true' EXIT
+          docker run --detach --name "$container" \
+            --init \
+            --user 101:101 \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777,uid=101,gid=101 \
+            --tmpfs /var/cache/nginx:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=101,gid=101 \
+            --pids-limit 64 \
+            --memory 128m \
+            --cpus 0.50 \
+            --ulimit nofile=8192:8192 \
+            --publish 127.0.0.1::8080 \
+            "patterdraw:${PATTERDRAW_IMAGE_TAG}"
+
+          host_port=$(docker inspect --format '{{(index (index .NetworkSettings.Ports "8080/tcp") 0).HostPort}}' "$container")
+          ready=0
+          for attempt in $(seq 1 30); do
+            status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+              --header 'Host: draw.spatterson.ca' \
+              "http://127.0.0.1:${host_port}/healthz" || true)
+            if [ "$status" = 200 ]; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = 1
+
+          expected_headers=(
+            "Content-Security-Policy: default-src 'self' blob: data:; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' data:; connect-src 'self'; media-src 'self' blob: data:; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+            "Cross-Origin-Opener-Policy: same-origin"
+            "Cross-Origin-Resource-Policy: same-origin"
+            "Permissions-Policy: accelerometer=(), autoplay=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+            "Referrer-Policy: no-referrer"
+            "Strict-Transport-Security: max-age=31536000"
+            "X-Content-Type-Options: nosniff"
+            "X-Frame-Options: DENY"
+            "X-PatterDraw-Production-Dist: 1"
+          )
+
+          assert_security_headers() {
+            local response_headers=$1
+            for expected_header in "${expected_headers[@]}"; do
+              grep -Fqi "$expected_header" "$response_headers"
+            done
+          }
+
+          accepted_hosts=(draw.spatterson.ca patterdraw.spatterson.ca)
+          for accepted_host in "${accepted_hosts[@]}"; do
+            entry_headers="artifacts/production/nginx-entry-${accepted_host}.headers"
+            entry_body="artifacts/production/nginx-entry-${accepted_host}.html"
+            status=$(curl --silent --show-error \
+              --dump-header "$entry_headers" \
+              --output "$entry_body" \
+              --write-out '%{http_code}' \
+              --header "Host: ${accepted_host}" \
+              "http://127.0.0.1:${host_port}/")
+            test "$status" = 200
+            cmp --silent "$entry_body" dist/release/index.html
+            assert_security_headers "$entry_headers"
+            grep -Eiq '^Content-Type:[[:space:]]*text/html([[:space:]]*;.*)?[[:space:]]*$' "$entry_headers"
+            grep -Eiq '^Cache-Control:[[:space:]]*no-store, no-transform[[:space:]]*$' "$entry_headers"
+            if grep -Eiq '^Location:' "$entry_headers"; then
+              echo "Accepted PatterDraw host unexpectedly redirected: ${accepted_host}" >&2
+              exit 1
+            fi
+          done
+
+          rejected_body="artifacts/production/nginx-entry-unlisted-host.body"
+          rejected_status=$(curl --silent \
+            --output "$rejected_body" \
+            --write-out '%{http_code}' \
+            --header 'Host: not-patterdraw.invalid' \
+            "http://127.0.0.1:${host_port}/" || true)
+          test "$rejected_status" = 000
+          test ! -s "$rejected_body"
+
+          mapfile -t pdf_workers < <(find dist/release/assets -maxdepth 1 -type f -name 'pdf.worker*.mjs' -print | sort)
+          test "${#pdf_workers[@]}" -eq 1
+          worker_path="/${pdf_workers[0]#dist/release/}"
+          for accepted_host in "${accepted_hosts[@]}"; do
+            response_headers="artifacts/production/nginx-pdf-worker-${accepted_host}.headers"
+            status=$(curl --silent --show-error \
+              --dump-header "$response_headers" \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              --header "Host: ${accepted_host}" \
+              "http://127.0.0.1:${host_port}${worker_path}?patterdraw-worker=mjs-mime-v1")
+            test "$status" = 200
+            assert_security_headers "$response_headers"
+            grep -Eiq '^Content-Type:[[:space:]]*application/javascript([[:space:]]*;.*)?[[:space:]]*$' "$response_headers"
+            grep -Eiq '^Cache-Control:[[:space:]]*public, max-age=31536000, immutable[[:space:]]*$' "$response_headers"
+          done
       - name: Prepare production diagnostics
         if: ${{ always() }}
         run: |

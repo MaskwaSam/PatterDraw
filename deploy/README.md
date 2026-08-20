@@ -1,6 +1,8 @@
 # PatterDraw deployment
 
-This package serves a verified, final `dist/release/` at `https://draw.spatterson.ca` from a separate non-root NGINX container. It has no backend, server-side student data, published host port, remote asset dependency, or persistent volume. Drawings remain in each browser's origin-scoped IndexedDB and move between devices or hostnames only through an explicit `.patterdraw` export/import.
+This package serves a verified, final `dist/release/` at the two exact hostnames `https://draw.spatterson.ca` and `https://patterdraw.spatterson.ca` from a separate non-root NGINX container. It has no backend, server-side student data, published host port, remote asset dependency, or persistent volume. NGINX does not redirect between the hostnames and its rejecting default server does not accept wildcard or other Host values.
+
+Browser-local projects do not automatically move between these hostnames. IndexedDB is origin-scoped, so a project saved at `https://draw.spatterson.ca` is not visible at `https://patterdraw.spatterson.ca`, or vice versa. To move a project, export its `.patterdraw` file from the original hostname and import that file at the other hostname.
 
 ## Intended request path
 
@@ -63,7 +65,7 @@ node deploy/deploy-config-inventory.mjs deploy "$PATTERDRAW_DEPLOY_CONFIG_SHA256
 
 ## Live-state gate before any change
 
-Capture all of the following for `draw.spatterson.ca` before changing Cloudflare:
+Capture all of the following for both `draw.spatterson.ca` and `patterdraw.spatterson.ca` before changing Cloudflare:
 
 - the complete HTTP and HTTPS response chain;
 - DNS record type, content, proxy state, TTL, and provider record identifier;
@@ -81,16 +83,16 @@ Before adding a public hostname:
 - start only the `patterdraw` service and wait for its health check;
 - create or reuse only the dedicated `patterdraw_edge` network, attach the existing connector to it without disconnecting its site network, and confirm PatterDraw has no membership in `spatterson-site_default`;
 - confirm it is non-root, read-only, capability-free, resource-bounded, log-bounded, and has no host port;
-- from the connector's actual Docker network, require `Host: draw.spatterson.ca` to return the app and an arbitrary Host to return no usable response;
+- from the connector's actual Docker network, require both `Host: draw.spatterson.ca` and `Host: patterdraw.spatterson.ca` to return the same app without a redirect, and require an arbitrary Host to return no usable response;
 - require GET/HEAD-only behavior, uncached `404` responses for missing or traversal-like assets, `no-store, no-transform` on every HTML entry/fallback path, immutable caching only for existing hashed `assets/`, and CSP/HSTS/nosniff/frame protections;
 - require the main app to allow only same-origin frames while remaining unframeable itself, and require `/geogon/` to use its narrower child CSP with `connect-src 'none'`, `frame-ancestors 'self'`, and `X-Frame-Options: SAMEORIGIN`;
 - restart only PatterDraw and prove health returns without touching the main site or connector.
 
 ## Cutover and acceptance
 
-Only after the private origin passes, replace the captured `draw` behavior with one Cloudflare Tunnel Published application route whose Service URL is `http://patterdraw:8080`. Resolve only an exact conflicting `draw` record and remove only the confirmed hostname-scoped redirect behavior.
+Only after the private origin passes, route each authorized exact hostname to the Service URL `http://patterdraw:8080`. Preserve the working `draw.spatterson.ca` route when adding `patterdraw.spatterson.ca`; do not create a wildcard route or a redirect between the names. Resolve only a confirmed exact-host conflict and remove only confirmed hostname-scoped redirect behavior.
 
-Acceptance requires public HTTPS `200` for the PatterDraw entry point, a valid certificate, expected security/cache headers, a working board and local persistence, no redirect to Moodle, and no remote application requests. The final edge must preserve `Cache-Control: no-store, no-transform` on HTML and must not inject an analytics beacon. Recheck that `https://spatterson.ca`, `https://www.spatterson.ca`, `https://mesconline.ca`, the standalone connector, email DNS, and router TCP 443 ownership are unchanged.
+Acceptance requires public HTTPS `200` at both exact PatterDraw hostnames, valid certificates, expected security/cache headers, a working board and local persistence, no redirect to Moodle or between the PatterDraw hostnames, and no remote application requests. The final edge must preserve `Cache-Control: no-store, no-transform` on HTML and must not inject an analytics beacon. Recheck that `https://spatterson.ca`, `https://www.spatterson.ca`, `https://mesconline.ca`, the standalone connector, email DNS, and router TCP 443 ownership are unchanged.
 
 ## Image rollback checkpoint
 
@@ -98,8 +100,8 @@ Before recreating an existing PatterDraw container, record its exact image refer
 
 The active release session must print a concrete rollback command containing its verified deployment path, Compose file, checkpoint file, prior image tag, and only the `patterdraw` service. That command must use `docker compose up -d --no-deps --no-build --force-recreate --wait patterdraw`. Do not leave placeholders or unresolved shell variables in the operator's rollback command.
 
-For the first deployment there is no prior PatterDraw image. Its rollback is to restore the captured Cloudflare `draw` behavior first, verify the previous redirect/response, and then stop only the new PatterDraw service. The main site and connector remain running.
+For a first deployment there is no prior PatterDraw image. Its rollback is to restore the captured exact-host Cloudflare behavior first, verify the previous response for each affected hostname, and then stop only the new PatterDraw service. The main site and connector remain running.
 
 ## Rollback
 
-If public acceptance fails, restore only the captured `draw` rule/route/DNS state in the order that points traffic back to its previous behavior. Do not stop or recreate `spatterson-cloudflared`. If the hostname is healthy but the candidate image fails, use the printed `--no-build` checkpoint to switch only the PatterDraw service back to the retained and label-verified prior image. Keep the exact release tree, current and prior images, Cloudflare before-state, Compose checkpoints, and rollback command until the acceptance window closes.
+If public acceptance fails, restore only the captured exact-host rule/route/DNS state in the order that points each affected hostname back to its previous behavior. Do not stop or recreate `spatterson-cloudflared`. If the hostname is healthy but the candidate image fails, use the printed `--no-build` checkpoint to switch only the PatterDraw service back to the retained and label-verified prior image. Keep the exact release tree, current and prior images, Cloudflare before-state, Compose checkpoints, and rollback command until the acceptance window closes.

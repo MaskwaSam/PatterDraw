@@ -13,8 +13,9 @@ import {
   releasePdfRasterCanvas,
   type PdfRasterBudget,
 } from "./raster-limits";
+import { withPdfWorkerMimeQuery } from "./worker-url";
 
-GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+GlobalWorkerOptions.workerSrc = withPdfWorkerMimeQuery(pdfWorkerUrl);
 
 // PDF.js 6.2.108 still consumes these legacy hardening flags at runtime, but
 // its public DocumentInitParameters type no longer declares them. Keep the
