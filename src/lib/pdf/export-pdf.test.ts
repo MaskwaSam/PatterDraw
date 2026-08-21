@@ -196,6 +196,31 @@ function normalizedBounds(
   ];
 }
 
+function rotateRenderedBounds(
+  bounds: readonly [number, number, number, number],
+  width: number,
+  height: number,
+  rotation: 0 | 90 | 180 | 270,
+): readonly [number, number, number, number] {
+  const points = [
+    [bounds[0], bounds[1]],
+    [bounds[0], bounds[3]],
+    [bounds[2], bounds[1]],
+    [bounds[2], bounds[3]],
+  ].map(([x, y]) => {
+    if (rotation === 90) return [height - y, x];
+    if (rotation === 180) return [width - x, height - y];
+    if (rotation === 270) return [y, width - x];
+    return [x, y];
+  });
+  return [
+    Math.min(...points.map(([x]) => x)),
+    Math.min(...points.map(([, y]) => y)),
+    Math.max(...points.map(([x]) => x)),
+    Math.max(...points.map(([, y]) => y)),
+  ];
+}
+
 async function createPdfFidelityFixture(): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const fixedDate = new Date("2026-01-01T00:00:00.000Z");
@@ -494,6 +519,369 @@ describe("PDF export bounds", () => {
     expect(output.getPageCount()).toBe(1);
     expect(output.getPage(0).getSize()).toEqual({ width: 600, height: 800 });
   });
+
+  it("exports a view-rotated page at display dimensions without changing source bytes", async () => {
+    const source = await PDFDocument.create();
+    const sourcePage = source.addPage([600, 800]);
+    sourcePage.drawRectangle({ x: 20, y: 30, width: 80, height: 40 });
+    const sourceBytes = await source.save();
+    const sourceSha = await (await import("../sha256")).sha256Hex(sourceBytes);
+    const scene = {
+      id: "rotated-page",
+      name: "Rotated page",
+      elements: [{ ...baseElement }],
+      appState: {},
+      files: {},
+      pdfPage: {
+        documentId: "pdf",
+        pageIndex: 0,
+        width: 600,
+        height: 800,
+        rotation: 0 as const,
+        viewRotation: 90 as const,
+        backgroundElementId: "background",
+      },
+    } satisfies SerializedScene;
+    const project = {
+      schemaVersion: 1,
+      id: "rotated-project",
+      title: "Rotated",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+      activeSceneId: scene.id,
+      scenes: { [scene.id]: scene },
+      slideOrder: [],
+      pdfPageOrder: [scene.id],
+      pdfDocuments: {
+        pdf: {
+          id: "pdf",
+          name: "source.pdf",
+          mimeType: "application/pdf",
+          byteLength: sourceBytes.byteLength,
+          sha256: sourceSha,
+          pageCount: 1,
+          archivePath: "documents/pdf.pdf",
+        },
+      },
+    } satisfies ClassroomProject;
+
+    const outputBlob = await exportAnnotatedPdf(project, { pdf: sourceBytes });
+    const output = await PDFDocument.load(await outputBlob.arrayBuffer());
+    expect(output.getPage(0).getSize()).toEqual({ width: 800, height: 600 });
+    expect(await (await import("../sha256")).sha256Hex(sourceBytes)).toBe(sourceSha);
+  });
+
+  it("combines immutable source rotation with a view turn during export", async () => {
+    const source = await PDFDocument.create();
+    const sourcePage = source.addPage([600, 800]);
+    sourcePage.setRotation(degrees(90));
+    sourcePage.drawRectangle({ x: 20, y: 30, width: 80, height: 40 });
+    const sourceBytes = await source.save();
+    const scene = {
+      id: "source-and-view-rotated-page",
+      name: "Source and view rotated page",
+      elements: [{ ...baseElement, width: 800, height: 600 }],
+      appState: {},
+      files: {},
+      pdfPage: {
+        documentId: "pdf",
+        pageIndex: 0,
+        width: 800,
+        height: 600,
+        rotation: 90 as const,
+        viewRotation: 90 as const,
+        backgroundElementId: "background",
+      },
+    } satisfies SerializedScene;
+    const project = {
+      schemaVersion: 1,
+      id: "source-and-view-rotated-project",
+      title: "Source and view rotated",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+      activeSceneId: scene.id,
+      scenes: { [scene.id]: scene },
+      slideOrder: [],
+      pdfPageOrder: [scene.id],
+      pdfDocuments: {
+        pdf: {
+          id: "pdf",
+          name: "source.pdf",
+          mimeType: "application/pdf",
+          byteLength: sourceBytes.byteLength,
+          pageCount: 1,
+          archivePath: "documents/pdf.pdf",
+        },
+      },
+    } satisfies ClassroomProject;
+
+    const outputBlob = await exportAnnotatedPdf(project, { pdf: sourceBytes });
+    const output = await PDFDocument.load(await outputBlob.arrayBuffer());
+    expect(output.getPage(0).getSize()).toEqual({ width: 600, height: 800 });
+  });
+
+  it("keeps native source content aligned for every source/view quarter-turn", async () => {
+    const source = await PDFDocument.create();
+    const rawWidth = 200;
+    const rawHeight = 120;
+    const rotations = [0, 90, 180, 270] as const;
+    for (const rotation of rotations) {
+      const page = source.addPage([rawWidth, rawHeight]);
+      page.setRotation(degrees(rotation));
+      // An asymmetric native marker makes both axis swaps and clockwise
+      // versus counter-clockwise mistakes visible in the rendered bounds.
+      page.drawRectangle({
+        x: 20,
+        y: 15,
+        width: 40,
+        height: 20,
+        color: rgb(1, 0, 0),
+      });
+    }
+    const sourceBytes = await source.save();
+    const scenes: Record<string, SerializedScene> = {};
+    const pdfPageOrder: string[] = [];
+    for (const [sourceIndex, sourceRotation] of rotations.entries()) {
+      const sourceWidth = sourceRotation === 90 || sourceRotation === 270
+        ? rawHeight
+        : rawWidth;
+      const sourceHeight = sourceRotation === 90 || sourceRotation === 270
+        ? rawWidth
+        : rawHeight;
+      for (const viewRotation of rotations) {
+        const id = `matrix-${sourceRotation}-${viewRotation}`;
+        const backgroundId = `${id}-background`;
+        scenes[id] = {
+          id,
+          name: id,
+          elements: [{
+            ...baseElement,
+            id: backgroundId,
+            width: sourceWidth,
+            height: sourceHeight,
+          }],
+          appState: {},
+          files: {},
+          pdfPage: {
+            documentId: "pdf",
+            pageIndex: sourceIndex,
+            width: sourceWidth,
+            height: sourceHeight,
+            rotation: sourceRotation,
+            viewRotation,
+            backgroundElementId: backgroundId,
+          },
+        };
+        pdfPageOrder.push(id);
+      }
+    }
+    const project = {
+      schemaVersion: 1,
+      id: "source-view-matrix",
+      title: "Source/view matrix",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+      activeSceneId: pdfPageOrder[0],
+      scenes,
+      slideOrder: [],
+      pdfPageOrder,
+      pdfDocuments: {
+        pdf: {
+          id: "pdf",
+          name: "matrix.pdf",
+          mimeType: "application/pdf",
+          byteLength: sourceBytes.byteLength,
+          pageCount: rotations.length,
+          archivePath: "documents/matrix.pdf",
+        },
+      },
+    } satisfies ClassroomProject;
+
+    const outputBlob = await exportAnnotatedPdf(project, { pdf: sourceBytes });
+    const outputBytes = new Uint8Array(await outputBlob.arrayBuffer());
+    const sourcePages = await Promise.all(rotations.map((_, index) => renderPdfPage(sourceBytes, index + 1, 2)));
+    const outputDocument = await PDFDocument.load(outputBytes);
+    expect(outputDocument.getPageCount()).toBe(pdfPageOrder.length);
+    const outputPages = await Promise.all(pdfPageOrder.map((_, index) => renderPdfPage(outputBytes, index + 1, 2)));
+    const red = (r: number, g: number, b: number) => r > 220 && g < 80 && b < 80;
+
+    for (const [outputIndex, id] of pdfPageOrder.entries()) {
+      const [, sourceRotationText, viewRotationText] = id.split("-");
+      const sourceRotation = Number(sourceRotationText) as 0 | 90 | 180 | 270;
+      const viewRotation = Number(viewRotationText) as 0 | 90 | 180 | 270;
+      const sourcePage = sourcePages[rotations.indexOf(sourceRotation)];
+      const sourceBounds = colorBounds(sourcePage, red);
+      const expectedBounds = rotateRenderedBounds(
+        sourceBounds!,
+        sourcePage.width,
+        sourcePage.height,
+        viewRotation,
+      );
+      const outputPage = outputPages[outputIndex];
+      const outputBounds = colorBounds(outputPage, red);
+      expect(outputBounds).not.toBeNull();
+      const expectedNormalized = normalizedBounds(
+        {
+          ...sourcePage,
+          width: viewRotation === 90 || viewRotation === 270 ? sourcePage.height : sourcePage.width,
+          height: viewRotation === 90 || viewRotation === 270 ? sourcePage.width : sourcePage.height,
+        },
+        expectedBounds,
+      );
+      const actualNormalized = normalizedBounds(outputPage, outputBounds);
+      expect(actualNormalized).toHaveLength(4);
+      for (let coordinate = 0; coordinate < 4; coordinate += 1) {
+        expect(actualNormalized[coordinate], `${id} coordinate ${coordinate}`)
+          .toBeCloseTo(expectedNormalized[coordinate], 2);
+      }
+    }
+  }, 30_000);
+
+  it("aligns rotated native content with a display-space annotation", async () => {
+    const source = await PDFDocument.create();
+    const rawWidth = 200;
+    const rawHeight = 120;
+    const sourcePage = source.addPage([rawWidth, rawHeight]);
+    sourcePage.setRotation(degrees(90));
+    sourcePage.drawRectangle({
+      x: 20,
+      y: 15,
+      width: 40,
+      height: 20,
+      color: rgb(1, 0, 0),
+    });
+    const sourceBytes = await source.save();
+    const sourceRender = await renderPdfPage(sourceBytes, 1, 2);
+    const red = (r: number, g: number, b: number) => r > 220 && g < 80 && b < 80;
+    const sourceBounds = colorBounds(sourceRender, red);
+    expect(sourceBounds).not.toBeNull();
+    const expectedNativeBounds = rotateRenderedBounds(
+      sourceBounds!,
+      sourceRender.width,
+      sourceRender.height,
+      90,
+    );
+    const nativeWidth = (expectedNativeBounds[2] - expectedNativeBounds[0]) / 2;
+    const nativeHeight = (expectedNativeBounds[3] - expectedNativeBounds[1]) / 2;
+    const annotation = {
+      ...baseElement,
+      id: "rotated-annotation",
+      type: "rectangle",
+      // The live scene is already in display coordinates after the page turn.
+      x: expectedNativeBounds[0] / 2 + nativeWidth / 4,
+      y: expectedNativeBounds[1] / 2 + nativeHeight / 4,
+      width: nativeWidth / 2,
+      height: nativeHeight / 2,
+      isDeleted: false,
+    };
+    const scene = {
+      id: "rotated-annotation-page",
+      name: "Rotated annotation page",
+      elements: [{
+        ...baseElement,
+        id: "rotated-annotation-background",
+        width: rawHeight,
+        height: rawWidth,
+      }, annotation],
+      appState: {},
+      files: {},
+      pdfPage: {
+        documentId: "pdf",
+        pageIndex: 0,
+        width: rawHeight,
+        height: rawWidth,
+        rotation: 90 as const,
+        viewRotation: 90 as const,
+        backgroundElementId: "rotated-annotation-background",
+      },
+    } satisfies SerializedScene;
+    const sourceSha = await (await import("../sha256")).sha256Hex(sourceBytes);
+    const project = {
+      schemaVersion: 1,
+      id: "rotated-annotation-project",
+      title: "Rotated annotation",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+      activeSceneId: scene.id,
+      scenes: { [scene.id]: scene },
+      slideOrder: [],
+      pdfPageOrder: [scene.id],
+      pdfDocuments: {
+        pdf: {
+          id: "pdf",
+          name: "rotated-annotation.pdf",
+          mimeType: "application/pdf",
+          byteLength: sourceBytes.byteLength,
+          sha256: sourceSha,
+          pageCount: 1,
+          archivePath: "documents/rotated-annotation.pdf",
+        },
+      },
+    } satisfies ClassroomProject;
+    const exportBounds = getPdfPageExportBounds(scene);
+
+    const exportToCanvasMock = vi.mocked(exportToCanvas);
+    const previousImplementation = exportToCanvasMock.getMockImplementation();
+    exportToCanvasMock.mockImplementation(async (options: Parameters<typeof exportToCanvas>[0]) => {
+      const dimensions = options.getDimensions?.(annotation.width, annotation.height)
+        ?? { width: annotation.width, height: annotation.height };
+      const canvas = createCanvas(
+        Math.max(1, Math.ceil(dimensions.width)),
+        Math.max(1, Math.ceil(dimensions.height)),
+      );
+      const context = canvas.getContext("2d");
+      context.fillStyle = "#00ff00";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      return canvas as unknown as HTMLCanvasElement;
+    });
+    try {
+      const outputBlob = await exportAnnotatedPdf(project, { pdf: sourceBytes });
+      const outputBytes = new Uint8Array(await outputBlob.arrayBuffer());
+      const outputRender = await renderPdfPage(outputBytes, 1, 2);
+      const expectedNativeOutputBounds: readonly [number, number, number, number] = [
+        expectedNativeBounds[0] - exportBounds.minX * 2,
+        expectedNativeBounds[1] - exportBounds.minY * 2,
+        expectedNativeBounds[2] - exportBounds.minX * 2,
+        expectedNativeBounds[3] - exportBounds.minY * 2,
+      ];
+      const expectedNativeNormalized = normalizedBounds(outputRender, expectedNativeOutputBounds);
+      const outputNativeNormalized = normalizedBounds(
+        outputRender,
+        colorBounds(outputRender, red),
+      );
+      expect(outputNativeNormalized).toHaveLength(4);
+      for (let coordinate = 0; coordinate < 4; coordinate += 1) {
+        expect(outputNativeNormalized[coordinate], `native coordinate ${coordinate}`)
+          .toBeCloseTo(expectedNativeNormalized[coordinate], 2);
+      }
+
+      const green = (r: number, g: number, b: number) => r < 80 && g > 220 && b < 80;
+      const annotationPixelX = expectedNativeOutputBounds[0] + nativeWidth / 2;
+      const annotationPixelY = expectedNativeOutputBounds[1] + nativeHeight / 2;
+      const expectedAnnotationBounds: readonly [number, number, number, number] = [
+        annotationPixelX,
+        annotationPixelY,
+        annotationPixelX + nativeWidth,
+        annotationPixelY + nativeHeight,
+      ];
+      const outputAnnotationNormalized = normalizedBounds(
+        outputRender,
+        colorBounds(outputRender, green),
+      );
+      const expectedAnnotationNormalized = normalizedBounds(
+        outputRender,
+        expectedAnnotationBounds,
+      );
+      expect(outputAnnotationNormalized).toHaveLength(4);
+      for (let coordinate = 0; coordinate < 4; coordinate += 1) {
+        expect(outputAnnotationNormalized[coordinate], `annotation coordinate ${coordinate}`)
+          .toBeCloseTo(expectedAnnotationNormalized[coordinate], 2);
+      }
+    } finally {
+      exportToCanvasMock.mockReset();
+      if (previousImplementation) exportToCanvasMock.mockImplementation(previousImplementation);
+    }
+  }, 30_000);
 
   it("reports structured export progress through the final save", async () => {
     const source = await PDFDocument.create();

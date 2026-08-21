@@ -56,7 +56,8 @@ export interface ActivePdfPagePreviewTargetRequest {
   /**
    * Immutable PDF page display geometry in points. These dimensions already
    * include the source page rotation, as PdfPageWorkspace.width/height do.
-   * Milestone 4 has no additional view rotation, so do not swap them again.
+   * When viewRotation is non-zero these dimensions are the swapped live
+   * display geometry, while source bytes remain in immutable source order.
    */
   displayWidth: number;
   displayHeight: number;
@@ -82,8 +83,14 @@ export interface LightPdfPagePreviewRequest extends PdfPageRasterSize {
   /** Verified hash for wrapper-owned immutable source bytes. */
   immutableSha256?: string;
   pageIndex: number;
-  /** Source rotation only until view rotation is introduced in Milestone 5. */
+  /**
+   * Effective source+view rotation, retained for cache/API compatibility.
+   * `sourceRotation` and `viewRotation` make the immutable-vs-view split
+   * explicit for callers using rotated pages.
+   */
   effectiveRotation: PdfPageRotation;
+  sourceRotation?: PdfPageRotation;
+  viewRotation?: PdfPageRotation;
   rasterBudget?: Readonly<PdfRasterBudget>;
   signal?: AbortSignal;
 }
@@ -302,6 +309,8 @@ export async function renderLightPdfPagePreview({
   immutableSha256,
   pageIndex,
   effectiveRotation,
+  sourceRotation: requestedSourceRotation,
+  viewRotation = 0,
   width: targetWidth,
   height: targetHeight,
   rasterBudget: requestedRasterBudget,
@@ -312,6 +321,9 @@ export async function renderLightPdfPagePreview({
     throw new Error("The PDF page number is invalid.");
   }
   assertPageRotation(effectiveRotation);
+  assertPageRotation(viewRotation);
+  const sourceRotation = requestedSourceRotation ?? effectiveRotation;
+  assertPageRotation(sourceRotation);
   const rasterBudget = requestedRasterBudget ?? getPdfRasterBudget(browserRasterEnvironment());
   assertRasterSize(targetWidth, targetHeight, rasterBudget);
   const rasterOptions = getPdfJsRasterOptions(rasterBudget);
@@ -353,6 +365,7 @@ export async function renderLightPdfPagePreview({
   signal?.addEventListener("abort", onAbort, { once: true });
 
   let canvas: HTMLCanvasElement | null = null;
+  let rotatedCanvas: HTMLCanvasElement | null = null;
   try {
     const document = await awaitPdfOperation(loadingTask.promise, signal);
     throwIfPdfOperationAborted(signal);
@@ -364,25 +377,35 @@ export async function renderLightPdfPagePreview({
     try {
       throwIfPdfOperationAborted(signal);
       const unitViewport = page.getViewport({ scale: 1 });
-      const sourceRotation = normalizedPageRotation(unitViewport.rotation);
-      if (sourceRotation === null || sourceRotation !== effectiveRotation) {
+      const parsedSourceRotation = normalizedPageRotation(unitViewport.rotation);
+      if (parsedSourceRotation === null || parsedSourceRotation !== sourceRotation) {
         throw new Error("The PDF page rotation no longer matches its original source page.");
       }
       assertSourcePageGeometry(unitViewport.width, unitViewport.height);
+      const displayWidth = viewRotation === 90 || viewRotation === 270
+        ? unitViewport.height
+        : unitViewport.width;
+      const displayHeight = viewRotation === 90 || viewRotation === 270
+        ? unitViewport.width
+        : unitViewport.height;
       const scale = Math.min(
-        targetWidth / unitViewport.width,
-        targetHeight / unitViewport.height,
+        targetWidth / displayWidth,
+        targetHeight / displayHeight,
       );
       if (!Number.isFinite(scale) || scale <= 0) {
         throw new Error("The active PDF page preview is too large to render safely.");
       }
       const viewport = page.getViewport({ scale });
-      const outputWidth = Math.max(1, Math.min(targetWidth, Math.floor(viewport.width)));
-      const outputHeight = Math.max(1, Math.min(targetHeight, Math.floor(viewport.height)));
-      assertRasterSize(outputWidth, outputHeight, rasterBudget);
+      // The source canvas stays in immutable PDF orientation. When the view is
+      // quarter-turned its dimensions intentionally swap only in the rotated
+      // output canvas; clamping source width against display width would crop
+      // a portrait page before that swap.
+      const renderedWidth = Math.max(1, Math.floor(viewport.width));
+      const renderedHeight = Math.max(1, Math.floor(viewport.height));
+      assertRasterSize(renderedWidth, renderedHeight, rasterBudget);
       canvas = window.document.createElement("canvas");
-      canvas.width = outputWidth;
-      canvas.height = outputHeight;
+      canvas.width = renderedWidth;
+      canvas.height = renderedHeight;
       const context = canvas.getContext("2d", { alpha: false });
       if (!context) throw new Error("This browser cannot render PDF pages.");
       const renderTask = page.render({
@@ -410,10 +433,42 @@ export async function renderLightPdfPagePreview({
         signal?.removeEventListener("abort", cancelRender);
       }
       throwIfPdfOperationAborted(signal);
-      const dataURL = pdfRasterCanvasToPngDataUrl(canvas);
-      canvas = null;
+      let outputCanvas = canvas;
+      let outputWidth = canvas.width;
+      let outputHeight = canvas.height;
+      if (viewRotation !== 0) {
+        rotatedCanvas = window.document.createElement("canvas");
+        const swapsAxes = viewRotation === 90 || viewRotation === 270;
+        rotatedCanvas.width = swapsAxes ? outputHeight : outputWidth;
+        rotatedCanvas.height = swapsAxes ? outputWidth : outputHeight;
+        const rotatedContext = rotatedCanvas.getContext("2d", { alpha: false });
+        if (!rotatedContext) throw new Error("This browser cannot rotate PDF page previews.");
+        if (viewRotation === 90) {
+          rotatedContext.translate(outputHeight, 0);
+          rotatedContext.rotate(Math.PI / 2);
+        } else if (viewRotation === 180) {
+          rotatedContext.translate(outputWidth, outputHeight);
+          rotatedContext.rotate(Math.PI);
+        } else {
+          rotatedContext.translate(0, outputWidth);
+          rotatedContext.rotate(-Math.PI / 2);
+        }
+        rotatedContext.drawImage(canvas, 0, 0);
+        outputCanvas = rotatedCanvas;
+        outputWidth = rotatedCanvas.width;
+        outputHeight = rotatedCanvas.height;
+      }
+      const dataURL = pdfRasterCanvasToPngDataUrl(outputCanvas);
       if (encodedDataUrlByteLength(dataURL) > encodedBudget.maxBytesPerPage) {
         throw new Error("The active PDF page preview output is too large to retain safely.");
+      }
+      if (canvas) {
+        releasePdfRasterCanvas(canvas);
+        canvas = null;
+      }
+      if (rotatedCanvas) {
+        releasePdfRasterCanvas(rotatedCanvas);
+        rotatedCanvas = null;
       }
       return { dataURL: dataURL as DataURL, width: outputWidth, height: outputHeight };
     } finally {
@@ -425,6 +480,10 @@ export async function renderLightPdfPagePreview({
     if (canvas) {
       releasePdfRasterCanvas(canvas);
       canvas = null;
+    }
+    if (rotatedCanvas) {
+      releasePdfRasterCanvas(rotatedCanvas);
+      rotatedCanvas = null;
     }
   }
 }

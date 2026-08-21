@@ -132,6 +132,14 @@ describe("PDF source metadata preflight", () => {
     await expect(assertPdfSourceMetadata(project, { pdf: bytes })).resolves.toBeUndefined();
   });
 
+  it("ignores wrapper view rotation while validating immutable source geometry", async () => {
+    const bytes = await onePagePdf([600, 800]);
+    const page = pageScene("page", 0, 600, 800, 0);
+    page.pdfPage = { ...page.pdfPage!, viewRotation: 90 };
+    const project = projectFor(bytes, 1, { page });
+    await expect(assertPdfSourceMetadata(project, { pdf: bytes })).resolves.toBeUndefined();
+  });
+
   it("normalizes negative and over-360 source rotations like PDF.js", async () => {
     const bytes = await onePagePdf([600, 800], (page) => page.setRotation(degrees(-90)));
     const project = projectFor(bytes, 1, {

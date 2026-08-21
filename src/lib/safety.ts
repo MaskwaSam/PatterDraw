@@ -509,6 +509,12 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
         throw new Error("A PDF page has malformed workspace metadata.");
       }
       if (
+        scene.pdfPage.viewRotation !== undefined
+        && ![0, 90, 180, 270].includes(scene.pdfPage.viewRotation)
+      ) {
+        throw new Error("A PDF page has an invalid view rotation.");
+      }
+      if (
         pdfBackgroundCount !== 1
         || pdfBackground?.type !== "image"
         || typeof pdfBackground.fileId !== "string"

@@ -1,8 +1,9 @@
-import { useEffect, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type MutableRefObject, type PointerEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent, type MutableRefObject, type PointerEvent } from "react";
 import type { ClassroomProject, SceneId, SerializedScene } from "../types";
 import { countPdfPageAnnotations } from "../lib/pdf/annotations";
 import type { PdfPageDropEdge } from "../lib/pdf/page-order";
-import { ChevronDownIcon, DownIcon, DragIcon, HidePanelIcon, InkIcon, MoreIcon, PdfIcon, PlusIcon, TrashIcon, UpIcon } from "./Icons";
+import { getPdfPageDisplayGeometry, getPdfPageViewRotation } from "../lib/pdf/page-rotation";
+import { ChevronDownIcon, DownIcon, DragIcon, DuplicateIcon, HidePanelIcon, InkIcon, MoreIcon, PdfIcon, PlusIcon, RotateClockwiseIcon, RotateCounterclockwiseIcon, TrashIcon, UpIcon } from "./Icons";
 
 const PDF_PAGE_DRAG_TYPE = "application/x-patterdraw-pdf-page";
 const PDF_PAGE_ACTION_MENU_GAP = 5;
@@ -27,6 +28,8 @@ interface PdfPageRailProps {
   onInsertPdfPages: () => void;
   addPageTriggerRef?: MutableRefObject<HTMLButtonElement | null>;
   pageActionsTriggerRef?: MutableRefObject<HTMLButtonElement | null>;
+  onDuplicatePage: (sceneId: SceneId) => void;
+  onRotatePage: (sceneId: SceneId, direction: "clockwise" | "counterclockwise") => void;
   onRequestClearAnnotations: (sceneId: SceneId) => void;
   onDeletePage: (sceneId: SceneId) => void;
   width: number;
@@ -69,6 +72,8 @@ export function PdfPageRail({
   onInsertPdfPages,
   addPageTriggerRef,
   pageActionsTriggerRef,
+  onDuplicatePage,
+  onRotatePage,
   onRequestClearAnnotations,
   onDeletePage,
   width,
@@ -255,9 +260,23 @@ export function PdfPageRail({
         {pages.map((scene, index) => {
           const workspace = scene.pdfPage;
           if (!workspace) return null;
+          const viewRotation = getPdfPageViewRotation(workspace);
+          const display = getPdfPageDisplayGeometry(workspace);
           const source = project.pdfDocuments[workspace.documentId];
           const darkThumbnail = thumbnailDataUrls?.[scene.id];
           const thumbnail = darkThumbnail || thumbnailDataUrl(scene);
+          const thumbnailStyle: CSSProperties | undefined = !darkThumbnail && viewRotation !== 0
+            ? viewRotation === 180
+              ? { transform: "rotate(180deg)" }
+              : {
+                  position: "absolute",
+                  left: "50%",
+                  top: "50%",
+                  width: `${workspace.width / display.width * 100}%`,
+                  height: `${workspace.height / display.height * 100}%`,
+                  transform: `translate(-50%, -50%) rotate(${viewRotation === 270 ? -90 : 90}deg)`,
+                }
+            : undefined;
           const notes = annotationCount(scene);
           const sourceName = workspace.sourceName || source?.name || "Imported PDF";
           const isBlankPage = sourceName === "Blank page";
@@ -297,9 +316,16 @@ export function PdfPageRail({
                 onClick={() => onOpenPage(scene.id)}
               >
                 <span className="pdf-output-position">{index + 1}</span>
-                <span className="page-sheet">
+                <span className="page-sheet" style={{ aspectRatio: `${display.width} / ${display.height}` }}>
                   {thumbnail
-                    ? <img className={darkThumbnail ? "pdf-page-dark-thumbnail" : undefined} src={thumbnail} alt="" loading="lazy" decoding="async" />
+                    ? <img
+                        className={darkThumbnail ? "pdf-page-dark-thumbnail" : viewRotation !== 0 ? "pdf-page-source-thumbnail is-view-rotated" : undefined}
+                        src={thumbnail}
+                        alt=""
+                        loading="lazy"
+                        decoding="async"
+                        style={thumbnailStyle}
+                      />
                     : <span className="page-lines" />}
                   {notes > 0 ? <span className="pdf-annotation-count">{notes}</span> : null}
                 </span>
@@ -396,6 +422,46 @@ export function PdfPageRail({
                         <button
                           type="button"
                           role="menuitem"
+                          aria-label="Duplicate page"
+                          title="Duplicate this page"
+                          onClick={() => {
+                            setActionSceneId(null);
+                            onDuplicatePage(scene.id);
+                            window.requestAnimationFrame(() => actionButtonRef.current?.focus());
+                          }}
+                        >
+                          <DuplicateIcon /><span>Duplicate page</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          aria-label="Rotate clockwise 90 degrees"
+                          title="Rotate page clockwise 90 degrees"
+                          onClick={() => {
+                            setActionSceneId(null);
+                            onRotatePage(scene.id, "clockwise");
+                            window.requestAnimationFrame(() => actionButtonRef.current?.focus());
+                          }}
+                        >
+                          <RotateClockwiseIcon /><span>Rotate clockwise 90°</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          aria-label="Rotate counterclockwise 90 degrees"
+                          title="Rotate page counterclockwise 90 degrees"
+                          onClick={() => {
+                            setActionSceneId(null);
+                            onRotatePage(scene.id, "counterclockwise");
+                            window.requestAnimationFrame(() => actionButtonRef.current?.focus());
+                          }}
+                        >
+                          <RotateCounterclockwiseIcon /><span>Rotate counterclockwise 90°</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          title="Clear PatterDraw annotations from this page or related PDF pages"
                           onClick={() => {
                             setActionSceneId(null);
                             onRequestClearAnnotations(scene.id);
@@ -407,6 +473,7 @@ export function PdfPageRail({
                           className="is-danger"
                           type="button"
                           role="menuitem"
+                          title="Delete this page"
                           onClick={() => {
                             setActionSceneId(null);
                             onDeletePage(scene.id);

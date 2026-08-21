@@ -851,7 +851,7 @@ button { color: inherit; }
   position: absolute;
   z-index: 35;
   right: 0;
-  width: min(172px, calc(var(--pdf-rail-width, 224px) - 28px));
+  width: min(210px, calc(var(--pdf-rail-width, 224px) - 28px));
   min-width: 0;
   display: grid;
   gap: 3px;

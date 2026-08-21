@@ -253,6 +253,94 @@ describe("light active PDF page rendering", () => {
     expect(canvas).toMatchObject({ width: 0, height: 0 });
   });
 
+  it("renders a view-rotated refinement in display orientation while validating source rotation", async () => {
+    const sourceContext = { drawImage: vi.fn() };
+    const outputContext = {
+      translate: vi.fn(),
+      rotate: vi.fn(),
+      drawImage: vi.fn(),
+    };
+    const sourceCanvas = {
+      width: 0,
+      height: 0,
+      getContext: vi.fn(() => sourceContext),
+      toDataURL: vi.fn(() => "data:image/png;base64,AA=="),
+    };
+    const outputCanvas = {
+      width: 0,
+      height: 0,
+      getContext: vi.fn(() => outputContext),
+      toDataURL: vi.fn(() => "data:image/png;base64,AA=="),
+    };
+    const createElement = window.document.createElement as unknown as {
+      mockImplementationOnce: (implementation: (...args: unknown[]) => unknown) => unknown;
+    };
+    createElement.mockImplementationOnce(() => sourceCanvas);
+    createElement.mockImplementationOnce(() => outputCanvas);
+
+    await expect(renderLightPdfPagePreview({
+      bytes: new Uint8Array([1]),
+      pageIndex: 0,
+      effectiveRotation: 180,
+      sourceRotation: 90,
+      viewRotation: 90,
+      width: 792,
+      height: 612,
+    })).resolves.toEqual({
+      dataURL: "data:image/png;base64,AA==",
+      width: 792,
+      height: 612,
+    });
+    expect(sourceCanvas.width).toBe(0);
+    expect(sourceCanvas.height).toBe(0);
+    expect(outputCanvas.width).toBe(0);
+    expect(outputCanvas.height).toBe(0);
+    expect(outputContext.rotate).toHaveBeenCalledWith(Math.PI / 2);
+    expect(outputContext.drawImage).toHaveBeenCalledWith(sourceCanvas, 0, 0);
+  });
+
+  it("keeps non-square preview dimensions unswapped for a 180-degree view turn", async () => {
+    const sourceContext = {};
+    const outputContext = {
+      translate: vi.fn(),
+      rotate: vi.fn(),
+      drawImage: vi.fn(),
+    };
+    const sourceCanvas = {
+      width: 0,
+      height: 0,
+      getContext: vi.fn(() => sourceContext),
+      toDataURL: vi.fn(() => "data:image/png;base64,AA=="),
+    };
+    const outputCanvas = {
+      width: 0,
+      height: 0,
+      getContext: vi.fn(() => outputContext),
+      toDataURL: vi.fn(() => "data:image/png;base64,AA=="),
+    };
+    const createElement = window.document.createElement as unknown as {
+      mockImplementationOnce: (implementation: (...args: unknown[]) => unknown) => unknown;
+    };
+    createElement.mockImplementationOnce(() => sourceCanvas);
+    createElement.mockImplementationOnce(() => outputCanvas);
+
+    await expect(renderLightPdfPagePreview({
+      bytes: new Uint8Array([1]),
+      pageIndex: 0,
+      effectiveRotation: 270,
+      sourceRotation: 90,
+      viewRotation: 180,
+      width: 612,
+      height: 792,
+    })).resolves.toEqual({
+      dataURL: "data:image/png;base64,AA==",
+      width: 612,
+      height: 792,
+    });
+    expect(outputContext.translate).toHaveBeenCalledWith(612, 792);
+    expect(outputContext.rotate).toHaveBeenCalledWith(Math.PI);
+  });
+
   it("rejects a source rotation mismatch before allocating a canvas", async () => {
     await expect(renderLightPdfPagePreview({
       bytes: new Uint8Array([1]),

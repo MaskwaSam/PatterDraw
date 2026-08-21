@@ -133,6 +133,30 @@ describe("PDF background invariants", () => {
     expect(canonicalizePdfBackground(scene, displayed)[0].fileId).toBe("page-image");
   });
 
+  it("keeps the persisted source raster immutable while rotating the page view", () => {
+    const scene = pdfScene();
+    scene.pdfPage = { ...scene.pdfPage!, viewRotation: 90 };
+    const repaired = canonicalizePdfBackground(scene, scene.elements);
+    expect(repaired[0]).toMatchObject({
+      fileId: "page-image",
+      x: 100,
+      y: -100,
+      width: 600,
+      height: 800,
+      angle: Math.PI / 2,
+    });
+    const transient = canonicalizePdfBackground(scene, repaired, "sharp-page-image");
+    expect(transient[0]).toMatchObject({
+      fileId: "sharp-page-image",
+      x: 0,
+      y: 0,
+      width: 800,
+      height: 600,
+      angle: 0,
+    });
+    expect(canonicalizePdfBackground(scene, transient, "sharp-page-image")).toBe(transient);
+  });
+
   it("removes extra background metadata once and remains idempotent", () => {
     const scene = pdfScene();
     scene.elements = [{

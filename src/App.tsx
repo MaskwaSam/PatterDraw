@@ -177,6 +177,20 @@ import {
   type PdfAnnotationClearTransaction,
 } from "./lib/pdf/annotations";
 import { assertPdfAdditionPreservesAnnotationUndo } from "./lib/pdf/annotation-undo-reservation";
+import {
+  deletePdfPageReversibly,
+  duplicatePdfPage,
+  pdfAdditionPreservesPageDeleteUndo,
+  undoPdfPageDelete,
+  type PdfPageDeleteTransaction,
+} from "./lib/pdf/page-actions";
+import {
+  getPdfPageDisplayGeometry,
+  getPdfPageEffectiveRotation,
+  getPdfPageViewRotation,
+  rotatePdfSceneQuarterTurn,
+  type PdfPageRotationDirection,
+} from "./lib/pdf/page-rotation";
 import type { PdfExportMode } from "./lib/pdf/export-pdf";
 import type { PdfOperationProgress } from "./lib/pdf/operation-progress";
 import {
@@ -400,16 +414,68 @@ type PendingPdfAnnotationClear = {
   summaries: PdfAnnotationScopeSummaries;
   sourceName?: string;
 };
-type PendingPdfAnnotationClearUndo = {
-  token: number;
-  transaction: PdfAnnotationClearTransaction;
-};
-type PdfAnnotationClearToast = {
-  token: number;
-  annotationCount: number;
-  affectedPageCount: number;
-  expiresAt: number;
-};
+type PendingPdfUndo =
+  | {
+      kind: "clear-annotations";
+      token: number;
+      transaction: PdfAnnotationClearTransaction;
+    }
+  | {
+      kind: "delete-page";
+      token: number;
+      transaction: PdfPageDeleteTransaction;
+    };
+type PdfUndoToast =
+  | {
+      kind: "clear-annotations";
+      token: number;
+      annotationCount: number;
+      affectedPageCount: number;
+      expiresAt: number;
+    }
+  | {
+      kind: "delete-page";
+      token: number;
+      deletedPageNumber: number;
+      expiresAt: number;
+    };
+
+function pendingPdfAnnotationClearTransaction(
+  pending: PendingPdfUndo | null,
+): PdfAnnotationClearTransaction | undefined {
+  return pending?.kind === "clear-annotations" ? pending.transaction : undefined;
+}
+
+const PDF_UNDO_RESERVATION_ERROR =
+  "This PDF action cannot be completed while Undo is available because it would leave too little room to restore the previous content. Use Undo now or wait a few seconds, then try again.";
+
+export function assertPdfAdditionPreservesPendingUndo(
+  project: ClassroomProject,
+  pdfData: Record<PdfDocumentId, Uint8Array>,
+  pending: PendingPdfUndo | null,
+  now = Date.now(),
+): void {
+  if (!pending || now >= pending.transaction.expiresAt) return;
+  if (pending.kind === "clear-annotations") {
+    assertPdfAdditionPreservesAnnotationUndo(
+      project,
+      pdfData,
+      pending.transaction,
+      { now },
+    );
+    return;
+  }
+  try {
+    if (!pdfAdditionPreservesPageDeleteUndo(
+      project,
+      pdfData,
+      pending.transaction,
+      { now },
+    )) throw new Error(PDF_UNDO_RESERVATION_ERROR);
+  } catch {
+    throw new Error(PDF_UNDO_RESERVATION_ERROR);
+  }
+}
 
 function pdfAnnotationScopeSummaries(
   project: ClassroomProject,
@@ -1061,7 +1127,7 @@ function pdfPagePreviewCacheKey(
   return createActivePdfPagePreviewKey({
     sourceSha256,
     pageIndex: workspace.pageIndex,
-    effectiveRotation: workspace.rotation,
+    effectiveRotation: getPdfPageEffectiveRotation(workspace),
     theme: preview.theme,
     quality: preview.quality,
     deviceTier: preview.deviceTier,
@@ -1077,9 +1143,10 @@ function darkPdfThumbnailCacheKey(
 ): string | null {
   const workspace = scene.pdfPage;
   if (!workspace) return null;
+  const display = getPdfPageDisplayGeometry(workspace);
   const dimensions = fitPdfRasterDimensions({
-    width: Math.max(1, Math.ceil(workspace.width)),
-    height: Math.max(1, Math.ceil(workspace.height)),
+    width: Math.max(1, Math.ceil(display.width)),
+    height: Math.max(1, Math.ceil(display.height)),
   }, undefined, 256);
   return pdfPagePreviewCacheKey(project, scene, {
     ...dimensions,
@@ -1187,7 +1254,7 @@ export default function App() {
   const [pdfInsertProgress, setPdfInsertProgress] = useState<PdfInsertOperationProgress | null>(null);
   const pdfInsertOperationGenerationRef = useRef<number | null>(null);
   const [pendingPdfAnnotationClear, setPendingPdfAnnotationClear] = useState<PendingPdfAnnotationClear | null>(null);
-  const [pdfAnnotationClearToast, setPdfAnnotationClearToast] = useState<PdfAnnotationClearToast | null>(null);
+  const [pdfUndoToast, setPdfUndoToast] = useState<PdfUndoToast | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [autosaveRecoveryDetail, setAutosaveRecoveryDetail] = useState<string | null>(null);
   const [autosaveRecoveryKind, setAutosaveRecoveryKind] = useState<AutosaveRecoveryKind | null>(null);
@@ -1359,9 +1426,9 @@ export default function App() {
   const pdfInsertInputRef = useRef<HTMLInputElement>(null);
   const pdfInsertTriggerRef = useRef<HTMLButtonElement | null>(null);
   const pdfPageActionsTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const pendingPdfAnnotationClearUndoRef = useRef<PendingPdfAnnotationClearUndo | null>(null);
-  const pdfAnnotationClearUndoTimerRef = useRef<number | null>(null);
-  const pdfAnnotationClearUndoTokenRef = useRef(0);
+  const pendingPdfUndoRef = useRef<PendingPdfUndo | null>(null);
+  const pdfUndoTimerRef = useRef<number | null>(null);
+  const pdfUndoTokenRef = useRef(0);
   const libraryInputRef = useRef<HTMLInputElement>(null);
   const insertTriggerRef = useRef<HTMLButtonElement>(null);
   const exportOptionsTriggerRef = useRef<HTMLButtonElement>(null);
@@ -1371,22 +1438,22 @@ export default function App() {
   const shellRef = useRef<HTMLDivElement>(null);
   const editorHostRef = useRef<HTMLDivElement>(null);
   const safeClipboardReadGuardRef = useRef(false);
-  const finalizePendingPdfAnnotationClearUndo = useCallback(() => {
-    const pending = pendingPdfAnnotationClearUndoRef.current;
-    pendingPdfAnnotationClearUndoRef.current = null;
-    if (pdfAnnotationClearUndoTimerRef.current !== null) {
-      window.clearTimeout(pdfAnnotationClearUndoTimerRef.current);
-      pdfAnnotationClearUndoTimerRef.current = null;
+  const finalizePendingPdfUndo = useCallback(() => {
+    const pending = pendingPdfUndoRef.current;
+    pendingPdfUndoRef.current = null;
+    if (pdfUndoTimerRef.current !== null) {
+      window.clearTimeout(pdfUndoTimerRef.current);
+      pdfUndoTimerRef.current = null;
     }
     if (pending) {
-      setPdfAnnotationClearToast((current) => current?.token === pending.token ? null : current);
+      setPdfUndoToast((current) => current?.token === pending.token ? null : current);
     }
   }, []);
   useEffect(() => {
     const expirePendingUndo = () => {
-      const pending = pendingPdfAnnotationClearUndoRef.current;
+      const pending = pendingPdfUndoRef.current;
       if (pending && Date.now() >= pending.transaction.expiresAt) {
-        finalizePendingPdfAnnotationClearUndo();
+        finalizePendingPdfUndo();
       }
     };
     document.addEventListener("visibilitychange", expirePendingUndo);
@@ -1394,12 +1461,12 @@ export default function App() {
     return () => {
       document.removeEventListener("visibilitychange", expirePendingUndo);
       window.removeEventListener("focus", expirePendingUndo);
-      const timer = pdfAnnotationClearUndoTimerRef.current;
+      const timer = pdfUndoTimerRef.current;
       if (timer !== null) window.clearTimeout(timer);
-      pdfAnnotationClearUndoTimerRef.current = null;
-      pendingPdfAnnotationClearUndoRef.current = null;
+      pdfUndoTimerRef.current = null;
+      pendingPdfUndoRef.current = null;
     };
-  }, [finalizePendingPdfAnnotationClearUndo]);
+  }, [finalizePendingPdfUndo]);
   const projectRef = useRef<ClassroomProject | null>(project);
   const pdfBytesRef = useRef<Record<PdfDocumentId, Uint8Array>>(pdfBytes);
   const currentSceneRef = useRef<SerializedScene | null>(null);
@@ -1454,18 +1521,24 @@ export default function App() {
       return Promise.reject(new Error("The original PDF page is unavailable."));
     }
     const canonicalDimensions = await getPdfRasterDimensions(lightDataUrl);
+    const viewRotation = getPdfPageViewRotation(workspace);
+    const display = getPdfPageDisplayGeometry(workspace);
+    const effectiveRotation = getPdfPageEffectiveRotation(workspace);
+    const canonicalDisplayDimensions = viewRotation === 90 || viewRotation === 270
+      ? { width: canonicalDimensions.height, height: canonicalDimensions.width }
+      : canonicalDimensions;
     const sharpTarget = getActivePdfPagePreviewTarget({
-      displayWidth: workspace.width,
-      displayHeight: workspace.height,
-      effectiveRotation: workspace.rotation,
+      displayWidth: display.width,
+      displayHeight: display.height,
+      effectiveRotation,
     });
     const dimensions = preview.sharpen
       ? { width: sharpTarget.width, height: sharpTarget.height }
-      : fitPdfRasterDimensions(canonicalDimensions);
+      : fitPdfRasterDimensions(canonicalDisplayDimensions);
     if (
       !preview.darkTreatment
       && (!preview.sharpen
-        || !shouldRenderLightPdfPageRefinement(canonicalDimensions, dimensions))
+        || !shouldRenderLightPdfPageRefinement(canonicalDisplayDimensions, dimensions))
     ) return null;
 
     const cacheKey = pdfPagePreviewCacheKey(projectRef.current, scene, {
@@ -1486,6 +1559,7 @@ export default function App() {
           bytes: sourceBytes,
           immutableSha256,
           pageIndex: workspace.pageIndex,
+          viewRotation,
           ...dimensions,
           signal,
         })
@@ -1493,7 +1567,9 @@ export default function App() {
           bytes: sourceBytes,
           immutableSha256,
           pageIndex: workspace.pageIndex,
-          effectiveRotation: workspace.rotation,
+          effectiveRotation,
+          sourceRotation: workspace.rotation,
+          viewRotation,
           ...dimensions,
           signal,
         })).dataURL;
@@ -1536,14 +1612,16 @@ export default function App() {
       return cached.dataURL;
     }
 
+    const display = getPdfPageDisplayGeometry(workspace);
     const { width, height } = fitPdfRasterDimensions({
-      width: Math.max(1, Math.ceil(workspace.width)),
-      height: Math.max(1, Math.ceil(workspace.height)),
+      width: Math.max(1, Math.ceil(display.width)),
+      height: Math.max(1, Math.ceil(display.height)),
     }, undefined, 256);
     const dataURL = await renderDarkPdfPreview({
       bytes: sourceBytes,
       immutableSha256,
       pageIndex: workspace.pageIndex,
+      viewRotation: getPdfPageViewRotation(workspace),
       width,
       height,
       signal,
@@ -1868,7 +1946,7 @@ export default function App() {
     );
     pendingScenePersistenceRef.current = preserveDeletedForPendingPdfUndo(
       adopted.pending,
-      pendingPdfAnnotationClearUndoRef.current?.transaction.affectedPageIds,
+      pendingPdfAnnotationClearTransaction(pendingPdfUndoRef.current)?.affectedPageIds,
     );
     bufferedHydrationChangeRef.current = adopted.buffered;
     if (scenePersistenceTimerRef.current !== null) {
@@ -1945,8 +2023,9 @@ export default function App() {
     ) return committed;
     const scene = committed.scenes[sceneId];
     if (!scene) return committed;
-    const preserveDeletedForUndo = pendingPdfAnnotationClearUndoRef.current
-      ?.transaction.affectedPageIds.includes(sceneId) === true;
+    const preserveDeletedForUndo = pendingPdfAnnotationClearTransaction(
+      pendingPdfUndoRef.current,
+    )?.affectedPageIds.includes(sceneId) === true;
     // Destructive controls can run before Excalidraw's debounced onChange
     // reaches pendingScenePersistenceRef. Capture the editor synchronously,
     // but send it through the same canonicalization, slide detachment,
@@ -3136,7 +3215,7 @@ export default function App() {
   ): Promise<boolean> => {
     const isCurrentOperation = () => !operation || isCurrentFileOpenOperation(operation);
     if (!isCurrentOperation()) return false;
-    finalizePendingPdfAnnotationClearUndo();
+    finalizePendingPdfUndo();
     // A user can draw before the outgoing scene's two hydration paints have
     // completed. Fold that buffered edit into the old project before this
     // replacement starts, rather than clearing it below with the other
@@ -3266,7 +3345,7 @@ export default function App() {
     beginSceneHydration,
     commitLiveScenePersistence,
     commitPendingScenePersistence,
-    finalizePendingPdfAnnotationClearUndo,
+    finalizePendingPdfUndo,
     flushAutosave,
     isCurrentFileOpenOperation,
   ]);
@@ -3362,10 +3441,10 @@ export default function App() {
           pdfDocuments: { ...base.pdfDocuments, [imported.source.id]: imported.source },
         };
         assertProjectFitsContentBudget(nextProject, nextPdfBytes);
-        assertPdfAdditionPreservesAnnotationUndo(
+        assertPdfAdditionPreservesPendingUndo(
           nextProject,
           nextPdfBytes,
-          pendingPdfAnnotationClearUndoRef.current?.transaction,
+          pendingPdfUndoRef.current,
         );
         if (replaceProtectedAutosave) {
           setBusyMessage(`Saving ${file.name} locally…`);
@@ -4975,6 +5054,7 @@ export default function App() {
     currentScene?.pdfPage?.height,
     currentScene?.pdfPage?.pageIndex,
     currentScene?.pdfPage?.rotation,
+    currentScene?.pdfPage?.viewRotation,
     currentScene?.pdfPage?.width,
     darkPdfDisplayRevision,
     editorTheme,
@@ -5007,8 +5087,8 @@ export default function App() {
     return stablePdfScenes.map((scene) => project.scenes[scene.id] || scene);
   }, [project?.scenes, stablePdfScenes]);
   const pdfThumbnailIdentity = useMemo(() => JSON.stringify(
-    stablePdfScenes.map((scene) => darkPdfThumbnailCacheKey(project, scene)),
-  ), [stablePdfScenes, project?.pdfDocuments]);
+    pdfScenes.map((scene) => darkPdfThumbnailCacheKey(project, scene)),
+  ), [pdfScenes, project?.pdfDocuments]);
   const darkPdfThumbnailSceneIds = useMemo(() => darkPdfThumbnailRenderSceneIds(
     stablePdfScenes.map((scene) => scene.id),
     project?.activeSceneId,
@@ -5018,13 +5098,18 @@ export default function App() {
   useEffect(() => {
     const validSceneIds = new Set(stablePdfScenes.map((scene) => scene.id));
     const validCacheKeys = new Set(
-      stablePdfScenes
+      pdfScenes
         .map((scene) => darkPdfThumbnailCacheKey(project, scene))
         .filter((key): key is string => !!key),
     );
     pruneDarkPdfThumbnails(darkPdfThumbnailCacheRef.current, validCacheKeys);
+    const retainedCachedSceneIds = retainedDarkPdfThumbnailSceneIds(
+      darkPdfThumbnailCacheRef.current,
+    );
     setDarkPdfPreviewUrls((current) => {
-      const entries = Object.entries(current).filter(([sceneId]) => validSceneIds.has(sceneId));
+      const entries = Object.entries(current).filter(([sceneId]) => (
+        validSceneIds.has(sceneId) && retainedCachedSceneIds.has(sceneId)
+      ));
       if (entries.length === Object.keys(current).length) return current;
       return Object.fromEntries(entries);
     });
@@ -5039,7 +5124,7 @@ export default function App() {
     }
     let cancelled = false;
     let nextIndex = 0;
-    const scenesById = new Map(stablePdfScenes.map((scene) => [scene.id, scene]));
+    const scenesById = new Map(pdfScenes.map((scene) => [scene.id, scene]));
     const thumbnailScenes = darkPdfThumbnailSceneIds
       .map((sceneId) => scenesById.get(sceneId))
       .filter((scene): scene is SerializedScene => !!scene);
@@ -5224,12 +5309,13 @@ export default function App() {
       if (viewportPoint) {
         center = viewportCoordsToSceneCoords(viewportPoint, appState);
       } else if (activeScene?.pdfPage) {
+        const display = getPdfPageDisplayGeometry(activeScene.pdfPage);
         const background = api.getSceneElements().find(
           (element) => element.id === activeScene.pdfPage?.backgroundElementId,
         );
         center = background
           ? { x: background.x + background.width / 2, y: background.y + background.height / 2 }
-          : { x: activeScene.pdfPage.width / 2, y: activeScene.pdfPage.height / 2 };
+          : { x: display.width / 2, y: display.height / 2 };
       } else {
         center = viewportCoordsToSceneCoords({
           clientX: appState.offsetLeft + appState.width / 2,
@@ -5656,6 +5742,7 @@ export default function App() {
     api,
     currentScene?.id,
     currentScene?.pdfPage?.backgroundElementId,
+    currentScene?.pdfPage?.viewRotation,
     isNavigationVisible,
     isPdfRailVisible,
     pdfRailWidth,
@@ -6064,22 +6151,27 @@ export default function App() {
       // Replace an older reversible action only after every validation and
       // the new atomic clear have succeeded. A stale confirmation or failed
       // clear attempt must not consume the still-valid prior Undo.
-      finalizePendingPdfAnnotationClearUndo();
+      finalizePendingPdfUndo();
       const activeSceneId = activeSceneIdRef.current || cleared.project.activeSceneId;
       const activeScene = cleared.project.scenes[activeSceneId];
       const activeSceneWasCleared = cleared.transaction.affectedPageIds.includes(activeSceneId);
-      const token = ++pdfAnnotationClearUndoTokenRef.current;
+      const token = ++pdfUndoTokenRef.current;
 
       pendingProjectSearchTargetRef.current = null;
       projectRef.current = cleared.project;
       activeSceneIdRef.current = cleared.project.activeSceneId;
-      pendingPdfAnnotationClearUndoRef.current = { token, transaction: cleared.transaction };
-      pdfAnnotationClearUndoTimerRef.current = window.setTimeout(() => {
-        if (pendingPdfAnnotationClearUndoRef.current?.token === token) {
-          finalizePendingPdfAnnotationClearUndo();
+      pendingPdfUndoRef.current = {
+        kind: "clear-annotations",
+        token,
+        transaction: cleared.transaction,
+      };
+      pdfUndoTimerRef.current = window.setTimeout(() => {
+        if (pendingPdfUndoRef.current?.token === token) {
+          finalizePendingPdfUndo();
         }
       }, Math.max(0, cleared.transaction.expiresAt - Date.now()));
-      setPdfAnnotationClearToast({
+      setPdfUndoToast({
+        kind: "clear-annotations",
         token,
         annotationCount: cleared.summary.annotationCount,
         affectedPageCount: cleared.summary.affectedPageCount,
@@ -6096,17 +6188,17 @@ export default function App() {
     abortSceneOperations,
     cancelFileOpenOperations,
     commitLiveScenePersistence,
-    finalizePendingPdfAnnotationClearUndo,
+    finalizePendingPdfUndo,
     loadSceneIntoEditor,
     pendingPdfAnnotationClear,
   ]);
 
-  const undoPdfAnnotationClearAction = useCallback(() => {
-    const pending = pendingPdfAnnotationClearUndoRef.current;
+  const undoPendingPdfAction = useCallback(() => {
+    const pending = pendingPdfUndoRef.current;
     if (!pending) return;
     const now = Date.now();
     if (now >= pending.transaction.expiresAt) {
-      finalizePendingPdfAnnotationClearUndo();
+      finalizePendingPdfUndo();
       return;
     }
     try {
@@ -6117,6 +6209,32 @@ export default function App() {
         || "";
       const currentProject = commitLiveScenePersistence(activeSceneId, true);
       if (!currentProject) throw new Error("The current project is unavailable.");
+      if (pending.kind === "delete-page") {
+        const restored = undoPdfPageDelete(
+          currentProject,
+          pdfBytesRef.current,
+          pending.transaction,
+          { now, updatedAt: nowIso() },
+        );
+        if (getProjectContentSize(restored.project, restored.pdfBytes).totalBytes > MAX_PROJECT_BYTES) {
+          setErrorMessage(
+            "The deleted page could not be restored because the project is now too large to save safely. Remove recently added content and try Undo again before it expires.",
+          );
+          return;
+        }
+        const activeSceneWillChange = restored.project.activeSceneId !== currentProject.activeSceneId;
+        finalizePendingPdfUndo();
+        setErrorMessage(null);
+        pendingProjectSearchTargetRef.current = null;
+        if (activeSceneWillChange) beginSceneHydration();
+        pdfBytesRef.current = restored.pdfBytes;
+        projectRef.current = restored.project;
+        activeSceneIdRef.current = restored.project.activeSceneId;
+        setPdfBytes(restored.pdfBytes);
+        setProject(restored.project);
+        setWorkspaceMode("pdf");
+        return;
+      }
       const restored = undoPdfAnnotationClear(currentProject, pending.transaction, {
         now,
         updatedAt: nowIso(),
@@ -6131,7 +6249,7 @@ export default function App() {
         return;
       }
 
-      finalizePendingPdfAnnotationClearUndo();
+      finalizePendingPdfUndo();
       setErrorMessage(null);
       pendingProjectSearchTargetRef.current = null;
       projectRef.current = restored.project;
@@ -6139,14 +6257,15 @@ export default function App() {
       setProject(restored.project);
       if (activeSceneWasRestored && activeScene) loadSceneIntoEditor(activeScene);
     } catch (error) {
-      finalizePendingPdfAnnotationClearUndo();
+      finalizePendingPdfUndo();
       setErrorMessage(error instanceof Error ? error.message : String(error));
     }
   }, [
     abortSceneOperations,
+    beginSceneHydration,
     cancelFileOpenOperations,
     commitLiveScenePersistence,
-    finalizePendingPdfAnnotationClearUndo,
+    finalizePendingPdfUndo,
     loadSceneIntoEditor,
   ]);
 
@@ -6159,81 +6278,153 @@ export default function App() {
     setPendingPdfAnnotationClear(null);
   }, [pendingPdfAnnotationClear, project?.activeSceneId, project?.id]);
 
-  const deletePdfPage = useCallback((sceneId: string) => {
-    if (!project) return;
-    const initialScene = project.scenes[sceneId];
-    if (!initialScene?.pdfPage) return;
-    const initialOrder = reconcilePdfPageOrder(project);
-    const initialPageIndex = initialOrder.indexOf(sceneId);
-    if (initialPageIndex < 0) return;
-    if (!window.confirm(`Delete output page ${initialPageIndex + 1}? This removes the page and its annotations from the project.`)) return;
-    finalizePendingPdfAnnotationClearUndo();
-
-    // Keep deletion as an explicit scene-persistence boundary, matching page
-    // addition and every other scene switch. This also prevents an unrelated
-    // pending update from being merged after the scene map has changed.
-    const currentProject = commitLiveScenePersistence(sceneId);
-    if (!currentProject) return;
-    const scene = currentProject.scenes[sceneId];
-    if (!scene?.pdfPage) return;
-    const order = reconcilePdfPageOrder(currentProject);
-    const pageIndex = order.indexOf(sceneId);
-    if (pageIndex < 0) return;
-
-    const remainingOrder = order.filter((candidate) => candidate !== sceneId);
-    let nextSceneId = remainingOrder[Math.min(pageIndex, remainingOrder.length - 1)] || boardSceneId(currentProject);
-    let replacementScene: SerializedScene | null = null;
-    if (!nextSceneId) {
-      const blank = createBlankProject();
-      nextSceneId = blank.activeSceneId;
-      replacementScene = blank.scenes[blank.activeSceneId];
-    }
-    const documentId = scene.pdfPage.documentId;
-    const documentStillUsed = Object.values(currentProject.scenes).some(
-      (candidate) => candidate.id !== sceneId && candidate.pdfPage?.documentId === documentId,
-    );
-
-    const activeSceneWillChange = nextSceneId !== currentProject.activeSceneId;
-    if (activeSceneWillChange) {
+  const duplicatePdfPageAction = useCallback((sceneId: string) => {
+    try {
+      abortSceneOperations(true);
+      cancelFileOpenOperations(true);
+      const currentProject = commitLiveScenePersistence(sceneId, true);
+      if (!currentProject?.scenes[sceneId]?.pdfPage) {
+        throw new Error("The selected PDF page no longer exists.");
+      }
+      const duplicated = duplicatePdfPage(
+        currentProject,
+        pdfBytesRef.current,
+        sceneId,
+        {
+          updatedAt: nowIso(),
+          validateCandidate: (candidate, candidatePdfBytes) => {
+            assertPdfAdditionPreservesPendingUndo(
+              candidate,
+              candidatePdfBytes,
+              pendingPdfUndoRef.current,
+            );
+          },
+        },
+      );
       beginSceneHydration();
       pendingFrameIdRef.current = null;
       pendingProjectSearchTargetRef.current = null;
       pendingCreatedFrameIdRef.current = null;
       pendingSlideFrameActionRef.current = null;
+      projectRef.current = duplicated.project;
+      activeSceneIdRef.current = duplicated.project.activeSceneId;
+      setProject(duplicated.project);
+      setWorkspaceMode("pdf");
+      setErrorMessage(null);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
     }
-    setProject((current) => {
-      if (!current?.scenes[sceneId]) return current;
-      const scenes = { ...current.scenes };
-      delete scenes[sceneId];
-      if (replacementScene) scenes[replacementScene.id] = replacementScene;
-      const pdfDocuments = { ...current.pdfDocuments };
-      if (!documentStillUsed) delete pdfDocuments[documentId];
-      const next = {
-        ...current,
-        updatedAt: nowIso(),
-        activeSceneId: nextSceneId,
-        scenes,
-        slideOrder: current.slideOrder.filter((slide) => slide.sceneId !== sceneId),
-        pdfPageOrder: remainingOrder,
-        pdfDocuments,
-      };
-      projectRef.current = next;
-      activeSceneIdRef.current = next.activeSceneId;
-      return next;
-    });
-    if (!documentStillUsed) {
-      setPdfBytes((current) => {
-        const next = { ...current };
-        delete next[documentId];
-        return next;
-      });
-    }
-    if (!remainingOrder.length) setWorkspaceMode("board");
   }, [
+    abortSceneOperations,
     beginSceneHydration,
+    cancelFileOpenOperations,
     commitLiveScenePersistence,
-    finalizePendingPdfAnnotationClearUndo,
-    project,
+  ]);
+
+  const rotatePdfPageAction = useCallback((
+    sceneId: string,
+    direction: PdfPageRotationDirection,
+  ) => {
+    try {
+      abortSceneOperations(true);
+      cancelFileOpenOperations(true);
+      const currentProject = commitLiveScenePersistence(sceneId, true);
+      const scene = currentProject?.scenes[sceneId];
+      if (!currentProject || !scene?.pdfPage) {
+        throw new Error("The selected PDF page no longer exists.");
+      }
+      const rotatedScene = rotatePdfSceneQuarterTurn(scene, direction);
+      const rotatedProject: ClassroomProject = {
+        ...currentProject,
+        updatedAt: nowIso(),
+        scenes: { ...currentProject.scenes, [sceneId]: rotatedScene },
+      };
+      assertProjectFitsContentBudget(rotatedProject, pdfBytesRef.current);
+      // Rotation is destructive wrapper state. Replace an older reversible
+      // action only after the complete rotated candidate has passed safety.
+      finalizePendingPdfUndo();
+      pendingProjectSearchTargetRef.current = null;
+      projectRef.current = rotatedProject;
+      activeSceneIdRef.current = rotatedProject.activeSceneId;
+      setProject(rotatedProject);
+      if (rotatedProject.activeSceneId === sceneId) loadSceneIntoEditor(rotatedScene);
+      setWorkspaceMode("pdf");
+      setErrorMessage(null);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, [
+    abortSceneOperations,
+    cancelFileOpenOperations,
+    commitLiveScenePersistence,
+    finalizePendingPdfUndo,
+    loadSceneIntoEditor,
+  ]);
+
+  const deletePdfPage = useCallback((sceneId: string) => {
+    const initialProject = projectRef.current;
+    if (!initialProject) return;
+    const initialScene = initialProject.scenes[sceneId];
+    if (!initialScene?.pdfPage) return;
+    const initialOrder = reconcilePdfPageOrder(initialProject);
+    const initialPageIndex = initialOrder.indexOf(sceneId);
+    if (initialPageIndex < 0) return;
+    if (!window.confirm(
+      `Delete output page ${initialPageIndex + 1}? This removes the page and its annotations from the project. You can undo for ten seconds.`,
+    )) return;
+    try {
+      abortSceneOperations(true);
+      cancelFileOpenOperations(true);
+      // Capture the newest live stroke and retained tombstones before the
+      // scene leaves the project map and becomes the memory-only undo record.
+      const currentProject = commitLiveScenePersistence(sceneId, true);
+      if (!currentProject) throw new Error("The current project is unavailable.");
+      const deleted = deletePdfPageReversibly(
+        currentProject,
+        pdfBytesRef.current,
+        sceneId,
+        { updatedAt: nowIso() },
+      );
+      // Failed validation or a cancelled confirmation must not consume the
+      // previous Undo. Replace it only after the deletion candidate exists.
+      finalizePendingPdfUndo();
+      const token = ++pdfUndoTokenRef.current;
+      pendingPdfUndoRef.current = {
+        kind: "delete-page",
+        token,
+        transaction: deleted.transaction,
+      };
+      pdfUndoTimerRef.current = window.setTimeout(() => {
+        if (pendingPdfUndoRef.current?.token === token) finalizePendingPdfUndo();
+      }, Math.max(0, deleted.transaction.expiresAt - Date.now()));
+      setPdfUndoToast({
+        kind: "delete-page",
+        token,
+        deletedPageNumber: deleted.deletedPageNumber,
+        expiresAt: deleted.transaction.expiresAt,
+      });
+
+      if (deleted.project.activeSceneId !== currentProject.activeSceneId) beginSceneHydration();
+      pendingFrameIdRef.current = null;
+      pendingProjectSearchTargetRef.current = null;
+      pendingCreatedFrameIdRef.current = null;
+      pendingSlideFrameActionRef.current = null;
+      pdfBytesRef.current = deleted.pdfBytes;
+      projectRef.current = deleted.project;
+      activeSceneIdRef.current = deleted.project.activeSceneId;
+      setPdfBytes(deleted.pdfBytes);
+      setProject(deleted.project);
+      setWorkspaceMode(reconcilePdfPageOrder(deleted.project).length ? "pdf" : "board");
+      setErrorMessage(null);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, [
+    abortSceneOperations,
+    beginSceneHydration,
+    cancelFileOpenOperations,
+    commitLiveScenePersistence,
+    finalizePendingPdfUndo,
   ]);
 
   const addPdfPage = useCallback(async () => {
@@ -6275,7 +6466,8 @@ export default function App() {
         import("./lib/pdf/import-pdf"),
         import("./lib/pdf/create-blank-page"),
       ]);
-      const blankPdf = await createBlankPdfFile(workspace.width, workspace.height);
+      const display = getPdfPageDisplayGeometry(workspace);
+      const blankPdf = await createBlankPdfFile(display.width, display.height);
       if (!isCurrentOperation()) return;
       const sourceSize = assertProjectCanAcceptAdditionalBytes(
         sourceProject,
@@ -6319,10 +6511,10 @@ export default function App() {
         pdfDocuments: { ...current.pdfDocuments, [source.id]: source },
       };
       assertProjectFitsContentBudget(nextProject, nextPdfBytes);
-      assertPdfAdditionPreservesAnnotationUndo(
+      assertPdfAdditionPreservesPendingUndo(
         nextProject,
         nextPdfBytes,
-        pendingPdfAnnotationClearUndoRef.current?.transaction,
+        pendingPdfUndoRef.current,
       );
       beginSceneHydration();
       pendingFrameIdRef.current = null;
@@ -6567,10 +6759,10 @@ export default function App() {
         },
       );
       if (!isCurrentOperation()) return;
-      assertPdfAdditionPreservesAnnotationUndo(
+      assertPdfAdditionPreservesPendingUndo(
         imported.project,
         imported.pdfBytes,
-        pendingPdfAnnotationClearUndoRef.current?.transaction,
+        pendingPdfUndoRef.current,
       );
       beginSceneHydration();
       pendingFrameIdRef.current = null;
@@ -7117,6 +7309,8 @@ export default function App() {
           onInsertPdfPages={openPdfInsertFilePicker}
           addPageTriggerRef={pdfInsertTriggerRef}
           pageActionsTriggerRef={pdfPageActionsTriggerRef}
+          onDuplicatePage={duplicatePdfPageAction}
+          onRotatePage={rotatePdfPageAction}
           onRequestClearAnnotations={requestPdfAnnotationClear}
           onDeletePage={deletePdfPage}
           width={pdfRailWidth}
@@ -7572,14 +7766,20 @@ export default function App() {
       {errorMessage && (
         <div className="error-toast" role="alert"><span>{errorMessage}</span><button type="button" onClick={() => setErrorMessage(null)}>Dismiss</button></div>
       )}
-      {pdfAnnotationClearToast && (
+      {pdfUndoToast && (
         <div className="pdf-annotation-clear-toast" role="status">
           <span>
-            Cleared {pdfAnnotationClearToast.annotationCount} {pdfAnnotationClearToast.annotationCount === 1 ? "annotation" : "annotations"}
-            {" from "}{pdfAnnotationClearToast.affectedPageCount} {pdfAnnotationClearToast.affectedPageCount === 1 ? "page" : "pages"}
+            {pdfUndoToast.kind === "clear-annotations" ? (
+              <>
+                Cleared {pdfUndoToast.annotationCount} {pdfUndoToast.annotationCount === 1 ? "annotation" : "annotations"}
+                {" from "}{pdfUndoToast.affectedPageCount} {pdfUndoToast.affectedPageCount === 1 ? "page" : "pages"}
+              </>
+            ) : (
+              <>Deleted output page {pdfUndoToast.deletedPageNumber}</>
+            )}
           </span>
           <span aria-hidden="true">—</span>
-          <button type="button" onClick={undoPdfAnnotationClearAction}>Undo</button>
+          <button type="button" onClick={undoPendingPdfAction}>Undo</button>
         </div>
       )}
     </div>

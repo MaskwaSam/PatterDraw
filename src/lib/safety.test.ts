@@ -485,6 +485,26 @@ describe("student safety", () => {
     expect(assertSafeProject(project)).toBeUndefined();
   });
 
+  it("accepts quarter-turn view rotation and rejects malformed values", () => {
+    const project = createBlankProject();
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "source.pdf",
+      mimeType: "application/pdf",
+      byteLength: 1,
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+    };
+    const page = pdfScene("page", 0);
+    page.pdfPage = { ...page.pdfPage!, viewRotation: 90 };
+    project.scenes.page = page;
+    project.activeSceneId = "page";
+    project.pdfPageOrder = ["page"];
+    expect(assertSafeProject(project)).toBeUndefined();
+    page.pdfPage = { ...page.pdfPage!, viewRotation: 45 as 0 };
+    expect(() => assertSafeProject(project)).toThrow(/view rotation/);
+  });
+
   it("rejects malformed PDF source-occurrence metadata", () => {
     const project = createBlankProject();
     project.pdfDocuments.pdf = {

@@ -307,4 +307,18 @@ describe("dark PDF preview nested image operations", () => {
     expect(vectorPixel.green).toBeCloseTo(131, -1);
     expect(vectorPixel.blue).toBeCloseTo(131, -1);
   });
+
+  it("pre-rotates dark preview output while preserving the source raster contract", async () => {
+    const bytes = await fixtureBytes(type3RgbFixtureUrl);
+    const preview = await renderDarkPdfPreview({
+      bytes,
+      pageIndex: 0,
+      width: 240,
+      height: 320,
+      viewRotation: 90,
+    });
+    const rendered = await decodeSvgPng(preview);
+    expect(rendered.canvas.width).toBe(240);
+    expect(rendered.canvas.height).toBe(320);
+  });
 });

@@ -33,6 +33,7 @@ function rect(top: number, bottom: number, width = 180): DOMRect {
 function mount(options: {
   project?: ClassroomProject;
   pages?: readonly SerializedScene[];
+  thumbnailDataUrls?: Readonly<Record<string, string>>;
 } = {}) {
   const project = options.project ?? createBlankProject(new Date("2026-08-20T12:00:00.000Z"));
   const callbacks = {
@@ -41,6 +42,8 @@ function mount(options: {
     onShiftPage: vi.fn(),
     onAddBlankPage: vi.fn(),
     onInsertPdfPages: vi.fn(),
+    onDuplicatePage: vi.fn(),
+    onRotatePage: vi.fn(),
     onRequestClearAnnotations: vi.fn(),
     onDeletePage: vi.fn(),
     onWidthChange: vi.fn(),
@@ -54,6 +57,7 @@ function mount(options: {
     project,
     pages: options.pages ?? [],
     activeSceneId: project.activeSceneId,
+    thumbnailDataUrls: options.thumbnailDataUrls,
     width: 224,
     ...callbacks,
   })));
@@ -154,7 +158,7 @@ describe("PdfPageRail add-page menu", () => {
 });
 
 describe("PdfPageRail selected-page actions", () => {
-  it("opens an accessible More menu and routes clear and delete actions", () => {
+  it("opens an accessible More menu and routes duplicate, rotation, clear, and delete actions", () => {
     const { page, project } = pdfProject();
     const { callbacks, container } = mount({ project, pages: [page] });
     const trigger = button(container, "More actions for output page 1");
@@ -164,6 +168,19 @@ describe("PdfPageRail selected-page actions", () => {
     const menu = container.querySelector('[role="menu"][aria-label="Actions for output page 1"]');
     expect(menu).toBeTruthy();
     expect(trigger.closest(".pdf-page-item")?.classList.contains("is-actions-open")).toBe(true);
+    act(() => button(container, "Duplicate page").click());
+    expect(callbacks.onDuplicatePage).toHaveBeenCalledWith(page.id);
+    expect(trigger.closest(".pdf-page-item")?.classList.contains("is-actions-open")).toBe(false);
+
+    act(() => trigger.click());
+    act(() => button(container, "Rotate clockwise 90 degrees").click());
+    expect(callbacks.onRotatePage).toHaveBeenCalledWith(page.id, "clockwise");
+
+    act(() => trigger.click());
+    act(() => button(container, "Rotate counterclockwise 90 degrees").click());
+    expect(callbacks.onRotatePage).toHaveBeenCalledWith(page.id, "counterclockwise");
+
+    act(() => trigger.click());
     act(() => button(container, "Clear annotations…").click());
     expect(callbacks.onRequestClearAnnotations).toHaveBeenCalledWith(page.id);
     expect(trigger.closest(".pdf-page-item")?.classList.contains("is-actions-open")).toBe(false);
@@ -179,6 +196,38 @@ describe("PdfPageRail selected-page actions", () => {
     expect(container.querySelector(".pdf-annotation-count")?.textContent).toBe("2");
   });
 
+  it("rotates only the immutable light thumbnail into the page display geometry", () => {
+    const { page, project } = pdfProject();
+    page.pdfPage = { ...page.pdfPage!, viewRotation: 90 };
+    page.elements = page.elements.map((element) => element.id === "pdf-background"
+      ? { ...element, fileId: "pdf-background-file" }
+      : element);
+    page.files = {
+      "pdf-background-file": {
+        id: "pdf-background-file",
+        mimeType: "image/png",
+        dataURL: "data:image/png;base64,AA==",
+        created: 1,
+      },
+    };
+
+    const light = mount({ project, pages: [page] });
+    const lightSheet = light.container.querySelector<HTMLElement>(".page-sheet");
+    const lightImage = light.container.querySelector<HTMLImageElement>(".pdf-page-source-thumbnail");
+    expect(lightSheet?.style.aspectRatio).toBe("792 / 612");
+    expect(lightImage?.style.transform).toContain("rotate(90deg)");
+    expect(lightImage?.style.width).toBe(`${612 / 792 * 100}%`);
+
+    const dark = mount({
+      project,
+      pages: [page],
+      thumbnailDataUrls: { [page.id]: "data:image/svg+xml;base64,AA==" },
+    });
+    const darkImage = dark.container.querySelector<HTMLImageElement>(".pdf-page-dark-thumbnail");
+    expect(darkImage?.style.transform).toBe("");
+    expect(dark.container.querySelector<HTMLElement>(".page-sheet")?.style.aspectRatio).toBe("792 / 612");
+  });
+
   it("supports arrow navigation, Escape, and focus restoration", () => {
     const { page, project } = pdfProject();
     const pageActionsTriggerRef = { current: null as HTMLButtonElement | null };
@@ -188,6 +237,8 @@ describe("PdfPageRail selected-page actions", () => {
       onShiftPage: vi.fn(),
       onAddBlankPage: vi.fn(),
       onInsertPdfPages: vi.fn(),
+      onDuplicatePage: vi.fn(),
+      onRotatePage: vi.fn(),
       onRequestClearAnnotations: vi.fn(),
       onDeletePage: vi.fn(),
       onWidthChange: vi.fn(),
@@ -209,10 +260,16 @@ describe("PdfPageRail selected-page actions", () => {
     const trigger = button(container, "More actions for output page 1");
     expect(pageActionsTriggerRef.current).toBe(trigger);
     act(() => trigger.click());
-    expect(document.activeElement?.textContent).toContain("Clear annotations");
+    expect(document.activeElement?.textContent).toContain("Duplicate page");
 
     act(() => document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown" })));
+    expect(document.activeElement?.textContent).toContain("Rotate clockwise");
+    act(() => document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown" })));
+    expect(document.activeElement?.textContent).toContain("Rotate counterclockwise");
+    act(() => document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "End" })));
     expect(document.activeElement?.textContent).toContain("Delete page");
+    act(() => document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Home" })));
+    expect(document.activeElement?.textContent).toContain("Duplicate page");
 
     act(() => window.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape" })));
     expect(container.querySelector('[role="menu"][aria-label="Actions for output page 1"]')).toBeNull();
@@ -220,6 +277,44 @@ describe("PdfPageRail selected-page actions", () => {
 
     act(() => trigger.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowUp" })));
     expect(document.activeElement?.textContent).toContain("Delete page");
+  });
+
+  it("restores focus after duplicate and rotation actions", () => {
+    const { page, project } = pdfProject();
+    const { container } = mount({ project, pages: [page] });
+    const trigger = button(container, "More actions for output page 1");
+
+    act(() => trigger.click());
+    act(() => button(container, "Duplicate page").click());
+    expect(document.activeElement).toBe(trigger);
+
+    act(() => trigger.click());
+    act(() => button(container, "Rotate clockwise 90 degrees").click());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("shows More actions only for the selected page", () => {
+    const { page, project } = pdfProject();
+    const secondPage: SerializedScene = {
+      ...page,
+      id: "pdf-page-2",
+      name: "periodic-table.pdf — Page 2",
+      elements: page.elements.map((element) => ({ ...element, id: `${element.id}-2` })),
+      pdfPage: {
+        ...page.pdfPage!,
+        pageIndex: 1,
+        backgroundElementId: "pdf-background-2",
+      },
+    };
+    project.scenes[secondPage.id] = secondPage;
+    project.pdfPageOrder = [page.id, secondPage.id];
+    project.pdfDocuments["pdf-document-1"].pageCount = 2;
+
+    const { container } = mount({ project, pages: [page, secondPage] });
+    expect(button(container, "More actions for output page 1")).toBeTruthy();
+    expect([...container.querySelectorAll("button")].some((candidate) => (
+      candidate.getAttribute("aria-label") === "More actions for output page 2"
+    ))).toBe(false);
   });
 
   it("closes the page-actions menu when the user points outside", () => {
@@ -234,8 +329,8 @@ describe("PdfPageRail selected-page actions", () => {
   it("opens below or above the trigger to stay inside the rail scroll viewport", () => {
     let triggerTop = 20;
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
-      if (this.classList.contains("rail-scroll")) return rect(0, 200, 224);
-      if (this.classList.contains("pdf-page-actions-menu")) return rect(0, 70, 172);
+      if (this.classList.contains("rail-scroll")) return rect(0, 400, 224);
+      if (this.classList.contains("pdf-page-actions-menu")) return rect(0, 180, 210);
       if (this.getAttribute("aria-label") === "More actions for output page 1") {
         return rect(triggerTop, triggerTop + 27, 27);
       }
@@ -249,7 +344,7 @@ describe("PdfPageRail selected-page actions", () => {
     act(() => trigger.click());
     expect(container.querySelector(".pdf-page-actions-menu")?.classList.contains("is-below")).toBe(true);
 
-    triggerTop = 160;
+    triggerTop = 350;
     act(() => container.querySelector(".rail-scroll")?.dispatchEvent(new Event("scroll")));
     expect(container.querySelector(".pdf-page-actions-menu")?.classList.contains("is-above")).toBe(true);
 
@@ -258,14 +353,14 @@ describe("PdfPageRail selected-page actions", () => {
     expect(container.querySelector(".pdf-page-actions-menu")?.classList.contains("is-below")).toBe(true);
     act(() => trigger.click());
 
-    // Seventy pixels below exactly matches the menu height, but the five-pixel
+    // One hundred eighty pixels below exactly matches the menu height, but the five-pixel
     // visual gap means it is not actually enough room.
-    triggerTop = 103;
+    triggerTop = 193;
     act(() => trigger.click());
     expect(container.querySelector(".pdf-page-actions-menu")?.classList.contains("is-above")).toBe(true);
     act(() => trigger.click());
 
-    triggerTop = 160;
+    triggerTop = 350;
     act(() => trigger.click());
     expect(container.querySelector(".pdf-page-actions-menu")?.classList.contains("is-above")).toBe(true);
   });

@@ -43,6 +43,10 @@ import {
   type PdfOperationProgressCallback,
 } from "./operation-progress";
 import { isPatterDrawPdfAnnotation } from "./annotations";
+import {
+  getPdfPageDisplayGeometry,
+  getPdfPageEffectiveRotation,
+} from "./page-rotation";
 
 export type PdfExportMode = "expand" | "openboard-fit";
 
@@ -96,7 +100,8 @@ export function getPdfPageExportBounds(scene: SerializedScene): ExportBounds {
   // This exact set is also passed to exportToCanvas. Elements omitted from
   // annotation output must never influence expanded page geometry.
   const annotationElements = pdfAnnotationElements(scene);
-  const base = [0, 0, scene.pdfPage.width, scene.pdfPage.height] as const;
+  const display = getPdfPageDisplayGeometry(scene.pdfPage);
+  const base = [0, 0, display.width, display.height] as const;
   if (!annotationElements.length) {
     return {
       minX: 0,
@@ -346,12 +351,13 @@ export async function exportAnnotatedPdf(
   const targets = scenes.map((scene) => {
     throwIfPdfOperationAborted(options.signal);
     const workspace = scene.pdfPage;
+    const display = getPdfPageDisplayGeometry(workspace);
     const bounds = getPdfPageExportBounds(scene);
     const scale = mode === "openboard-fit"
-      ? Math.min(workspace.width / bounds.width, workspace.height / bounds.height)
+      ? Math.min(display.width / bounds.width, display.height / bounds.height)
       : 1;
-    const targetWidth = mode === "openboard-fit" ? workspace.width : bounds.width;
-    const targetHeight = mode === "openboard-fit" ? workspace.height : bounds.height;
+    const targetWidth = mode === "openboard-fit" ? display.width : bounds.width;
+    const targetHeight = mode === "openboard-fit" ? display.height : bounds.height;
     if (
       !Number.isFinite(targetWidth)
       || !Number.isFinite(targetHeight)
@@ -370,7 +376,7 @@ export async function exportAnnotatedPdf(
     const contentHeight = bounds.height * scale;
     const originX = (targetWidth - contentWidth) / 2 - bounds.minX * scale;
     const originFromTop = (targetHeight - contentHeight) / 2 - bounds.minY * scale;
-    const sourceBottom = targetHeight - originFromTop - workspace.height * scale;
+    const sourceBottom = targetHeight - originFromTop - display.height * scale;
     const targetPage = output.addPage([targetWidth, targetHeight]);
     return {
       originFromTop,
@@ -378,6 +384,8 @@ export async function exportAnnotatedPdf(
       scale,
       scene,
       sourceBottom,
+      displayWidth: display.width,
+      displayHeight: display.height,
       targetHeight,
       targetPage,
     };
@@ -523,12 +531,17 @@ export async function exportAnnotatedPdf(
       drawEmbeddedSourcePage(
         target.targetPage,
         embeddedPage,
-        workspace.rotation,
+        getPdfPageEffectiveRotation(workspace),
         target.originX,
         target.sourceBottom,
         target.scale,
-        workspace.width,
-        workspace.height,
+        // drawPage's width/height are the current displayed page dimensions;
+        // its quarter-turn branch swaps them back to the immutable source
+        // form dimensions. This works for every source/view combination:
+        // source 90 + view 90, for example, supplies display W/H = raw W/H
+        // while the effective 180-degree branch leaves them unchanged.
+        target.displayWidth,
+        target.displayHeight,
       );
     }
 

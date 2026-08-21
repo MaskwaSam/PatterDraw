@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { PDFDocument } from "pdf-lib";
 
 const PRODUCTION_EDITOR_MOUNT_TIMEOUT = 90_000;
 
@@ -11,7 +12,12 @@ type StoredElement = {
 
 type StoredProject = {
   activeSceneId: string;
-  scenes: Record<string, { elements: StoredElement[] }>;
+  pdfDocuments?: Record<string, unknown>;
+  pdfPageOrder?: string[];
+  scenes: Record<string, {
+    elements: StoredElement[];
+    pdfPage?: { documentId: string; pageIndex: number; viewRotation?: number };
+  }>;
 };
 
 async function autosavedProject(page: import("@playwright/test").Page): Promise<StoredProject | undefined> {
@@ -215,4 +221,115 @@ test("keeps Project Find typing and Escape out of canvas shortcuts while navigat
   await expect(page.getByTestId("toolbar-selection")).toBeChecked();
   await expect.poll(async () => liveElements(await autosavedProject(page)))
     .toEqual(liveElements(before));
+});
+
+test("keeps duplicate, rotate, delete, and Undo usable across production viewports", async ({ page }) => {
+  const sourceDocument = await PDFDocument.create();
+  sourceDocument.addPage([400, 240]);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "production-page-tools.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await sourceDocument.save()),
+  });
+
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await expect(pages).toHaveCount(1, { timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
+  await page.getByRole("button", { name: "Hide PDF pages", exact: true }).click();
+  await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
+  await addText(page, "PRODUCTION_DUPLICATE_NOTE");
+  await page.getByRole("button", { name: "Show PDF pages", exact: true }).click();
+  await expect(pages.first().locator(".pdf-annotation-count")).toHaveText("1");
+
+  const openActions = async (outputPage: number) => {
+    const trigger = page.getByRole("button", {
+      name: `More actions for output page ${outputPage}`,
+      exact: true,
+    });
+    await expect(trigger).toBeVisible();
+    // Let the active-scene effect finish before opening a menu. WebKit can
+    // otherwise deliver this synthetic click in the same render turn that
+    // intentionally closes the previous page's action menu.
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    }));
+    const menu = page.getByRole("menu", {
+      name: `Actions for output page ${outputPage}`,
+      exact: true,
+    });
+    // A just-activated PDF scene also closes any menu associated with the
+    // previous scene. If that passive effect lands in the same WebKit turn as
+    // an unrealistically immediate automation click, retry once the close has
+    // settled—the second click matches a normal human interaction boundary.
+    for (let attempt = 0; attempt < 3 && !await menu.isVisible(); attempt += 1) {
+      await trigger.click();
+      await page.waitForTimeout(150);
+    }
+    await expect(menu).toBeVisible();
+    const bounds = await menu.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds?.x || 0).toBeGreaterThanOrEqual(-1);
+    expect((bounds?.x || 0) + (bounds?.width || 0)).toBeLessThanOrEqual(
+      await page.evaluate(() => window.innerWidth + 1),
+    );
+    return menu;
+  };
+
+  let actions = await openActions(1);
+  await actions.getByRole("menuitem", { name: "Duplicate page", exact: true }).click();
+  await expect(pages).toHaveCount(2);
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await expect(pages.nth(0).locator(".pdf-annotation-count")).toHaveText("1");
+  await expect(pages.nth(1).locator(".pdf-annotation-count")).toHaveText("1");
+  await expect.poll(async () => {
+    const project = await autosavedProject(page);
+    return project?.activeSceneId === project?.pdfPageOrder?.[1];
+  }).toBe(true);
+
+  actions = await openActions(2);
+  await actions.getByRole("menuitem", {
+    name: "Rotate clockwise 90 degrees",
+    exact: true,
+  }).click();
+  await expect.poll(async () => {
+    const project = await autosavedProject(page);
+    const sceneId = project?.pdfPageOrder?.[1] || "";
+    return project?.scenes[sceneId]?.pdfPage?.viewRotation;
+  }).toBe(90);
+  const rotatedSheet = await pages.nth(1).locator(".page-sheet").boundingBox();
+  expect(rotatedSheet).not.toBeNull();
+  expect((rotatedSheet?.height || 0) / (rotatedSheet?.width || 1)).toBeGreaterThan(1.5);
+
+  page.once("dialog", (dialog) => void dialog.accept());
+  actions = await openActions(2);
+  await actions.getByRole("menuitem", { name: "Delete page", exact: true }).click();
+  await expect(pages).toHaveCount(1);
+  const toast = page.locator(".pdf-annotation-clear-toast");
+  await expect(toast).toContainText("Deleted output page 2");
+  const toastBounds = await toast.boundingBox();
+  expect(toastBounds).not.toBeNull();
+  expect(toastBounds?.x || 0).toBeGreaterThanOrEqual(-1);
+  expect((toastBounds?.x || 0) + (toastBounds?.width || 0)).toBeLessThanOrEqual(
+    await page.evaluate(() => window.innerWidth + 1),
+  );
+  await toast.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(toast).toHaveCount(0);
+  await expect(pages).toHaveCount(2);
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await expect.poll(async () => {
+    const project = await autosavedProject(page);
+    return {
+      documentCount: Object.keys(project?.pdfDocuments || {}).length,
+      pageIndices: (project?.pdfPageOrder || []).map(
+        (sceneId) => project?.scenes[sceneId]?.pdfPage?.pageIndex,
+      ),
+      viewRotations: (project?.pdfPageOrder || []).map(
+        (sceneId) => project?.scenes[sceneId]?.pdfPage?.viewRotation || 0,
+      ),
+    };
+  }).toEqual({
+    documentCount: 1,
+    pageIndices: [0, 0],
+    viewRotations: [0, 90],
+  });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

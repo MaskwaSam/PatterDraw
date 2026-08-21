@@ -76,6 +76,8 @@ export interface DarkPdfPreviewRequest extends PdfRasterDimensions {
   /** Verified hash for wrapper-owned immutable source bytes. */
   immutableSha256?: string;
   pageIndex: number;
+  /** Wrapper-owned quarter-turn applied after source PDF rendering. */
+  viewRotation?: 0 | 90 | 180 | 270;
   rasterBudget?: Readonly<PdfRasterBudget>;
   signal?: AbortSignal;
 }
@@ -354,6 +356,7 @@ export async function renderDarkPdfPreview({
   bytes,
   immutableSha256,
   pageIndex,
+  viewRotation = 0,
   rasterBudget: requestedRasterBudget,
   width,
   height,
@@ -645,8 +648,25 @@ export async function renderDarkPdfPreview({
     try {
       throwIfDarkPdfAborted(signal);
       const unitViewport = page.getViewport({ scale: 1 });
-      const scale = Math.min(width / unitViewport.width, height / unitViewport.height);
+      if (viewRotation !== 0 && viewRotation !== 90 && viewRotation !== 180 && viewRotation !== 270) {
+        throw new Error("The PDF page view rotation is invalid.");
+      }
+      const displayWidth = viewRotation === 90 || viewRotation === 270
+        ? unitViewport.height
+        : unitViewport.width;
+      const displayHeight = viewRotation === 90 || viewRotation === 270
+        ? unitViewport.width
+        : unitViewport.height;
+      const scale = Math.min(width / displayWidth, height / displayHeight);
       const viewport = page.getViewport({ scale });
+      const renderedWidth = Math.max(1, Math.min(
+        Math.ceil(unitViewport.width * scale),
+        rasterBudget.maxEdge,
+      ));
+      const renderedHeight = Math.max(1, Math.min(
+        Math.ceil(unitViewport.height * scale),
+        rasterBudget.maxEdge,
+      ));
       const operatorList = await waitForDarkPdfTask(
         page.getOperatorList(),
         signal,
@@ -654,9 +674,9 @@ export async function renderDarkPdfPreview({
       );
       throwIfDarkPdfAborted(signal);
       desiredDarkCanvas = window.document.createElement("canvas");
-      reserveRasterCanvas(desiredDarkCanvas, width, height);
-      desiredDarkCanvas.width = width;
-      desiredDarkCanvas.height = height;
+      reserveRasterCanvas(desiredDarkCanvas, renderedWidth, renderedHeight);
+      desiredDarkCanvas.width = renderedWidth;
+      desiredDarkCanvas.height = renderedHeight;
       const desiredDarkContext = desiredDarkCanvas.getContext("2d", { alpha: false });
       if (!desiredDarkContext) throw new Error("This browser cannot render dark PDF pages.");
       ensureSurfaceInfo(desiredDarkCanvas);
@@ -689,7 +709,19 @@ export async function renderDarkPdfPreview({
       // 1 / 0.86 contrast. Hue rotation is its own inverse at 180 degrees.
       // Extremal image channels are necessarily clipped to Excalidraw's 7%
       // dark-mode gamut, while every in-gamut colour round-trips.
+      precompensatedContext.fillStyle = "#ffffff";
+      precompensatedContext.fillRect(0, 0, width, height);
       precompensatedContext.filter = DARK_PDF_CANVAS_INVERSE_FILTER;
+      if (viewRotation === 90) {
+        precompensatedContext.translate(height, 0);
+        precompensatedContext.rotate(Math.PI / 2);
+      } else if (viewRotation === 180) {
+        precompensatedContext.translate(width, height);
+        precompensatedContext.rotate(Math.PI);
+      } else if (viewRotation === 270) {
+        precompensatedContext.translate(0, width);
+        precompensatedContext.rotate(-Math.PI / 2);
+      }
       precompensatedContext.drawImage(desiredDarkCanvas, 0, 0);
       precompensatedContext.filter = "none";
       releaseTrackedRasterCanvas(desiredDarkCanvas);

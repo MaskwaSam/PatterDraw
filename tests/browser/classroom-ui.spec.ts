@@ -393,6 +393,39 @@ async function deletePdfPageThroughActions(
   await actionsMenu.getByRole("menuitem", { name: "Delete page", exact: true }).click();
 }
 
+async function choosePdfPageAction(
+  page: import("@playwright/test").Page,
+  outputPage: number,
+  accessibleName: string,
+): Promise<void> {
+  await page.getByRole("button", {
+    name: `More actions for output page ${outputPage}`,
+    exact: true,
+  }).click();
+  const actionsMenu = page.getByRole("menu", {
+    name: `Actions for output page ${outputPage}`,
+    exact: true,
+  });
+  await expect(actionsMenu).toBeVisible();
+  await actionsMenu.getByRole("menuitem", { name: accessibleName, exact: true }).click();
+}
+
+async function drawPdfAnnotationAtScenePoints(
+  page: import("@playwright/test").Page,
+  tool: "rectangle" | "freedraw",
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+): Promise<void> {
+  await page.getByTestId(`toolbar-${tool}`).check({ force: true });
+  const viewportStart = await liveScenePointInViewport(page, start);
+  const viewportEnd = await liveScenePointInViewport(page, end);
+  await page.mouse.move(viewportStart.x, viewportStart.y);
+  await page.mouse.down();
+  await page.mouse.move(viewportEnd.x, viewportEnd.y, { steps: 8 });
+  await page.mouse.up();
+  await page.getByTestId("toolbar-selection").check({ force: true });
+}
+
 async function autosavedPdfAnnotationCounts(
   page: import("@playwright/test").Page,
 ): Promise<number[]> {
@@ -9627,6 +9660,485 @@ test("adds a blank PDF page, reopens the project on Board, and exports it", asyn
   for await (const chunk of exportedPdf) pdfChunks.push(Buffer.from(chunk));
   const exported = await PDFDocument.load(Buffer.concat(pdfChunks));
   expect(exported.getPageCount()).toBe(2);
+});
+
+test("duplicates an annotated PDF page with independent identities and one immutable source", async ({ page }) => {
+  test.setTimeout(120_000);
+  const sourceBytes = await labelledPdfBytes(["DUPLICATE_NATIVE_PAGE"]);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "duplicate-source.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(sourceBytes),
+  });
+
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await expect(pages).toHaveCount(1, { timeout: 20_000 });
+  await typePdfTextAnnotation(page, "DUPLICATED_USER_NOTE");
+  await expect(pages.first().locator(".pdf-annotation-count")).toHaveText("1");
+
+  await choosePdfPageAction(page, 1, "Duplicate page");
+  await expect(pages).toHaveCount(2, { timeout: 20_000 });
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await expect(pages.nth(0).locator(".pdf-annotation-count")).toHaveText("1");
+  await expect(pages.nth(1).locator(".pdf-annotation-count")).toHaveText("1");
+
+  type DuplicateStoredProject = {
+    activeSceneId: string;
+    pdfDocuments: Record<string, { archivePath: string }>;
+    pdfPageOrder: string[];
+    scenes: Record<string, {
+      elements: Array<{ fileId?: string | null; id: string; isDeleted?: boolean }>;
+      files: Record<string, unknown>;
+      pdfPage?: {
+        backgroundElementId: string;
+        documentId: string;
+        pageIndex: number;
+      };
+    }>;
+  };
+  const duplicated = await keyvalValue<DuplicateStoredProject>(
+    page,
+    "patterdraw:autosave:project:v1",
+  );
+  expect(duplicated?.pdfPageOrder).toHaveLength(2);
+  if (!duplicated) throw new Error("The duplicated PDF project was not autosaved.");
+  const [originalSceneId, duplicatedSceneId] = duplicated.pdfPageOrder;
+  const originalScene = duplicated.scenes[originalSceneId];
+  const duplicatedScene = duplicated.scenes[duplicatedSceneId];
+  expect(duplicated.activeSceneId).toBe(duplicatedSceneId);
+  expect(duplicatedSceneId).not.toBe(originalSceneId);
+  expect(duplicatedScene.pdfPage?.documentId).toBe(originalScene.pdfPage?.documentId);
+  expect([originalScene.pdfPage?.pageIndex, duplicatedScene.pdfPage?.pageIndex]).toEqual([0, 0]);
+  expect(Object.keys(duplicated.pdfDocuments)).toHaveLength(1);
+  const originalElementIds = new Set(originalScene.elements.map((element) => element.id));
+  expect(duplicatedScene.elements.every((element) => !originalElementIds.has(element.id))).toBe(true);
+  expect(duplicatedScene.pdfPage?.backgroundElementId)
+    .not.toBe(originalScene.pdfPage?.backgroundElementId);
+  const originalFileIds = new Set(Object.keys(originalScene.files));
+  expect(Object.keys(duplicatedScene.files).every((fileId) => !originalFileIds.has(fileId))).toBe(true);
+
+  await drawPdfRectangleAnnotation(page, { x: 360, y: 260 }, { x: 500, y: 360 });
+  await expect(pages.nth(0).locator(".pdf-annotation-count")).toHaveText("1");
+  await expect(pages.nth(1).locator(".pdf-annotation-count")).toHaveText("2");
+  await expect.poll(() => autosavedPdfAnnotationCounts(page), { timeout: 20_000 })
+    .toEqual([1, 2]);
+
+  const saveEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  const archiveBytes = await downloadBytes(await saveEvent);
+  const archive = unzipSync(new Uint8Array(archiveBytes));
+  const manifest = JSON.parse(strFromU8(archive["project.json"])) as DuplicateStoredProject;
+  expect(manifest.pdfPageOrder).toEqual([originalSceneId, duplicatedSceneId]);
+  expect(manifest.pdfPageOrder.map((sceneId) => manifest.scenes[sceneId].pdfPage?.pageIndex))
+    .toEqual([0, 0]);
+  const [source] = Object.values(manifest.pdfDocuments);
+  expect(source).toBeDefined();
+  expect(archive[source.archivePath]).toEqual(sourceBytes);
+  expect(Object.keys(archive).filter((path) => path === source.archivePath)).toHaveLength(1);
+
+  await page.reload();
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "duplicate-roundtrip.patterdraw",
+    mimeType: "application/vnd.patterdraw+zip",
+    buffer: archiveBytes,
+  });
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(pages).toHaveCount(2, { timeout: 20_000 });
+  await expect.poll(() => autosavedPdfAnnotationCounts(page), { timeout: 20_000 })
+    .toEqual([1, 2]);
+  const reopened = await keyvalValue<DuplicateStoredProject>(
+    page,
+    "patterdraw:autosave:project:v1",
+  );
+  expect(reopened?.pdfPageOrder).toEqual([originalSceneId, duplicatedSceneId]);
+  expect(Object.keys(reopened?.pdfDocuments || {})).toHaveLength(1);
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  const exportEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: /Annotated PDF — expand pages/ }).click();
+  const exportedBytes = await downloadBytes(await exportEvent);
+  expect(await pdfPageTexts(exportedBytes)).toEqual([
+    "DUPLICATE_NATIVE_PAGE",
+    "DUPLICATE_NATIVE_PAGE",
+  ]);
+  const originalRender = await renderPdfPage(exportedBytes, 1);
+  const duplicatedRender = await renderPdfPage(exportedBytes, 2);
+  const darkPixelCount = (rendered: RenderedPdfPage) => {
+    let count = 0;
+    for (let offset = 0; offset < rendered.rgba.length; offset += 4) {
+      if (
+        rendered.rgba[offset] < 110
+        && rendered.rgba[offset + 1] < 110
+        && rendered.rgba[offset + 2] < 110
+        && rendered.rgba[offset + 3] > 180
+      ) count += 1;
+    }
+    return count;
+  };
+  expect(darkPixelCount(duplicatedRender)).toBeGreaterThan(darkPixelCount(originalRender) + 100);
+});
+
+test("restores a deleted last-source PDF page and finalizes Undo on a later rotation", async ({ page }) => {
+  test.setTimeout(120_000);
+  const mainBytes = await labelledPdfBytes(["DELETE_MAIN_NATIVE"]);
+  const supplementalBytes = await labelledPdfBytes(["DELETE_SUPPLEMENT_NATIVE"]);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "delete-main.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(mainBytes),
+  });
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
+  await page.getByLabel("Select PDFs to insert").setInputFiles({
+    name: "delete-supplement.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(supplementalBytes),
+  });
+  const insertDialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(insertDialog).toBeVisible({ timeout: 20_000 });
+  await insertDialog.getByRole("button", { name: "Insert 1 page", exact: true }).click();
+  await expect(insertDialog).toHaveCount(0, { timeout: 20_000 });
+
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await expect(pages).toHaveCount(2, { timeout: 20_000 });
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  type DeleteStoredProject = {
+    activeSceneId: string;
+    pdfDocuments: Record<string, { name: string }>;
+    pdfPageOrder: string[];
+    scenes: Record<string, {
+      pdfPage?: { documentId: string; pageIndex: number; viewRotation?: number };
+    }>;
+  };
+  await expect.poll(async () => {
+    const saved = await keyvalValue<DeleteStoredProject>(
+      page,
+      "patterdraw:autosave:project:v1",
+    );
+    const secondSceneId = saved?.pdfPageOrder[1];
+    return Boolean(
+      saved?.pdfPageOrder.length === 2
+      && secondSceneId
+      && saved.scenes[secondSceneId]?.pdfPage
+      && Object.keys(saved.pdfDocuments).length === 2,
+    );
+  }, { timeout: 20_000 }).toBe(true);
+  const beforeDelete = await keyvalValue<DeleteStoredProject>(
+    page,
+    "patterdraw:autosave:project:v1",
+  );
+  if (!beforeDelete) throw new Error("The two-source PDF project was not autosaved.");
+  const supplementalSceneId = beforeDelete.pdfPageOrder[1];
+  const supplementalDocumentId = beforeDelete.scenes[supplementalSceneId].pdfPage?.documentId;
+  if (!supplementalDocumentId) throw new Error("The supplemental PDF source is missing.");
+  const supplementalKey = `patterdraw:autosave:pdf:v1:${supplementalDocumentId}`;
+  await expect.poll(async () => Array.from(
+    (await keyvalValue<Uint8Array>(page, supplementalKey)) || [],
+  )).toEqual(Array.from(supplementalBytes));
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("Delete output page 2?");
+    expect(dialog.message()).toContain("undo for ten seconds");
+    await dialog.accept();
+  });
+  await deletePdfPageThroughActions(page, 2);
+  const toast = page.locator(".pdf-annotation-clear-toast");
+  await expect(toast).toContainText("Deleted output page 2");
+  await expect(pages).toHaveCount(1);
+  await expect.poll(async () => Object.keys((await keyvalValue<DeleteStoredProject>(
+    page,
+    "patterdraw:autosave:project:v1",
+  ))?.pdfDocuments || {})).toHaveLength(1);
+  await expect.poll(() => keyvalValue(page, supplementalKey)).toBeUndefined();
+
+  await toast.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(toast).toHaveCount(0);
+  await expect(pages).toHaveCount(2, { timeout: 20_000 });
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  const restored = await keyvalValue<DeleteStoredProject>(
+    page,
+    "patterdraw:autosave:project:v1",
+  );
+  expect(restored?.pdfPageOrder).toEqual(beforeDelete.pdfPageOrder);
+  expect(restored?.activeSceneId).toBe(supplementalSceneId);
+  expect(restored?.scenes[supplementalSceneId].pdfPage?.pageIndex).toBe(0);
+  expect(Object.keys(restored?.pdfDocuments || {})).toHaveLength(2);
+  await expect.poll(async () => Array.from(
+    (await keyvalValue<Uint8Array>(page, supplementalKey)) || [],
+  )).toEqual(Array.from(supplementalBytes));
+
+  page.once("dialog", (dialog) => void dialog.accept());
+  await deletePdfPageThroughActions(page, 2);
+  await expect(toast).toContainText("Deleted output page 2");
+  await expect(pages).toHaveCount(1);
+  await choosePdfPageAction(page, 1, "Rotate clockwise 90 degrees");
+  await expect(toast).toHaveCount(0);
+  await expect.poll(async () => {
+    const saved = await keyvalValue<DeleteStoredProject>(
+      page,
+      "patterdraw:autosave:project:v1",
+    );
+    const sceneId = saved?.pdfPageOrder[0] || "";
+    return saved?.scenes[sceneId]?.pdfPage?.viewRotation;
+  }).toBe(90);
+  await expect.poll(() => keyvalValue(page, supplementalKey)).toBeUndefined();
+  await expect(pages).toHaveCount(1);
+});
+
+test("rotates PDF content, annotations, and off-page writing through persistence and export", async ({ page }) => {
+  test.setTimeout(180_000);
+  const sourceDocument = await PDFDocument.create();
+  const sourcePage = sourceDocument.addPage([400, 240]);
+  const font = await sourceDocument.embedFont(StandardFonts.Helvetica);
+  sourcePage.drawRectangle({ x: 30, y: 40, width: 40, height: 30, color: rgb(1, 0, 0) });
+  sourcePage.drawRectangle({ x: 320, y: 170, width: 50, height: 40, color: rgb(0, 0, 1) });
+  sourcePage.drawText("ROTATION_NATIVE_SENTINEL", {
+    x: 125,
+    y: 205,
+    size: 12,
+    font,
+    color: rgb(0, 0, 0),
+  });
+  const sourceBytes = await sourceDocument.save();
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "rotation-asymmetric.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(sourceBytes),
+  });
+
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await expect(pages).toHaveCount(1, { timeout: 20_000 });
+  const sheet = pages.first().locator(".page-sheet");
+  const initialSheet = await sheet.boundingBox();
+  expect(initialSheet).not.toBeNull();
+  expect((initialSheet?.width || 0) / (initialSheet?.height || 1)).toBeGreaterThan(1.5);
+
+  await drawPdfAnnotationAtScenePoints(
+    page,
+    "rectangle",
+    { x: 120, y: 80 },
+    { x: 220, y: 140 },
+  );
+  await drawPdfAnnotationAtScenePoints(
+    page,
+    "freedraw",
+    { x: 430, y: 90 },
+    { x: 470, y: 130 },
+  );
+  await expect(pages.first().locator(".pdf-annotation-count")).toHaveText("2");
+
+  type RotationElement = {
+    angle?: number;
+    height?: number;
+    id: string;
+    isDeleted?: boolean;
+    points?: Array<[number, number]>;
+    type?: string;
+    width?: number;
+    x?: number;
+    y?: number;
+  };
+  type RotationStoredProject = {
+    pdfDocuments: Record<string, { archivePath: string }>;
+    pdfPageOrder: string[];
+    scenes: Record<string, {
+      elements: RotationElement[];
+      pdfPage?: {
+        backgroundElementId: string;
+        documentId: string;
+        height: number;
+        pageIndex: number;
+        rotation: number;
+        viewRotation?: number;
+        width: number;
+      };
+    }>;
+  };
+  const readRotationProject = () => keyvalValue<RotationStoredProject>(
+    page,
+    "patterdraw:autosave:project:v1",
+  );
+  await expect.poll(async () => {
+    const saved = await readRotationProject();
+    const scene = saved?.scenes[saved.pdfPageOrder[0]];
+    return scene?.elements.filter((element) => (
+      !element.isDeleted && element.id !== scene.pdfPage?.backgroundElementId
+    )).length;
+  }, { timeout: 20_000 }).toBe(2);
+  const before = await readRotationProject();
+  if (!before) throw new Error("The rotation fixture was not autosaved.");
+  const sceneId = before.pdfPageOrder[0];
+  const beforeScene = before.scenes[sceneId];
+  const beforeRectangle = beforeScene.elements.find((element) => element.type === "rectangle");
+  const beforeWriting = beforeScene.elements.find((element) => element.type === "freedraw");
+  if (!beforeRectangle || !beforeWriting) throw new Error("The rotation annotations are missing.");
+  const rectangleCenter = (element: RotationElement) => ({
+    x: (element.x || 0) + (element.width || 0) / 2,
+    y: (element.y || 0) + (element.height || 0) / 2,
+  });
+  const globalPathPoints = (element: RotationElement) => (element.points || []).map(([x, y]) => ({
+    x: (element.x || 0) + x,
+    y: (element.y || 0) + y,
+  }));
+  const beforeRectangleCenter = rectangleCenter(beforeRectangle);
+  const beforeWritingPoints = globalPathPoints(beforeWriting);
+  expect(Math.max(...beforeWritingPoints.map((point) => point.x))).toBeGreaterThan(400);
+  expect(beforeScene.pdfPage).toMatchObject({
+    height: 240,
+    pageIndex: 0,
+    rotation: 0,
+    width: 400,
+  });
+
+  await choosePdfPageAction(page, 1, "Rotate clockwise 90 degrees");
+  await expect.poll(async () => {
+    const saved = await readRotationProject();
+    return saved?.scenes[sceneId]?.pdfPage?.viewRotation;
+  }, { timeout: 20_000 }).toBe(90);
+  const clockwise = await readRotationProject();
+  if (!clockwise) throw new Error("The clockwise rotation was not autosaved.");
+  const clockwiseScene = clockwise.scenes[sceneId];
+  const clockwiseRectangle = clockwiseScene.elements.find((element) => element.id === beforeRectangle.id);
+  const clockwiseWriting = clockwiseScene.elements.find((element) => element.id === beforeWriting.id);
+  const clockwiseBackground = clockwiseScene.elements.find(
+    (element) => element.id === clockwiseScene.pdfPage?.backgroundElementId,
+  );
+  if (!clockwiseRectangle || !clockwiseWriting || !clockwiseBackground) {
+    throw new Error("The clockwise rotation lost page elements.");
+  }
+  expect(clockwiseScene.pdfPage).toMatchObject({
+    height: 240,
+    pageIndex: 0,
+    rotation: 0,
+    viewRotation: 90,
+    width: 400,
+  });
+  expect(clockwiseBackground.angle).toBeCloseTo(Math.PI / 2, 8);
+  const clockwiseRectangleCenter = rectangleCenter(clockwiseRectangle);
+  expect(clockwiseRectangleCenter.x).toBeCloseTo(240 - beforeRectangleCenter.y, 5);
+  expect(clockwiseRectangleCenter.y).toBeCloseTo(beforeRectangleCenter.x, 5);
+  const clockwiseWritingPoints = globalPathPoints(clockwiseWriting);
+  expect(Math.max(...clockwiseWritingPoints.map((point) => point.y))).toBeGreaterThan(400);
+  expect(new Set(clockwiseScene.elements.map((element) => element.id)))
+    .toEqual(new Set(beforeScene.elements.map((element) => element.id)));
+  const clockwiseSheet = await sheet.boundingBox();
+  expect(clockwiseSheet).not.toBeNull();
+  expect((clockwiseSheet?.height || 0) / (clockwiseSheet?.width || 1)).toBeGreaterThan(1.5);
+
+  const saveEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  const archiveBytes = await downloadBytes(await saveEvent);
+  const archive = unzipSync(new Uint8Array(archiveBytes));
+  const manifest = JSON.parse(strFromU8(archive["project.json"])) as RotationStoredProject;
+  const [archivedSource] = Object.values(manifest.pdfDocuments);
+  expect(archivedSource).toBeDefined();
+  expect(archive[archivedSource.archivePath]).toEqual(sourceBytes);
+
+  await page.reload();
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "rotation-clockwise-roundtrip.patterdraw",
+    mimeType: "application/vnd.patterdraw+zip",
+    buffer: archiveBytes,
+  });
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(pages).toHaveCount(1, { timeout: 20_000 });
+  await expect.poll(async () => {
+    const saved = await readRotationProject();
+    return saved?.scenes[sceneId]?.pdfPage?.viewRotation;
+  }).toBe(90);
+  await expect(pages.first().locator(".pdf-annotation-count")).toHaveText("2");
+  const reopenedSheet = await sheet.boundingBox();
+  expect((reopenedSheet?.height || 0) / (reopenedSheet?.width || 1)).toBeGreaterThan(1.5);
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  let exportEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: /Annotated PDF — expand pages/ }).click();
+  const clockwiseExportBytes = await downloadBytes(await exportEvent);
+  const clockwiseExport = await renderPdfPage(clockwiseExportBytes);
+  expect(clockwiseExport.width).toBe(240);
+  // Expanded export retains the off-page stroke below the clockwise 240×400
+  // page instead of clipping it back to the native page boundary.
+  expect(clockwiseExport.height).toBeGreaterThan(470);
+  expect(clockwiseExport.text).toContain("ROTATION_NATIVE_SENTINEL");
+  const sourceRender = await renderPdfPage(sourceBytes);
+  const red = (redChannel: number, greenChannel: number, blueChannel: number) => (
+    redChannel > 210 && greenChannel < 90 && blueChannel < 90
+  );
+  const blue = (redChannel: number, greenChannel: number, blueChannel: number) => (
+    redChannel < 90 && greenChannel < 90 && blueChannel > 210
+  );
+  const clockwiseExpected = (bounds: readonly [number, number, number, number]) => [
+    sourceRender.height - bounds[3],
+    bounds[0],
+    sourceRender.height - bounds[1],
+    bounds[2],
+  ];
+  const expectBoundsNear = (actual: readonly number[] | null, expected: readonly number[]) => {
+    expect(actual).not.toBeNull();
+    if (!actual) return;
+    expect(actual).toHaveLength(4);
+    for (let index = 0; index < 4; index += 1) {
+      expect(Math.abs(actual[index] - expected[index])).toBeLessThanOrEqual(3);
+    }
+  };
+  const sourceRedBounds = matchingPixelBounds(sourceRender, red);
+  const sourceBlueBounds = matchingPixelBounds(sourceRender, blue);
+  if (!sourceRedBounds || !sourceBlueBounds) throw new Error("The asymmetric source colours are missing.");
+  expectBoundsNear(
+    matchingPixelBounds(clockwiseExport, red),
+    clockwiseExpected(sourceRedBounds),
+  );
+  expectBoundsNear(
+    matchingPixelBounds(clockwiseExport, blue),
+    clockwiseExpected(sourceBlueBounds),
+  );
+  let offPageDarkPixels = 0;
+  for (let y = 400; y < clockwiseExport.height; y += 1) {
+    for (let x = 0; x < clockwiseExport.width; x += 1) {
+      const offset = (y * clockwiseExport.width + x) * 4;
+      if (
+        clockwiseExport.rgba[offset] < 120
+        && clockwiseExport.rgba[offset + 1] < 120
+        && clockwiseExport.rgba[offset + 2] < 120
+        && clockwiseExport.rgba[offset + 3] > 180
+      ) offPageDarkPixels += 1;
+    }
+  }
+  expect(offPageDarkPixels).toBeGreaterThan(10);
+
+  await choosePdfPageAction(page, 1, "Rotate counterclockwise 90 degrees");
+  await expect.poll(async () => {
+    const saved = await readRotationProject();
+    return saved?.scenes[sceneId]?.pdfPage?.viewRotation ?? 0;
+  }).toBe(0);
+  const restored = await readRotationProject();
+  if (!restored) throw new Error("The counterclockwise rotation was not autosaved.");
+  const restoredScene = restored.scenes[sceneId];
+  const restoredRectangle = restoredScene.elements.find((element) => element.id === beforeRectangle.id);
+  const restoredWriting = restoredScene.elements.find((element) => element.id === beforeWriting.id);
+  if (!restoredRectangle || !restoredWriting) throw new Error("The restored annotations are missing.");
+  expect(rectangleCenter(restoredRectangle).x).toBeCloseTo(beforeRectangleCenter.x, 5);
+  expect(rectangleCenter(restoredRectangle).y).toBeCloseTo(beforeRectangleCenter.y, 5);
+  const restoredWritingPoints = globalPathPoints(restoredWriting);
+  expect(Math.max(...restoredWritingPoints.map((point) => point.x))).toBeGreaterThan(400);
+  const restoredSheet = await sheet.boundingBox();
+  expect((restoredSheet?.width || 0) / (restoredSheet?.height || 1)).toBeGreaterThan(1.5);
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  exportEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: /Annotated PDF — expand pages/ }).click();
+  const restoredExport = await renderPdfPage(await downloadBytes(await exportEvent));
+  expect(restoredExport.width).toBeGreaterThan(470);
+  expect(restoredExport.height).toBe(240);
+  expectBoundsNear(
+    matchingPixelBounds(restoredExport, red),
+    sourceRedBounds,
+  );
+  expectBoundsNear(
+    matchingPixelBounds(restoredExport, blue),
+    sourceBlueBounds,
+  );
+  expect(nonWhitePixelsAfter(restoredExport, 400)).toBeGreaterThan(10);
 });
 
 test("cleans deleted PDF bytes atomically when Web Locks are unavailable", async ({ page }) => {

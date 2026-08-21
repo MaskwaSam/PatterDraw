@@ -131,6 +131,15 @@ export const ExitFullscreenIcon = (props: IconProps) => (
 export const MoreIcon = (props: IconProps) => (
   <IconBase {...props}><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></IconBase>
 );
+export const DuplicateIcon = (props: IconProps) => (
+  <IconBase {...props}><rect x="8" y="8" width="11" height="11" rx="1.5"/><path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8"/></IconBase>
+);
+export const RotateClockwiseIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M19 7V3m0 4h-4"/><path d="M18.2 7A8 8 0 1 0 20 12"/></IconBase>
+);
+export const RotateCounterclockwiseIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M5 7V3m0 4h4"/><path d="M5.8 7A8 8 0 1 1 4 12"/></IconBase>
+);
 export const DragIcon = (props: IconProps) => (
   <IconBase {...props}><circle cx="8" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="16" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="8" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="16" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="8" cy="18" r="1" fill="currentColor" stroke="none"/><circle cx="16" cy="18" r="1" fill="currentColor" stroke="none"/></IconBase>
 );

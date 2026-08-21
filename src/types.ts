@@ -31,6 +31,12 @@ export interface PdfPageWorkspace {
   width: number;
   height: number;
   rotation: 0 | 90 | 180 | 270;
+  /**
+   * Wrapper-owned, non-destructive view rotation. The source page rotation,
+   * dimensions, and page index remain immutable. Omitted in legacy projects
+   * and therefore equivalent to zero.
+   */
+  viewRotation?: 0 | 90 | 180 | 270;
   backgroundElementId: string;
 }
 
