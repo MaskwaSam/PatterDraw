@@ -27,6 +27,13 @@ import type { LassoGeometrySnapshot } from "./lib/lasso/stable-element-adapter";
 import { TopBar } from "./components/TopBar";
 import { SlideRail } from "./components/SlideRail";
 import { PDF_RAIL_DEFAULT_WIDTH, PdfPageRail } from "./components/PdfPageRail";
+import {
+  PdfInsertDialog,
+  defaultPdfPageRange,
+  type PdfInsertFileRowMetadata,
+  type PdfInsertOperationProgress,
+  type PdfInsertSubmission,
+} from "./components/PdfInsertDialog";
 import { PresentationOverlay } from "./components/PresentationOverlay";
 import { StrokeWidthExtensions } from "./components/StrokeWidthExtensions";
 import { MathToolsMenuExtension } from "./components/MathToolsMenuExtension";
@@ -338,6 +345,16 @@ type SceneHydrationBaseline = {
 type FileOpenOperation = {
   generation: number;
   signal: AbortSignal;
+};
+type PendingPdfInsertFile = PdfInsertFileRowMetadata & {
+  file: File;
+  sha256: string;
+};
+type PendingPdfInsert = {
+  files: PendingPdfInsertFile[];
+  projectId: string;
+  selectedPageId: string;
+  hydrationGeneration: number;
 };
 export type SceneOperationFence = {
   projectId: string;
@@ -1000,6 +1017,11 @@ export default function App() {
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const [busyCanCancel, setBusyCanCancel] = useState(false);
   const busyCancelRef = useRef<(() => void) | null>(null);
+  const [pendingPdfInsert, setPendingPdfInsert] = useState<PendingPdfInsert | null>(null);
+  const [pdfInsertProcessing, setPdfInsertProcessing] = useState(false);
+  const [pdfInsertCancelling, setPdfInsertCancelling] = useState(false);
+  const [pdfInsertProgress, setPdfInsertProgress] = useState<PdfInsertOperationProgress | null>(null);
+  const pdfInsertOperationGenerationRef = useRef<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [autosaveRecoveryDetail, setAutosaveRecoveryDetail] = useState<string | null>(null);
   const [autosaveRecoveryKind, setAutosaveRecoveryKind] = useState<AutosaveRecoveryKind | null>(null);
@@ -1168,6 +1190,8 @@ export default function App() {
     featurePreferences.snapToObjects,
   ]);
   const inputRef = useRef<HTMLInputElement>(null);
+  const pdfInsertInputRef = useRef<HTMLInputElement>(null);
+  const pdfInsertTriggerRef = useRef<HTMLButtonElement | null>(null);
   const libraryInputRef = useRef<HTMLInputElement>(null);
   const insertTriggerRef = useRef<HTMLButtonElement>(null);
   const exportOptionsTriggerRef = useRef<HTMLButtonElement>(null);
@@ -5842,7 +5866,13 @@ export default function App() {
       });
       if (!isCurrentOperation()) return;
       const importedScene = imported.scenes[0];
-      const scene = { ...importedScene, name: "Blank page" };
+      const scene = {
+        ...importedScene,
+        name: "Blank page",
+        pdfPage: importedScene.pdfPage
+          ? { ...importedScene.pdfPage, sourceName: "Blank page" }
+          : undefined,
+      };
       const source = { ...imported.source, name: "Blank page" };
       const current = commitLiveScenePersistence(sourceSceneId);
       if (!current || !isCurrentOperation()) return;
@@ -5886,6 +5916,253 @@ export default function App() {
     currentScene?.pdfPage,
     isCurrentFileOpenOperation,
     project,
+  ]);
+
+  const openPdfInsertFilePicker = useCallback(() => {
+    const currentProject = projectRef.current;
+    const selectedPageId = hydratedSceneIdRef.current
+      || activeSceneIdRef.current
+      || currentProject?.activeSceneId;
+    if (!currentProject || !selectedPageId || !currentProject.scenes[selectedPageId]?.pdfPage) {
+      setErrorMessage("Select a PDF page before inserting more PDF pages.");
+      return;
+    }
+    if (remainingProjectSceneCapacity(currentProject) < 1) {
+      setErrorMessage("This project has reached its page and scene limit.");
+      return;
+    }
+    setErrorMessage(null);
+    pdfInsertInputRef.current?.click();
+  }, []);
+
+  const inspectPdfInsertFiles = useCallback(async (files: readonly File[]) => {
+    if (!files.length) return;
+    const sourceProject = projectRef.current;
+    const selectedPageId = hydratedSceneIdRef.current
+      || activeSceneIdRef.current
+      || sourceProject?.activeSceneId;
+    if (!sourceProject || !selectedPageId || !sourceProject.scenes[selectedPageId]?.pdfPage) {
+      setErrorMessage("Select a PDF page before inserting more PDF pages.");
+      return;
+    }
+    try {
+      // Every selected file must contribute at least one page. This cheap
+      // lower-bound gate prevents an impossible oversized file list from
+      // triggering hundreds of sequential PDF parser starts.
+      assertProjectCanAcceptPdfPages(sourceProject, files.length);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    const sourceProjectId = sourceProject.id;
+    const sourceHydrationGeneration = sceneHydrationGenerationRef.current;
+    const operation = beginFileOpenOperation();
+    const isCurrentOperation = () => (
+      isCurrentFileOpenOperation(operation)
+      && projectRef.current?.id === sourceProjectId
+      && activeSceneIdRef.current === selectedPageId
+      && sceneHydrationGenerationRef.current === sourceHydrationGeneration
+    );
+    busyCancelRef.current = () => {
+      if (fileOpenGenerationRef.current !== operation.generation) return;
+      fileOpenAbortControllerRef.current?.abort();
+      busyCancelRef.current = null;
+      setBusyCanCancel(false);
+      setBusyMessage(null);
+    };
+    setBusyCanCancel(true);
+    setBusyMessage(`Inspecting ${files[0].name}…`);
+    setErrorMessage(null);
+    try {
+      const { inspectPdfFile } = await import("./lib/pdf/import-pdf");
+      const inspected: PendingPdfInsertFile[] = [];
+      const knownSources = new Map(
+        Object.values(sourceProject.pdfDocuments)
+          .filter((source) => !!source.sha256)
+          .map((source) => [source.sha256 as string, source]),
+      );
+      let additionalSourceBytes = 0;
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        const inspection = await inspectPdfFile(file, {
+          documentPosition: index + 1,
+          documentTotal: files.length,
+          onProgress: (progress) => {
+            if (isCurrentOperation()) setBusyMessage(pdfOperationProgressMessage(progress));
+          },
+          signal: operation.signal,
+        });
+        if (!isCurrentOperation()) return;
+        const existing = knownSources.get(inspection.sha256);
+        if (existing) {
+          if (existing.byteLength !== file.size || existing.pageCount !== inspection.pageCount) {
+            throw new Error(`The stored PDF source does not match ${file.name}.`);
+          }
+        } else {
+          additionalSourceBytes += file.size;
+          if (!Number.isSafeInteger(additionalSourceBytes)) {
+            throw new Error("The selected PDF files are too large to insert safely.");
+          }
+          // Stop inspecting the batch as soon as its unique immutable source
+          // bytes cannot fit. Parsing every remaining file would be expensive
+          // work for a transaction that is already impossible to commit.
+          assertProjectCanAcceptAdditionalBytes(
+            sourceProject,
+            pdfBytesRef.current,
+            additionalSourceBytes,
+          );
+          knownSources.set(inspection.sha256, {
+            id: "pending",
+            name: file.name,
+            mimeType: "application/pdf",
+            byteLength: file.size,
+            sha256: inspection.sha256,
+            pageCount: inspection.pageCount,
+            archivePath: "documents/pending.pdf",
+          });
+        }
+        inspected.push({
+          file,
+          id: createLocalId(),
+          name: file.name,
+          pageCount: inspection.pageCount,
+          rangeText: defaultPdfPageRange(inspection.pageCount),
+          sha256: inspection.sha256,
+        });
+      }
+      if (!isCurrentOperation()) return;
+      setPendingPdfInsert({
+        files: inspected,
+        projectId: sourceProjectId,
+        selectedPageId,
+        hydrationGeneration: sourceHydrationGeneration,
+      });
+      setPdfInsertProgress(null);
+    } catch (error) {
+      if (isCurrentOperation() && !isAbortLikeError(error)) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (fileOpenGenerationRef.current === operation.generation) {
+        busyCancelRef.current = null;
+        setBusyCanCancel(false);
+        setBusyMessage(null);
+      }
+    }
+  }, [beginFileOpenOperation, isCurrentFileOpenOperation]);
+
+  const closePdfInsertDialog = useCallback(() => {
+    if (pdfInsertProcessing) return;
+    setPendingPdfInsert(null);
+    setPdfInsertProgress(null);
+    setPdfInsertCancelling(false);
+  }, [pdfInsertProcessing]);
+
+  const cancelPdfInsertion = useCallback(() => {
+    const generation = pdfInsertOperationGenerationRef.current;
+    if (generation === null || fileOpenGenerationRef.current !== generation) return;
+    setPdfInsertCancelling(true);
+    fileOpenAbortControllerRef.current?.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!pendingPdfInsert) return;
+    if (
+      project?.id === pendingPdfInsert.projectId
+      && project.activeSceneId === pendingPdfInsert.selectedPageId
+      && sceneHydrationGenerationRef.current === pendingPdfInsert.hydrationGeneration
+    ) return;
+    const generation = pdfInsertOperationGenerationRef.current;
+    if (generation !== null && fileOpenGenerationRef.current === generation) {
+      fileOpenAbortControllerRef.current?.abort();
+    }
+    pdfInsertOperationGenerationRef.current = null;
+    setPendingPdfInsert(null);
+    setPdfInsertProcessing(false);
+    setPdfInsertCancelling(false);
+    setPdfInsertProgress(null);
+  }, [pendingPdfInsert, project?.activeSceneId, project?.id, projectHydrationRevision]);
+
+  const submitPdfInsertion = useCallback(async (submission: PdfInsertSubmission) => {
+    const pending = pendingPdfInsert;
+    if (!pending || pdfInsertProcessing) return;
+    const operation = beginFileOpenOperation();
+    pdfInsertOperationGenerationRef.current = operation.generation;
+    const isCurrentOperation = () => (
+      isCurrentFileOpenOperation(operation)
+      && projectRef.current?.id === pending.projectId
+      && activeSceneIdRef.current === pending.selectedPageId
+      && sceneHydrationGenerationRef.current === pending.hydrationGeneration
+    );
+    setPdfInsertProcessing(true);
+    setPdfInsertCancelling(false);
+    setPdfInsertProgress(null);
+    setErrorMessage(null);
+    try {
+      const sourceProject = commitLiveScenePersistence(pending.selectedPageId);
+      if (!sourceProject || !isCurrentOperation()) return;
+      const filesById = new Map(pending.files.map((file) => [file.id, file]));
+      const selections = submission.selections.map((selection) => {
+        const source = filesById.get(selection.id);
+        if (!source) throw new Error("A selected PDF is no longer available.");
+        return {
+          file: source.file,
+          pageCount: source.pageCount,
+          sha256: source.sha256,
+          sourceInstanceId: source.id,
+          sourcePageIndices: selection.pageIndices,
+        };
+      });
+      const { importPdfBatchAtomically } = await import("./lib/pdf/batch-import");
+      const imported = await importPdfBatchAtomically(
+        sourceProject,
+        pdfBytesRef.current,
+        selections,
+        submission.placement,
+        pending.selectedPageId,
+        {
+          onProgress: (progress) => {
+            if (!isCurrentOperation()) return;
+            setPdfInsertProgress({
+              ...progress,
+              message: pdfOperationProgressMessage(progress),
+            });
+          },
+          signal: operation.signal,
+        },
+      );
+      if (!isCurrentOperation()) return;
+      beginSceneHydration();
+      pendingFrameIdRef.current = null;
+      pendingProjectSearchTargetRef.current = null;
+      pendingCreatedFrameIdRef.current = null;
+      pendingSlideFrameActionRef.current = null;
+      pdfBytesRef.current = imported.pdfBytes;
+      projectRef.current = imported.project;
+      activeSceneIdRef.current = imported.project.activeSceneId;
+      setPdfBytes(imported.pdfBytes);
+      setProject(imported.project);
+      setWorkspaceMode("pdf");
+      setPendingPdfInsert(null);
+      setPdfInsertProgress(null);
+    } catch (error) {
+      if (isCurrentOperation() && !isAbortLikeError(error)) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (pdfInsertOperationGenerationRef.current === operation.generation) {
+        pdfInsertOperationGenerationRef.current = null;
+        setPdfInsertProcessing(false);
+        setPdfInsertCancelling(false);
+      }
+    }
+  }, [
+    beginFileOpenOperation,
+    beginSceneHydration,
+    commitLiveScenePersistence,
+    isCurrentFileOpenOperation,
+    pdfInsertProcessing,
+    pendingPdfInsert,
   ]);
 
   useEffect(() => {
@@ -6396,7 +6673,9 @@ export default function App() {
           onOpenPage={openPdfPageFromRail}
           onMovePage={reorderPdfPage}
           onShiftPage={shiftPdfPagePosition}
-          onAddPage={() => void addPdfPage()}
+          onAddBlankPage={() => void addPdfPage()}
+          onInsertPdfPages={openPdfInsertFilePicker}
+          addPageTriggerRef={pdfInsertTriggerRef}
           onDeletePage={deletePdfPage}
           width={pdfRailWidth}
           onWidthChange={setPdfRailWidth}
@@ -6729,6 +7008,19 @@ export default function App() {
         onChange={(event) => event.target.files?.[0] && void handleFile(event.target.files[0])}
       />
       <input
+        ref={pdfInsertInputRef}
+        className="visually-hidden"
+        type="file"
+        multiple
+        aria-label="Select PDFs to insert"
+        accept=".pdf,application/pdf,application/octet-stream"
+        onChange={(event) => {
+          const files = Array.from(event.currentTarget.files || []);
+          event.currentTarget.value = "";
+          if (files.length) void inspectPdfInsertFiles(files);
+        }}
+      />
+      <input
         ref={libraryInputRef}
         className="visually-hidden"
         type="file"
@@ -6740,6 +7032,19 @@ export default function App() {
           if (file) void importDroppedLibrary(file);
         }}
       />
+      {pendingPdfInsert ? (
+        <PdfInsertDialog
+          files={pendingPdfInsert.files}
+          remainingPageCapacity={project ? remainingProjectSceneCapacity(project) : 0}
+          processing={pdfInsertProcessing}
+          cancelling={pdfInsertCancelling}
+          progress={pdfInsertProgress}
+          onCancel={closePdfInsertDialog}
+          onCancelProcessing={cancelPdfInsertion}
+          onSubmit={(submission) => void submitPdfInsertion(submission)}
+          returnFocusRef={pdfInsertTriggerRef}
+        />
+      ) : null}
       {exportOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={closeExportDialog}>
           <section ref={exportDialogRef} className="export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title" tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>

@@ -205,6 +205,47 @@ describe("searchProjectText", () => {
     ]);
   });
 
+  it("labels byte-deduplicated PDF occurrences with each selected file name", () => {
+    const project = projectWithScenes({
+      original: scene("original", "Original page", [element("first-text", "text", { text: "target" })], {
+        documentId: "doc",
+        sourceInstanceId: "source-one",
+        sourceName: "periodic-table.pdf",
+        pageIndex: 0,
+        width: 600,
+        height: 800,
+        rotation: 0,
+        backgroundElementId: "original-background",
+      }),
+      copy: scene("copy", "Copy page", [element("copy-text", "text", { text: "target" })], {
+        documentId: "doc",
+        sourceInstanceId: "source-two",
+        sourceName: "chemistry-reference.pdf",
+        pageIndex: 0,
+        width: 600,
+        height: 800,
+        rotation: 0,
+        backgroundElementId: "copy-background",
+      }),
+    });
+    project.pdfDocuments = {
+      doc: {
+        id: "doc",
+        name: "periodic-table.pdf",
+        mimeType: "application/pdf",
+        byteLength: 1,
+        pageCount: 1,
+        archivePath: "documents/doc.pdf",
+      },
+    };
+    project.pdfPageOrder = ["original", "copy"];
+
+    expect(searchProjectText(project, "target").map((result) => result.pdfDocumentName)).toEqual([
+      "periodic-table.pdf",
+      "chemistry-reference.pdf",
+    ]);
+  });
+
   it("assigns overlapping slide content to the first matching explicit slide only", () => {
     const firstFrame = element("frame-a", "frame", {
       x: 0,

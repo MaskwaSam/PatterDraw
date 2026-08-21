@@ -64,22 +64,56 @@ export interface ImportedPdf {
 
 interface ParsedPdfPages {
   documentId: string;
-  pageCount: number;
+  sourcePageCount: number;
+  selectedPageCount: number;
   scenes: SerializedScene[];
   sourceSha256: string;
 }
 
-export interface ImportPdfOptions {
-  /** Abort an obsolete import when a newer open/navigation generation wins. */
-  signal?: AbortSignal;
+export interface InspectedPdfFile {
+  sha256: string;
+  pageCount: number;
+  /** Present only when the caller explicitly asks to retain the verified bytes. */
+  bytes?: Uint8Array;
+}
+
+interface PdfDocumentProgressOptions {
   /** Structured progress for local UI. Positions are one-based; zero means document-level work. */
   onProgress?: PdfOperationProgressCallback;
+  /** One-based position of this source document in a sequential batch. */
+  documentPosition?: number;
+  /** Total number of source documents in the sequential batch. */
+  documentTotal?: number;
+}
+
+export interface InspectPdfFileOptions extends PdfDocumentProgressOptions {
+  signal?: AbortSignal;
+  /**
+   * Retaining source bytes avoids one later local read but should only be used
+   * by callers that can keep their complete batch within a bounded budget.
+   */
+  retainBytes?: boolean;
+}
+
+export interface ImportPdfOptions extends PdfDocumentProgressOptions {
+  /** Abort an obsolete import when a newer open/navigation generation wins. */
+  signal?: AbortSignal;
   /** Maximum number of pages that can still fit in the destination project. */
   maxPages?: number;
   /** Override the device-sensitive raster envelope in focused callers/tests. */
   rasterBudget?: Readonly<PdfRasterBudget>;
   /** Remaining project-content budget available for generated page PNGs. */
   maxEncodedBytesPerDocument?: number;
+  /** Existing immutable-document identity when identical source bytes are reused. */
+  documentId?: string;
+  /** Identity of this file occurrence, independent of source-byte deduplication. */
+  sourceInstanceId?: string;
+  /** Original local display name for this file occurrence. */
+  sourceName?: string;
+  /** Ordered zero-based source pages to import. Repeated indices are permitted. */
+  sourcePageIndices?: readonly number[];
+  /** Optional result from inspectPdfFile used to detect a changed local source. */
+  inspection?: Readonly<Pick<InspectedPdfFile, "sha256" | "pageCount">>;
 }
 
 interface PdfImportRasterState {
@@ -105,9 +139,60 @@ function assertPdfByteSignature(bytes: Uint8Array): void {
   }
 }
 
+function validateDocumentProgress(options: PdfDocumentProgressOptions): void {
+  const documentPosition = options.documentPosition ?? 1;
+  const documentTotal = options.documentTotal ?? 1;
+  if (
+    !Number.isSafeInteger(documentPosition)
+    || !Number.isSafeInteger(documentTotal)
+    || documentPosition < 1
+    || documentTotal < 1
+    || documentPosition > documentTotal
+  ) {
+    throw new Error("The PDF batch progress position is invalid.");
+  }
+}
+
+function assertSafePdfId(value: string, label: string): void {
+  if (!/^[a-zA-Z0-9_-]+$/.test(value)) {
+    throw new Error(`${label} is invalid.`);
+  }
+}
+
+function normalizedSourceName(file: File, sourceName?: string): string {
+  const name = sourceName ?? file.name;
+  if (typeof name !== "string" || !name.trim()) throw new Error("The PDF source name is invalid.");
+  return name;
+}
+
+function normalizeSelectedPageIndices(
+  sourcePageIndices: readonly number[] | undefined,
+  sourcePageCount: number,
+): number[] {
+  const indices = sourcePageIndices === undefined
+    ? Array.from({ length: sourcePageCount }, (_, index) => index)
+    : Array.from(sourcePageIndices);
+  if (!indices.length) throw new Error("Select at least one PDF page to import.");
+  if (indices.length > MAX_PDF_PAGES) {
+    throw new Error(`The PDF selection has more than ${MAX_PDF_PAGES} pages.`);
+  }
+  for (const pageIndex of indices) {
+    if (!Number.isSafeInteger(pageIndex) || pageIndex < 0 || pageIndex >= sourcePageCount) {
+      throw new Error("The PDF selection contains a source page that does not exist.");
+    }
+  }
+  return indices;
+}
+
+function translatePdfLoadError(error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/password/i.test(message)) return new Error("Password-protected PDFs are not supported.");
+  return error instanceof Error ? error : new Error(message);
+}
+
 function reportImportProgress(
   file: File,
-  options: ImportPdfOptions,
+  options: PdfDocumentProgressOptions & { signal?: AbortSignal },
   phase: PdfOperationPhase,
   pagePosition = 0,
   pageTotal = 0,
@@ -115,12 +200,88 @@ function reportImportProgress(
   reportPdfOperationProgress(options.onProgress, {
     operation: "import",
     phase,
-    documentPosition: 1,
-    documentTotal: 1,
+    documentPosition: options.documentPosition ?? 1,
+    documentTotal: options.documentTotal ?? 1,
     pagePosition,
     pageTotal,
     documentName: file.name,
   }, options.signal);
+}
+
+function safePdfDocumentParameters(
+  bytes: Uint8Array,
+  rasterBudget: Readonly<PdfRasterBudget>,
+): SafePdfDocumentInitParameters {
+  return {
+    data: bytes,
+    enableScripting: false,
+    isEvalSupported: false,
+    useSystemFonts: false,
+    useWorkerFetch: false,
+    useWasm: false,
+    standardFontDataUrl: localPdfStandardFontDataUrl(),
+    ...getPdfJsRasterOptions(rasterBudget),
+  } as SafePdfDocumentInitParameters;
+}
+
+/**
+ * Performs the lightweight dialog preflight without rasterizing any pages.
+ * Full embedded-image and render-budget checks still run inside importPdf.
+ */
+export async function inspectPdfFile(
+  file: File,
+  options: InspectPdfFileOptions = {},
+): Promise<InspectedPdfFile> {
+  validateDocumentProgress(options);
+  throwIfPdfOperationAborted(options.signal);
+  if (file.size > MAX_PDF_BYTES) throw new Error("The PDF is larger than the PatterDraw limit.");
+
+  reportImportProgress(file, options, "reading");
+  const parseBytes = new Uint8Array(await awaitPdfOperation(file.arrayBuffer(), options.signal));
+  throwIfPdfOperationAborted(options.signal);
+  reportImportProgress(file, options, "validating");
+  assertPdfByteSignature(parseBytes);
+  const sha256 = await sha256Hex(parseBytes);
+  throwIfPdfOperationAborted(options.signal);
+  const retainedBytes = options.retainBytes ? parseBytes.slice() : undefined;
+
+  reportImportProgress(file, options, "loading");
+  const loadingTask = getDocument(safePdfDocumentParameters(
+    parseBytes,
+    getBrowserPdfRasterBudget(),
+  ));
+  let destroyPromise: Promise<unknown> | undefined;
+  const destroyLoadingTask = (): Promise<unknown> => {
+    destroyPromise ??= loadingTask.destroy();
+    return destroyPromise;
+  };
+  const onAbort = () => { void destroyLoadingTask().catch(() => undefined); };
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    const document = await awaitPdfOperation(loadingTask.promise, options.signal);
+    throwIfPdfOperationAborted(options.signal);
+    if (document.numPages > MAX_PDF_PAGES) {
+      throw new Error(`The PDF has more than ${MAX_PDF_PAGES} pages.`);
+    }
+    if (!Number.isSafeInteger(document.numPages) || document.numPages < 1) {
+      throw new Error("The PDF does not contain any importable pages.");
+    }
+    reportImportProgress(file, options, "validating", document.numPages, document.numPages);
+    return {
+      sha256,
+      pageCount: document.numPages,
+      ...(retainedBytes ? { bytes: retainedBytes } : {}),
+    };
+  } catch (error) {
+    if (options.signal?.aborted) {
+      throw options.signal.reason instanceof Error ? options.signal.reason : pdfAbortError();
+    }
+    throw translatePdfLoadError(error);
+  } finally {
+    options.signal?.removeEventListener("abort", onAbort);
+    await destroyLoadingTask();
+  }
 }
 
 function assertRenderedPageBudget(
@@ -162,8 +323,9 @@ function normalizedRotation(value: number): 0 | 90 | 180 | 270 {
 async function renderPageScene(
   pdfDocument: PDFDocumentProxy,
   documentId: string,
+  sourceInstanceId: string,
   pageIndex: number,
-  name: string,
+  sourceName: string,
   rasterScale: number,
   rasterBudget: Readonly<PdfRasterBudget>,
   encodedBudget: Readonly<PdfEncodedByteBudget>,
@@ -202,6 +364,8 @@ async function renderPageScene(
       const fileId = createLocalId() as FileId;
       const workspace: PdfPageWorkspace = {
         documentId,
+        sourceInstanceId,
+        sourceName,
         pageIndex,
         width: viewport.width,
         height: viewport.height,
@@ -250,7 +414,7 @@ async function renderPageScene(
 
       return {
         id: sceneId,
-        name: `${name} — page ${pageIndex + 1}`,
+        name: `${sourceName} — page ${pageIndex + 1}`,
         elements: elements as unknown as readonly Record<string, unknown>[],
         appState: {
           viewBackgroundColor: "#f2f4f7",
@@ -288,6 +452,9 @@ async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promis
   assertPdfByteSignature(parseBytes);
   const sourceSha256 = await sha256Hex(parseBytes);
   throwIfPdfOperationAborted(options.signal);
+  if (options.inspection && sourceSha256 !== options.inspection.sha256) {
+    throw new Error("The local PDF changed after it was selected.");
+  }
   const { assertPdfEmbeddedImageLimit } = await import("./embedded-image-limits");
   reportImportProgress(file, options, "preflighting");
   await awaitPdfOperation(assertPdfEmbeddedImageLimit(parseBytes, rasterOptions.maxImageSize, {
@@ -303,13 +470,7 @@ async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promis
     // PDF.js may transfer this buffer to its worker. Do not keep a second
     // full-size copy alive just to preserve the immutable source; reread the
     // local File only after the parser and its canvases have been released.
-    data: parseBytes,
-    enableScripting: false,
-    isEvalSupported: false,
-    useSystemFonts: false,
-    useWorkerFetch: false,
-    useWasm: false,
-    standardFontDataUrl: localPdfStandardFontDataUrl(),
+    ...safePdfDocumentParameters(parseBytes, rasterBudget),
     ...rasterOptions,
   } as SafePdfDocumentInitParameters);
   let destroyPromise: Promise<unknown> | undefined;
@@ -326,16 +487,29 @@ async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promis
     if (document.numPages > MAX_PDF_PAGES) {
       throw new Error(`The PDF has more than ${MAX_PDF_PAGES} pages.`);
     }
-    if (options.maxPages !== undefined && document.numPages > options.maxPages) {
+    if (!Number.isSafeInteger(document.numPages) || document.numPages < 1) {
+      throw new Error("The PDF does not contain any importable pages.");
+    }
+    if (options.inspection && document.numPages !== options.inspection.pageCount) {
+      throw new Error("The local PDF changed after it was selected.");
+    }
+    const selectedPageIndices = normalizeSelectedPageIndices(
+      options.sourcePageIndices,
+      document.numPages,
+    );
+    if (options.maxPages !== undefined && selectedPageIndices.length > options.maxPages) {
       const noun = options.maxPages === 1 ? "page" : "pages";
       throw new Error(
-        `This PDF has ${document.numPages} pages, but only ${options.maxPages} more ${noun} can fit in this project.`,
+        `This selection has ${selectedPageIndices.length} pages, but only ${options.maxPages} more ${noun} can fit in this project.`,
       );
     }
-    const documentId = createLocalId();
+    const documentId = options.documentId ?? createLocalId();
+    const sourceInstanceId = options.sourceInstanceId ?? createLocalId();
+    const sourceName = normalizedSourceName(file, options.sourceName);
     const pageSizes: PdfPageRasterSize[] = [];
-    for (let pageIndex = 0; pageIndex < document.numPages; pageIndex += 1) {
-      reportImportProgress(file, options, "measuring", pageIndex + 1, document.numPages);
+    for (let selectionIndex = 0; selectionIndex < selectedPageIndices.length; selectionIndex += 1) {
+      const pageIndex = selectedPageIndices[selectionIndex];
+      reportImportProgress(file, options, "measuring", selectionIndex + 1, selectedPageIndices.length);
       const page = await document.getPage(pageIndex + 1);
       try {
         throwIfPdfOperationAborted(options.signal);
@@ -352,13 +526,15 @@ async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promis
     );
     const scenes: SerializedScene[] = [];
     const rasterState: PdfImportRasterState = { encodedBytes: 0, rasterPixels: 0 };
-    for (let pageIndex = 0; pageIndex < document.numPages; pageIndex += 1) {
-      reportImportProgress(file, options, "rendering", pageIndex + 1, document.numPages);
+    for (let selectionIndex = 0; selectionIndex < selectedPageIndices.length; selectionIndex += 1) {
+      const pageIndex = selectedPageIndices[selectionIndex];
+      reportImportProgress(file, options, "rendering", selectionIndex + 1, selectedPageIndices.length);
       scenes.push(await renderPageScene(
         document,
         documentId,
+        sourceInstanceId,
         pageIndex,
-        file.name,
+        sourceName,
         rasterScale,
         rasterBudget,
         encodedBudget,
@@ -367,14 +543,18 @@ async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promis
       ));
     }
     throwIfPdfOperationAborted(options.signal);
-    return { documentId, pageCount: document.numPages, scenes, sourceSha256 };
+    return {
+      documentId,
+      sourcePageCount: document.numPages,
+      selectedPageCount: selectedPageIndices.length,
+      scenes,
+      sourceSha256,
+    };
   } catch (error) {
     if (options.signal?.aborted) {
       throw options.signal.reason instanceof Error ? options.signal.reason : pdfAbortError();
     }
-    const message = error instanceof Error ? error.message : String(error);
-    if (/password/i.test(message)) throw new Error("Password-protected PDFs are not supported.");
-    throw error;
+    throw translatePdfLoadError(error);
   } finally {
     options.signal?.removeEventListener("abort", onAbort);
     await destroyLoadingTask();
@@ -382,6 +562,7 @@ async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promis
 }
 
 export async function importPdf(file: File, options: ImportPdfOptions = {}): Promise<ImportedPdf> {
+  validateDocumentProgress(options);
   throwIfPdfOperationAborted(options.signal);
   if (file.size > MAX_PDF_BYTES) throw new Error("The PDF is larger than the PatterDraw limit.");
   if (
@@ -397,10 +578,36 @@ export async function importPdf(file: File, options: ImportPdfOptions = {}): Pro
   ) {
     throw new Error("The PDF encoded-image byte limit is invalid.");
   }
+  if (options.documentId !== undefined) assertSafePdfId(options.documentId, "The PDF document identity");
+  if (options.sourceInstanceId !== undefined) {
+    assertSafePdfId(options.sourceInstanceId, "The PDF source-instance identity");
+  }
+  normalizedSourceName(file, options.sourceName);
+  if (options.sourcePageIndices !== undefined && !Array.isArray(options.sourcePageIndices)) {
+    throw new Error("The PDF page selection must be a list.");
+  }
+  if (
+    options.inspection
+    && (
+      typeof options.inspection.sha256 !== "string"
+      || !/^[a-f0-9]{64}$/.test(options.inspection.sha256)
+      || !Number.isSafeInteger(options.inspection.pageCount)
+      || options.inspection.pageCount < 1
+      || options.inspection.pageCount > MAX_PDF_PAGES
+    )
+  ) {
+    throw new Error("The inspected PDF metadata is invalid.");
+  }
 
   const parsed = await parsePdfPages(file, options);
   throwIfPdfOperationAborted(options.signal);
-  reportImportProgress(file, options, "validating", parsed.pageCount, parsed.pageCount);
+  reportImportProgress(
+    file,
+    options,
+    "validating",
+    parsed.selectedPageCount,
+    parsed.selectedPageCount,
+  );
   const bytes = new Uint8Array(await awaitPdfOperation(file.arrayBuffer(), options.signal));
   if (bytes.byteLength !== file.size) {
     throw new Error("The local PDF changed while it was being imported.");
@@ -413,11 +620,11 @@ export async function importPdf(file: File, options: ImportPdfOptions = {}): Pro
   return {
     source: {
       id: parsed.documentId,
-      name: file.name,
+      name: normalizedSourceName(file, options.sourceName),
       mimeType: "application/pdf",
       byteLength: bytes.byteLength,
       sha256: sourceSha256,
-      pageCount: parsed.pageCount,
+      pageCount: parsed.sourcePageCount,
       archivePath: `documents/${parsed.documentId}.pdf`,
     },
     bytes,

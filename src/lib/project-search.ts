@@ -64,6 +64,7 @@ interface OrderedSlide {
 interface PdfPageInfo {
   readonly documentId?: string;
   readonly sourcePageIndex?: number;
+  readonly sourceName?: string;
 }
 
 interface PdfOrderEntry {
@@ -233,7 +234,8 @@ function pageInfo(scene: SerializedScene): PdfPageInfo | null {
     && Number.isFinite(scene.pdfPage.pageIndex)
     ? scene.pdfPage.pageIndex
     : undefined;
-  return { documentId, sourcePageIndex };
+  const sourceName = nonEmptyString(scene.pdfPage.sourceName) || undefined;
+  return { documentId, sourceName, sourcePageIndex };
 }
 
 function pdfDocumentName(project: unknown, documentId: string | undefined): string | undefined {
@@ -351,7 +353,7 @@ export function searchProjectText(
     // referencing the same scene.
     if (page) {
       const info = pageInfo(entry.scene);
-      const documentName = pdfDocumentName(project, info?.documentId);
+      const documentName = info?.sourceName || pdfDocumentName(project, info?.documentId);
       const result = baseResult(entry, "pdf", documentName || entry.sceneName);
       if (documentName) result.pdfDocumentName = documentName;
       result.pdfOutputIndex = page.outputIndex;

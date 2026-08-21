@@ -454,6 +454,123 @@ describe("student safety", () => {
     expect(() => assertSafeProject(project)).toThrow(/source-page index/);
   });
 
+  it("preserves valid source-occurrence metadata and remains compatible with legacy pages", () => {
+    const project = createBlankProject();
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "source.pdf",
+      mimeType: "application/pdf",
+      byteLength: 1,
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+    };
+    const page = pdfScene("page", 0);
+    page.pdfPage = {
+      ...page.pdfPage!,
+      sourceInstanceId: "source-instance-1",
+      sourceName: "Periodic table.pdf",
+    };
+    project.scenes.page = page;
+    project.activeSceneId = "page";
+    project.pdfPageOrder = ["page"];
+
+    expect(assertSafeProject(project)).toBeUndefined();
+    expect(sanitizeProject(project).scenes.page.pdfPage).toMatchObject({
+      sourceInstanceId: "source-instance-1",
+      sourceName: "Periodic table.pdf",
+    });
+
+    delete project.scenes.page.pdfPage?.sourceInstanceId;
+    delete project.scenes.page.pdfPage?.sourceName;
+    expect(assertSafeProject(project)).toBeUndefined();
+  });
+
+  it("rejects malformed PDF source-occurrence metadata", () => {
+    const project = createBlankProject();
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "source.pdf",
+      mimeType: "application/pdf",
+      byteLength: 1,
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+    };
+    project.scenes.page = pdfScene("page", 0);
+    project.activeSceneId = "page";
+    project.pdfPageOrder = ["page"];
+
+    project.scenes.page.pdfPage!.sourceName = "source.pdf";
+    project.scenes.page.pdfPage!.sourceInstanceId = "../escape";
+    expect(() => assertSafeProject(project)).toThrow(/source-instance identity/i);
+    project.scenes.page.pdfPage!.sourceInstanceId = "source-1";
+    project.scenes.page.pdfPage!.sourceName = "   ";
+    expect(() => assertSafeProject(project)).toThrow(/source name/i);
+  });
+
+  it("requires source-occurrence identity and name together", () => {
+    const project = createBlankProject();
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "source.pdf",
+      mimeType: "application/pdf",
+      byteLength: 1,
+      pageCount: 1,
+      archivePath: "documents/pdf.pdf",
+    };
+    project.scenes.page = pdfScene("page", 0);
+    project.activeSceneId = "page";
+    project.pdfPageOrder = ["page"];
+
+    project.scenes.page.pdfPage!.sourceInstanceId = "source-1";
+    expect(() => assertSafeProject(project)).toThrow(/identity and source name together/i);
+    delete project.scenes.page.pdfPage?.sourceInstanceId;
+    project.scenes.page.pdfPage!.sourceName = "source.pdf";
+    expect(() => assertSafeProject(project)).toThrow(/identity and source name together/i);
+  });
+
+  it("keeps one source-occurrence identity bound to one document and name", () => {
+    const project = createBlankProject();
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "source.pdf",
+      mimeType: "application/pdf",
+      byteLength: 1,
+      pageCount: 2,
+      archivePath: "documents/pdf.pdf",
+    };
+    project.pdfDocuments.other = {
+      id: "other",
+      name: "other.pdf",
+      mimeType: "application/pdf",
+      byteLength: 1,
+      pageCount: 1,
+      archivePath: "documents/other.pdf",
+    };
+    const first = pdfScene("first", 0);
+    first.pdfPage = {
+      ...first.pdfPage!,
+      sourceInstanceId: "source-1",
+      sourceName: "source.pdf",
+    };
+    const second = pdfScene("second", 1);
+    second.pdfPage = {
+      ...second.pdfPage!,
+      sourceInstanceId: "source-1",
+      sourceName: "source.pdf",
+    };
+    project.scenes = { first, second };
+    project.activeSceneId = "first";
+    project.pdfPageOrder = ["first", "second"];
+    expect(assertSafeProject(project)).toBeUndefined();
+
+    second.pdfPage!.sourceName = "renamed.pdf";
+    expect(() => assertSafeProject(project)).toThrow(/inconsistent source metadata/i);
+    second.pdfPage!.sourceName = "source.pdf";
+    second.pdfPage!.documentId = "other";
+    second.pdfPage!.pageIndex = 0;
+    expect(() => assertSafeProject(project)).toThrow(/inconsistent source metadata/i);
+  });
+
   it("repairs stored PDF background transforms and rejects a missing local raster", () => {
     const project = createBlankProject();
     project.pdfDocuments.pdf = {

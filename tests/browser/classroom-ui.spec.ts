@@ -8619,6 +8619,285 @@ test("keeps off-page PDF annotations through reload and both annotated export mo
   expect(nonWhitePixelsAfter(fittedRender, 550)).toBeGreaterThan(20);
 });
 
+test("inserts supplemental PDF pages before the selection and at the document end", async ({ page }) => {
+  test.setTimeout(60_000);
+  await openTestPdf(page, 2);
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  const beforePdf = await PDFDocument.create();
+  beforePdf.addPage([400, 500]);
+  const endPdf = await PDFDocument.create();
+  endPdf.addPage([450, 550]);
+
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
+  await page.getByLabel("Select PDFs to insert").setInputFiles({
+    name: "before.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await beforePdf.save()),
+  });
+  let dialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(dialog).toBeVisible({ timeout: 20_000 });
+  await dialog.getByRole("radio", { name: /Before selected page/ }).check();
+  await dialog.getByRole("button", { name: "Insert 1 page", exact: true }).click();
+  await expect(dialog).toHaveCount(0, { timeout: 20_000 });
+  await expect(pages).toHaveCount(3);
+  await expect(pages.nth(0)).toContainText("before.pdf");
+  await expect(pages.nth(0)).toHaveClass(/is-selected/);
+
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
+  await page.getByLabel("Select PDFs to insert").setInputFiles({
+    name: "at-end.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await endPdf.save()),
+  });
+  dialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(dialog).toBeVisible({ timeout: 20_000 });
+  await dialog.getByRole("radio", { name: /End of document/ }).check();
+  await dialog.getByRole("button", { name: "Insert 1 page", exact: true }).click();
+  await expect(dialog).toHaveCount(0, { timeout: 20_000 });
+  await expect(pages).toHaveCount(4);
+  await expect(pages.nth(3)).toContainText("at-end.pdf");
+  await expect(pages.nth(3)).toHaveClass(/is-selected/);
+});
+
+test("cancels a multi-PDF insertion without committing partial pages", async ({ page }) => {
+  test.setTimeout(60_000);
+  await openTestPdf(page);
+  await page.evaluate(() => {
+    const originalArrayBuffer = File.prototype.arrayBuffer;
+    const calls = new WeakMap<File, number>();
+    File.prototype.arrayBuffer = function arrayBufferWithDelayedImport() {
+      if (this.name !== "slow-insert.pdf") return originalArrayBuffer.call(this);
+      const call = (calls.get(this) || 0) + 1;
+      calls.set(this, call);
+      if (call !== 2) return originalArrayBuffer.call(this);
+      return new Promise<ArrayBuffer>((resolve, reject) => {
+        window.setTimeout(() => originalArrayBuffer.call(this).then(resolve, reject), 3_000);
+      });
+    };
+  });
+  const slow = await PDFDocument.create();
+  slow.addPage([300, 400]);
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
+  await page.getByLabel("Select PDFs to insert").setInputFiles({
+    name: "slow-insert.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await slow.save()),
+  });
+  const dialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(dialog).toBeVisible({ timeout: 20_000 });
+  await dialog.getByRole("button", { name: "Insert 1 page", exact: true }).click();
+  await dialog.getByRole("button", { name: "Cancel insertion", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(pages).toHaveCount(1);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(pages).toHaveCount(1);
+});
+
+test("keeps the project unchanged when a selected PDF changes after inspection", async ({ page }) => {
+  test.setTimeout(60_000);
+  await openTestPdf(page);
+  await page.evaluate(() => {
+    const originalArrayBuffer = File.prototype.arrayBuffer;
+    const calls = new WeakMap<File, number>();
+    File.prototype.arrayBuffer = async function arrayBufferWithChangedImport() {
+      const buffer = await originalArrayBuffer.call(this);
+      if (this.name !== "changed-after-inspection.pdf") return buffer;
+      const call = (calls.get(this) || 0) + 1;
+      calls.set(this, call);
+      if (call !== 2) return buffer;
+      const changed = new Uint8Array(buffer.slice(0));
+      changed[changed.length - 1] ^= 0x01;
+      return changed.buffer;
+    };
+  });
+  const changed = await PDFDocument.create();
+  changed.addPage([300, 400]);
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
+  await page.getByLabel("Select PDFs to insert").setInputFiles({
+    name: "changed-after-inspection.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await changed.save()),
+  });
+  const dialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(dialog).toBeVisible({ timeout: 20_000 });
+  await dialog.getByRole("button", { name: "Insert 1 page", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("changed after it was selected", { timeout: 20_000 });
+  await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
+  await expect(pages).toHaveCount(1);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(pages).toHaveCount(1);
+});
+
+test("rejects an impossible multi-file selection before opening the insertion dialog", async ({ page }) => {
+  test.setTimeout(60_000);
+  await openTestPdf(page);
+  const saved = await keyvalValue<{
+    activeSceneId: string;
+    scenes: Record<string, {
+      id: string;
+      name: string;
+      elements: unknown[];
+      appState: Record<string, unknown>;
+      files: Record<string, unknown>;
+    }>;
+  }>(page, "patterdraw:autosave:project:v1");
+  if (!saved) throw new Error("The PDF project was not autosaved.");
+  for (let index = Object.keys(saved.scenes).length; index < 511; index += 1) {
+    const id = `capacity-scene-${index}`;
+    saved.scenes[id] = { id, name: id, elements: [], appState: {}, files: {} };
+  }
+  await setKeyvalValue(page, "patterdraw:autosave:project:v1", saved);
+  await page.reload();
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  const one = await PDFDocument.create();
+  one.addPage([200, 200]);
+  const bytes = Buffer.from(await one.save());
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
+  await page.getByLabel("Select PDFs to insert").setInputFiles([
+    { name: "one.pdf", mimeType: "application/pdf", buffer: bytes },
+    { name: "two.pdf", mimeType: "application/pdf", buffer: bytes },
+  ]);
+  await expect(page.getByRole("alert")).toContainText("at most 1 more PDF page", { timeout: 10_000 });
+  await expect(page.getByRole("dialog", { name: "Insert PDF pages", exact: true })).toHaveCount(0);
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1);
+});
+
+test("inserts ordered pages from multiple PDFs atomically and deduplicates identical sources", async ({ page }) => {
+  test.setTimeout(90_000);
+  const main = await PDFDocument.create();
+  main.addPage([600, 700]);
+  main.addPage([610, 710]);
+  main.addPage([620, 720]);
+  const mainBytes = await main.save();
+  const periodic = await PDFDocument.create();
+  periodic.addPage([500, 500]);
+  const periodicBytes = await periodic.save();
+  const supplement = await PDFDocument.create();
+  supplement.addPage([300, 400]);
+  supplement.addPage([310, 410]);
+  const supplementBytes = await supplement.save();
+
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "main.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(mainBytes),
+  });
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await expect(pages).toHaveCount(3, { timeout: 20_000 });
+  await pages.nth(1).getByRole("button", { name: /Open output page 2:/ }).click();
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
+  await page.getByLabel("Select PDFs to insert").setInputFiles([
+    {
+      name: "periodic-table.pdf",
+      mimeType: "application/pdf",
+      buffer: Buffer.from(periodicBytes),
+    },
+    {
+      name: "supplement.pdf",
+      mimeType: "application/pdf",
+      buffer: Buffer.from(supplementBytes),
+    },
+    {
+      name: "periodic-copy.pdf",
+      mimeType: "application/pdf",
+      buffer: Buffer.from(periodicBytes),
+    },
+  ]);
+
+  const dialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(dialog).toBeVisible({ timeout: 30_000 });
+  const supplementRow = dialog.locator(".pdf-insert-file-row").filter({ hasText: "supplement.pdf" });
+  await supplementRow.getByRole("button", { name: "Move supplement.pdf earlier" }).click();
+  await supplementRow.getByLabel("Pages").fill("2");
+  await expect(dialog.getByText("3 pages selected from 3 PDFs.", { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Insert 3 pages", exact: true }).click();
+
+  await expect(dialog).toHaveCount(0, { timeout: 30_000 });
+  await expect(page.getByRole("button", { name: "Add page", exact: true })).toBeFocused();
+  await expect(pages).toHaveCount(6, { timeout: 30_000 });
+  await expect(pages.nth(2)).toHaveClass(/is-selected/);
+  await expect(pages.nth(2)).toContainText("supplement.pdf");
+  await expect(pages.nth(2)).toContainText("Original page 2");
+  await expect(pages.nth(3)).toContainText("periodic-table.pdf");
+  await expect(pages.nth(4)).toContainText("periodic-copy.pdf");
+  await expect(pages.nth(5)).toContainText("main.pdf");
+  await expect(pages.nth(5)).toContainText("Original page 3");
+
+  await expect.poll(async () => {
+    const saved = await keyvalValue<{
+      activeSceneId: string;
+      pdfDocuments: Record<string, unknown>;
+      pdfPageOrder: string[];
+      scenes: Record<string, {
+        pdfPage?: { documentId: string; pageIndex: number; sourceName?: string };
+      }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    if (!saved) return null;
+    return {
+      activeIndex: saved.pdfPageOrder.indexOf(saved.activeSceneId),
+      documentCount: Object.keys(saved.pdfDocuments).length,
+      pageIndices: saved.pdfPageOrder.map((id) => saved.scenes[id]?.pdfPage?.pageIndex),
+      sourceNames: saved.pdfPageOrder.map((id) => saved.scenes[id]?.pdfPage?.sourceName),
+    };
+  }, { timeout: 20_000 }).toEqual({
+    activeIndex: 2,
+    documentCount: 3,
+    pageIndices: [0, 1, 1, 0, 0, 2],
+    sourceNames: [
+      "main.pdf",
+      "main.pdf",
+      "supplement.pdf",
+      "periodic-table.pdf",
+      "periodic-copy.pdf",
+      "main.pdf",
+    ],
+  });
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  const downloadEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: /Annotated PDF — expand pages/ }).click();
+  const exported = await PDFDocument.load(await downloadBytes(await downloadEvent));
+  expect(exported.getPageCount()).toBe(6);
+  expect(exported.getPages().map((outputPage) => outputPage.getSize())).toEqual([
+    { width: 600, height: 700 },
+    { width: 610, height: 710 },
+    { width: 310, height: 410 },
+    { width: 500, height: 500 },
+    { width: 500, height: 500 },
+    { width: 620, height: 720 },
+  ]);
+
+  const saveEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  const archiveBytes = await downloadBytes(await saveEvent);
+  await page.reload();
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "multi-pdf-roundtrip.patterdraw",
+    mimeType: "application/vnd.patterdraw+zip",
+    buffer: archiveBytes,
+  });
+  await expect(page.getByRole("button", { name: "Board", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(pages).toHaveCount(6, { timeout: 20_000 });
+  await expect(pages.nth(2)).toContainText("supplement.pdf");
+  await expect(pages.nth(3)).toContainText("periodic-table.pdf");
+  await expect(pages.nth(4)).toContainText("periodic-copy.pdf");
+  await expect.poll(async () => Object.keys((await keyvalValue<{
+    pdfDocuments: Record<string, unknown>;
+  }>(page, "patterdraw:autosave:project:v1"))?.pdfDocuments || {})).toHaveLength(3);
+});
+
 test("adds a blank PDF page, reopens the project on Board, and exports it", async ({ page }) => {
   test.setTimeout(60_000);
   await openTestPdf(page);
@@ -8633,9 +8912,12 @@ test("adds a blank PDF page, reopens the project on Board, and exports it", asyn
   expect((railBounds?.y || 0) + (railBounds?.height || 0) - ((addPageBounds?.y || 0) + (addPageBounds?.height || 0)))
     .toBeLessThanOrEqual(16);
   await addPage.click();
+  await page.getByRole("menuitem", { name: /Blank page/ }).click();
   await expect(pages).toHaveCount(2);
   await expect(page.locator("#pdf-page-rail .pdf-page-item").nth(1)).toHaveClass(/is-selected/);
   await expect(page.locator("#pdf-page-rail .pdf-page-item").nth(1)).toContainText("Blank page");
+  await expect(page.locator("#pdf-page-rail .pdf-page-item").nth(1)).toContainText("Added page");
+  await expect(page.locator("#pdf-page-rail .pdf-page-item").nth(1)).not.toContainText("Original page");
   await expect(page.locator(".page-status")).toContainText("Page 2 of 2");
 
   const saveDownload = page.waitForEvent("download");
@@ -8663,6 +8945,8 @@ test("adds a blank PDF page, reopens the project on Board, and exports it", asyn
   await page.getByRole("button", { name: "PDF", exact: true }).click();
   await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(2, { timeout: 15_000 });
   await expect(page.locator("#pdf-page-rail .pdf-page-item").nth(1)).toContainText("Blank page");
+  await expect(page.locator("#pdf-page-rail .pdf-page-item").nth(1)).toContainText("Added page");
+  await expect(page.locator("#pdf-page-rail .pdf-page-item").nth(1)).not.toContainText("Original page");
 
   await page.getByRole("button", { name: "More export options", exact: true }).click();
   const pdfDownload = page.waitForEvent("download");

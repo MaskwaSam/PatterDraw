@@ -25,7 +25,7 @@ vi.mock("./embedded-image-limits", () => ({
   assertPdfEmbeddedImageLimit: assertPdfEmbeddedImageLimitMock,
 }));
 
-import { hasPdfByteSignature, importPdf } from "./import-pdf";
+import { hasPdfByteSignature, importPdf, inspectPdfFile } from "./import-pdf";
 
 const originalCreateElement = window.document.createElement.bind(window.document);
 const PDF_BYTES = new Uint8Array([
@@ -219,5 +219,138 @@ describe("PDF import PDF.js safety options", () => {
       pagePosition: 1,
       pageTotal: 1,
     }));
+  });
+
+  it("inspects page count and content identity without rasterizing pages", async () => {
+    documentProxy.numPages = 3;
+    const progress: Array<{
+      documentPosition: number;
+      documentTotal: number;
+      phase: string;
+    }> = [];
+    const file = new File([PDF_BYTES], "inspect.pdf", { type: "application/octet-stream" });
+
+    const inspected = await inspectPdfFile(file, {
+      documentPosition: 2,
+      documentTotal: 4,
+      onProgress: (update) => progress.push(update),
+    });
+
+    expect(inspected).toMatchObject({
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      pageCount: 3,
+    });
+    expect(inspected).not.toHaveProperty("bytes");
+    expect(documentProxy.getPage).not.toHaveBeenCalled();
+    expect(page.render).not.toHaveBeenCalled();
+    expect(assertPdfEmbeddedImageLimitMock).not.toHaveBeenCalled();
+    expect(progress).toContainEqual(expect.objectContaining({
+      documentPosition: 2,
+      documentTotal: 4,
+      phase: "loading",
+    }));
+  });
+
+  it("optionally retains an independent verified byte snapshot during inspection", async () => {
+    const file = new File([PDF_BYTES], "retain.pdf", { type: "application/pdf" });
+    const inspected = await inspectPdfFile(file, { retainBytes: true });
+    expect(inspected.bytes).toEqual(PDF_BYTES);
+    expect(inspected.bytes).not.toBe(PDF_BYTES);
+  });
+
+  it("imports selected source indices in order with fresh page identities", async () => {
+    documentProxy.numPages = 4;
+    const progress: Array<{
+      phase: string;
+      documentPosition: number;
+      documentTotal: number;
+      pagePosition: number;
+      pageTotal: number;
+    }> = [];
+    const file = new File([PDF_BYTES], "original-name.pdf", { type: "application/pdf" });
+
+    const imported = await importPdf(file, {
+      documentId: "shared-document",
+      sourceInstanceId: "source-instance-2",
+      sourceName: "Periodic table.pdf",
+      sourcePageIndices: [2, 0, 2],
+      maxPages: 3,
+      documentPosition: 2,
+      documentTotal: 3,
+      onProgress: (update) => progress.push(update),
+    });
+
+    expect(imported.source).toMatchObject({
+      id: "shared-document",
+      name: "Periodic table.pdf",
+      pageCount: 4,
+    });
+    expect(imported.scenes.map((scene) => scene.pdfPage)).toEqual([
+      expect.objectContaining({
+        documentId: "shared-document",
+        sourceInstanceId: "source-instance-2",
+        sourceName: "Periodic table.pdf",
+        pageIndex: 2,
+      }),
+      expect.objectContaining({ pageIndex: 0 }),
+      expect.objectContaining({ pageIndex: 2 }),
+    ]);
+    expect(new Set(imported.scenes.map((scene) => scene.id)).size).toBe(3);
+    expect(new Set(imported.scenes.map((scene) => scene.pdfPage?.backgroundElementId)).size).toBe(3);
+    expect(new Set(imported.scenes.flatMap((scene) => Object.keys(scene.files))).size).toBe(3);
+    expect(documentProxy.getPage.mock.calls.map((call) => (call as unknown as [number])[0])).toEqual([
+      3, 1, 3,
+      3, 1, 3,
+    ]);
+    expect(progress).toContainEqual(expect.objectContaining({
+      phase: "rendering",
+      documentPosition: 2,
+      documentTotal: 3,
+      pagePosition: 3,
+      pageTotal: 3,
+    }));
+  });
+
+  it("applies remaining capacity to selected output pages, not total source pages", async () => {
+    documentProxy.numPages = 4;
+    const file = new File([PDF_BYTES], "four-pages.pdf", { type: "application/pdf" });
+    await expect(importPdf(file, { sourcePageIndices: [3], maxPages: 1 })).resolves.toMatchObject({
+      source: { pageCount: 4 },
+      scenes: [expect.objectContaining({ pdfPage: expect.objectContaining({ pageIndex: 3 }) })],
+    });
+  });
+
+  it("rejects an out-of-range selected index after the authoritative page count", async () => {
+    documentProxy.numPages = 2;
+    const file = new File([PDF_BYTES], "two-pages.pdf", { type: "application/pdf" });
+    await expect(importPdf(file, { sourcePageIndices: [2] }))
+      .rejects.toThrow(/source page that does not exist/i);
+    expect(documentProxy.getPage).not.toHaveBeenCalled();
+    expect(page.render).not.toHaveBeenCalled();
+  });
+
+  it("detects a local source change against dialog inspection before full preflight", async () => {
+    const changedBytes = Uint8Array.from(PDF_BYTES);
+    changedBytes[changedBytes.length - 1] = 0x20;
+    const file = new File([PDF_BYTES], "changed-after-dialog.pdf", { type: "application/pdf" });
+    vi.spyOn(file, "arrayBuffer")
+      .mockResolvedValueOnce(Uint8Array.from(PDF_BYTES).buffer)
+      .mockResolvedValueOnce(changedBytes.buffer);
+
+    const inspection = await inspectPdfFile(file);
+    assertPdfEmbeddedImageLimitMock.mockClear();
+    await expect(importPdf(file, { inspection })).rejects.toThrow(/changed after it was selected/i);
+    expect(assertPdfEmbeddedImageLimitMock).not.toHaveBeenCalled();
+  });
+
+  it("validates batch progress and caller-supplied identities", async () => {
+    const file = new File([PDF_BYTES], "safe.pdf", { type: "application/pdf" });
+    await expect(importPdf(file, { documentPosition: 0, documentTotal: 2 }))
+      .rejects.toThrow(/batch progress position/i);
+    await expect(importPdf(file, { documentId: "documents/escape" }))
+      .rejects.toThrow(/document identity/i);
+    await expect(importPdf(file, { sourceInstanceId: "not valid" }))
+      .rejects.toThrow(/source-instance identity/i);
+    expect(getDocumentMock).not.toHaveBeenCalled();
   });
 });

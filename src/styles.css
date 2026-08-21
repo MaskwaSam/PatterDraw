@@ -738,7 +738,7 @@ button { color: inherit; }
 .slide-rail-show-floating:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .slide-rail-show-floating svg { width: 18px; height: 18px; }
 .pdf-rail-help { margin: 0; padding: 0 18px 12px; color: var(--muted); font-size: 10px; line-height: 1.45; }
-.pdf-rail-actions { display: grid; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--border); background: #fff; }
+.pdf-rail-actions { position: relative; display: grid; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--border); background: #fff; }
 .pdf-add-page {
   width: 100%;
   min-height: 35px;
@@ -754,8 +754,48 @@ button { color: inherit; }
 }
 .pdf-add-page { border: 1px solid #204aa5; background: var(--accent); color: #fff; }
 .pdf-add-page:hover { background: #204aa5; }
+.pdf-add-page.is-open { border-color: #173d87; background: #204aa5; }
 .pdf-add-page:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .pdf-add-page svg { width: 16px; height: 16px; }
+.pdf-add-page .pdf-add-page-chevron { width: 13px; margin-left: auto; transition: transform .15s ease; }
+.pdf-add-page.is-open .pdf-add-page-chevron { transform: rotate(180deg); }
+.pdf-add-page-menu {
+  position: absolute;
+  z-index: 30;
+  right: 12px;
+  bottom: calc(100% - 7px);
+  left: 12px;
+  display: grid;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid #c9d1de;
+  border-radius: 9px;
+  background: #fff;
+  box-shadow: 0 10px 30px rgb(15 23 42 / 20%);
+}
+.pdf-add-page-menu button {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  padding: 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #263249;
+  text-align: left;
+  cursor: pointer;
+}
+.pdf-add-page-menu button:hover,
+.pdf-add-page-menu button:focus-visible { outline: none; background: var(--accent-soft); color: #204aa5; }
+.pdf-add-page-menu button > svg { width: 18px; height: 18px; }
+.pdf-add-page-menu button > span { min-width: 0; display: grid; gap: 2px; }
+.pdf-add-page-menu strong,
+.pdf-add-page-menu small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pdf-add-page-menu strong { font-size: 12px; }
+.pdf-add-page-menu small { color: var(--muted); font-size: 10px; }
 .pdf-page-list { margin: 0; list-style: none; }
 .pdf-page-item {
   position: relative;
@@ -1509,6 +1549,119 @@ button { color: inherit; }
 .export-dialog span { color: var(--muted); font-size: 12px; line-height: 1.4; }
 .dialog-cancel { margin-top: 7px; padding: 8px 11px; border: 1px solid #ccd2dc; border-radius: 7px; background: #fff; cursor: pointer; }
 
+.pdf-insert-dialog {
+  width: min(760px, 100%);
+  max-height: calc(100dvh - 40px);
+  display: grid;
+  gap: 15px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 22px;
+  border: 1px solid #cfd5df;
+  border-radius: 11px;
+  background: #fff;
+  box-shadow: 0 18px 60px rgb(15 23 42 / 25%);
+}
+.pdf-insert-heading { margin-bottom: 0; }
+.pdf-insert-description { margin: -9px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.pdf-insert-files { min-width: 0; display: grid; gap: 8px; }
+.pdf-insert-section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.pdf-insert-section-heading h3 { margin: 0; color: #263249; font-size: 13px; }
+.pdf-insert-section-heading > span { color: var(--muted); font-size: 11px; }
+.pdf-insert-file-list {
+  max-height: min(310px, 40dvh);
+  display: grid;
+  gap: 7px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  margin: 0;
+  padding: 0 3px 0 0;
+  list-style: none;
+}
+.pdf-insert-file-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 28px minmax(130px, 1fr) minmax(130px, 160px) auto;
+  grid-template-rows: auto auto auto;
+  align-items: center;
+  gap: 3px 9px;
+  padding: 10px;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  background: #f9fafc;
+}
+.pdf-insert-order {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  width: 25px;
+  height: 25px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: #e7edf7;
+  color: #4c586d;
+  font-size: 11px;
+  font-weight: 750;
+}
+.pdf-insert-file-details { min-width: 0; grid-column: 2; grid-row: 1 / 3; display: grid; gap: 3px; }
+.pdf-insert-file-details strong { overflow: hidden; color: #263249; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.pdf-insert-file-details span { color: var(--muted); font-size: 10px; }
+.pdf-insert-range { grid-column: 3; grid-row: 1; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 6px; color: #4b566b; font-size: 10px; font-weight: 700; }
+.pdf-insert-range input {
+  min-width: 0;
+  height: 34px;
+  padding: 0 8px;
+  border: 1px solid #bfc8d5;
+  border-radius: 6px;
+  background: #fff;
+  color: #263249;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+}
+.pdf-insert-range input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px #dbe7ff; }
+.pdf-insert-range input[aria-invalid="true"] { border-color: #c83c3c; }
+.pdf-insert-row-actions { grid-column: 4; grid-row: 1; display: flex; gap: 3px; }
+.pdf-insert-row-actions button {
+  width: 31px;
+  height: 31px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid #cbd2dd;
+  border-radius: 6px;
+  background: #fff;
+  color: #465269;
+  cursor: pointer;
+}
+.pdf-insert-row-actions button:hover:not(:disabled) { border-color: #8da4d7; background: var(--accent-soft); color: #204aa5; }
+.pdf-insert-row-actions button.is-danger:hover:not(:disabled) { border-color: #dc9a9a; background: #fff1f1; color: #a72e2e; }
+.pdf-insert-row-actions button:disabled { opacity: .38; cursor: default; }
+.pdf-insert-row-actions svg { width: 15px; height: 15px; }
+.pdf-insert-range-help { grid-column: 3; grid-row: 2; color: var(--muted); font-size: 9px; }
+.pdf-insert-range-error { grid-column: 3 / 5; grid-row: 3; color: #a72e2e; font-size: 10px; line-height: 1.35; }
+.pdf-insert-empty { margin: 0; padding: 18px; border: 1px dashed #c6ceda; border-radius: 8px; color: var(--muted); font-size: 12px; text-align: center; }
+.pdf-insert-placement { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin: 0; padding: 0; border: 0; }
+.pdf-insert-placement legend { grid-column: 1 / -1; margin: 0 0 1px; padding: 0; color: #263249; font-size: 12px; font-weight: 750; }
+.pdf-insert-placement label { min-width: 0; display: flex; align-items: flex-start; gap: 8px; padding: 10px; border: 1px solid #d8dee8; border-radius: 8px; background: #fff; color: #263249; cursor: pointer; }
+.pdf-insert-placement label:has(input:checked) { border-color: #7b9de8; background: var(--accent-soft); }
+.pdf-insert-placement input { flex: 0 0 auto; margin: 2px 0 0; accent-color: var(--accent); }
+.pdf-insert-placement label > span { min-width: 0; display: grid; gap: 2px; }
+.pdf-insert-placement strong { font-size: 11px; line-height: 1.3; }
+.pdf-insert-placement small { color: var(--muted); font-size: 9px; }
+.pdf-insert-capacity { display: grid; gap: 2px; padding: 9px 11px; border: 1px solid #c9d7f6; border-radius: 7px; background: #f3f7ff; color: #274477; }
+.pdf-insert-capacity strong { font-size: 11px; }
+.pdf-insert-capacity span { font-size: 10px; line-height: 1.4; }
+.pdf-insert-capacity.has-error { border-color: #e1a0a0; background: #fff2f2; color: #922c2c; }
+.pdf-insert-progress { display: grid; gap: 7px; padding: 10px 11px; border: 1px solid #c9d7f6; border-radius: 7px; background: #f3f7ff; }
+.pdf-insert-progress > div { display: grid; gap: 2px; }
+.pdf-insert-progress strong { color: #274477; font-size: 11px; text-transform: capitalize; }
+.pdf-insert-progress span { color: var(--muted); font-size: 10px; }
+.pdf-insert-progress progress { width: 100%; height: 7px; accent-color: var(--accent); }
+.pdf-insert-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; margin-top: 0; }
+.pdf-insert-actions > span { color: var(--muted); font-size: 10px; line-height: 1.35; }
+.pdf-insert-actions .dialog-cancel { margin: 0; }
+
 .math-tools-dialog {
   width: min(880px, 100%);
   max-height: calc(100dvh - 40px);
@@ -2027,11 +2180,13 @@ button { color: inherit; }
   .topbar-menu-popover,
   .slide-settings-popover,
   .slide-thumbnail-menu,
+  .pdf-add-page-menu,
   .slide-rail,
   .pdf-page-rail,
   .pdf-rail-actions,
   .statusbar,
   .export-dialog,
+  .pdf-insert-dialog,
   .math-tools-dialog,
   .geogon-dialog,
   .equation-dialog,
@@ -2097,6 +2252,9 @@ button { color: inherit; }
   .slide-settings-toggle,
   .slide-aspect-segments button,
   .slide-thumbnail-menu,
+  .pdf-add-page-menu button,
+  .pdf-insert-row-actions button,
+  .pdf-insert-placement label,
   .toggle-morph-button,
   .slide-frame-aspect-buttons button,
   .rail-empty button,
@@ -2129,7 +2287,8 @@ button { color: inherit; }
 ) { border-color: #617391; background: #2a3850; }
 .app-shell[data-theme="dark"] :is(
   .equation-dialog textarea,
-  .mermaid-source-panel textarea
+  .mermaid-source-panel textarea,
+  .pdf-insert-range input
 ) {
   border-color: #52617a;
   background: #111a28;
@@ -2138,7 +2297,8 @@ button { color: inherit; }
 }
 .app-shell[data-theme="dark"] :is(
   .equation-dialog textarea:focus,
-  .mermaid-source-panel textarea:focus
+  .mermaid-source-panel textarea:focus,
+  .pdf-insert-range input:focus
 ) {
   border-color: var(--accent);
   background: #0d1521;
@@ -2150,6 +2310,26 @@ button { color: inherit; }
   border-color: #45536b;
   background: #263248;
 }
+.app-shell[data-theme="dark"] .pdf-add-page-menu button { color: #e0e8f5; }
+.app-shell[data-theme="dark"] .pdf-add-page-menu button:hover,
+.app-shell[data-theme="dark"] .pdf-add-page-menu button:focus-visible { background: #29446f; color: #dbe7ff; }
+.app-shell[data-theme="dark"] :is(
+  .pdf-insert-section-heading h3,
+  .pdf-insert-file-details strong,
+  .pdf-insert-placement legend,
+  .pdf-insert-placement label,
+  .pdf-insert-range
+) { color: #e0e8f5; }
+.app-shell[data-theme="dark"] .pdf-insert-file-row { border-color: #45536b; background: #111a28; }
+.app-shell[data-theme="dark"] .pdf-insert-order { background: #263248; color: #d9e2f0; }
+.app-shell[data-theme="dark"] .pdf-insert-placement label:has(input:checked) { border-color: #7196eb; background: #29446f; }
+.app-shell[data-theme="dark"] .pdf-insert-row-actions button:hover:not(:disabled) { border-color: #7196eb; background: #29446f; color: #dbe7ff; }
+.app-shell[data-theme="dark"] .pdf-insert-row-actions button.is-danger:hover:not(:disabled) { border-color: #9b5963; background: #4b242c; color: #ffb4bf; }
+.app-shell[data-theme="dark"] .pdf-insert-empty { border-color: #52617a; }
+.app-shell[data-theme="dark"] .pdf-insert-capacity,
+.app-shell[data-theme="dark"] .pdf-insert-progress { border-color: #38588e; background: #1c3158; color: #c7d6ff; }
+.app-shell[data-theme="dark"] .pdf-insert-progress strong { color: #c7d6ff; }
+.app-shell[data-theme="dark"] .pdf-insert-capacity.has-error { border-color: #8b4b54; background: #421f26; color: #ffb4bf; }
 .app-shell[data-theme="dark"] .settings-toggle input { border-color: #66748a; background: #465269; }
 .app-shell[data-theme="dark"] .settings-toggle input:checked { border-color: var(--accent); background: #456fce; }
 .app-shell[data-theme="dark"] .settings-group,
@@ -2622,6 +2802,33 @@ button { color: inherit; }
   }
   .presentation-palette-label { display: none; }
   .modal-backdrop { padding: 10px; }
+  .pdf-insert-backdrop {
+    padding: calc(8px + var(--safe-area-top)) calc(8px + var(--safe-area-right)) calc(8px + var(--safe-area-bottom)) calc(8px + var(--safe-area-left));
+  }
+  .pdf-insert-dialog {
+    width: 100%;
+    max-height: calc(100dvh - var(--safe-area-top) - var(--safe-area-bottom) - 16px);
+    gap: 12px;
+    padding: 15px;
+  }
+  .pdf-insert-file-list { max-height: min(300px, 35dvh); }
+  .pdf-insert-file-row {
+    grid-template-columns: 28px minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto auto;
+    gap: 7px 8px;
+  }
+  .pdf-insert-order { grid-column: 1; grid-row: 1; }
+  .pdf-insert-file-details { grid-column: 2; grid-row: 1; }
+  .pdf-insert-range { grid-column: 1 / -1; grid-row: 2; grid-template-columns: 42px minmax(0, 1fr); }
+  .pdf-insert-row-actions { grid-column: 1 / -1; grid-row: 3; justify-content: flex-end; }
+  .pdf-insert-row-actions button { width: 40px; height: 40px; }
+  .pdf-insert-range-help { grid-column: 1 / -1; grid-row: 4; }
+  .pdf-insert-range-error { grid-column: 1 / -1; grid-row: 5; }
+  .pdf-insert-placement { grid-template-columns: 1fr; }
+  .pdf-insert-placement label { min-height: 44px; align-items: center; }
+  .pdf-insert-actions { grid-template-columns: 1fr 1fr; }
+  .pdf-insert-actions > span { grid-column: 1 / -1; }
+  .pdf-insert-actions :is(.dialog-cancel, .dialog-primary) { min-height: 44px; width: 100%; }
   .equation-dialog { padding: 16px; }
   .math-tools-dialog { max-height: calc(100dvh - 20px); padding: 16px; }
   .geogon-backdrop {

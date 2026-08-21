@@ -7,6 +7,7 @@ export const DEFAULT_PROJECT_TITLE = "Untitled PatterDraw canvas";
 export type SceneId = string;
 export type SlideId = string;
 export type PdfDocumentId = string;
+export type PdfInsertionPlacement = "before" | "after" | "end";
 
 export interface SerializedScene {
   id: SceneId;
@@ -19,6 +20,13 @@ export interface SerializedScene {
 
 export interface PdfPageWorkspace {
   documentId: PdfDocumentId;
+  /**
+   * Identifies one user-selected source occurrence independently of the
+   * deduplicated immutable PDF document. Optional only for legacy v1 projects.
+   */
+  sourceInstanceId?: string;
+  /** Original local file name for this source occurrence. */
+  sourceName?: string;
   pageIndex: number;
   width: number;
   height: number;

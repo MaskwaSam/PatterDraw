@@ -350,6 +350,7 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
   }
 
   const frameElements = new Map<string, Set<string>>();
+  const pdfSourceInstances = new Map<string, { documentId: string; sourceName: string }>();
   for (const [sceneKey, scene] of Object.entries(project.scenes)) {
     if (
       !scene
@@ -450,6 +451,48 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
         ? project.pdfDocuments[scene.pdfPage.documentId]
         : undefined;
       if (!source) throw new Error("A PDF page references a missing source document.");
+      const hasSourceInstanceId = scene.pdfPage.sourceInstanceId !== undefined;
+      const hasSourceName = scene.pdfPage.sourceName !== undefined;
+      if (hasSourceInstanceId !== hasSourceName) {
+        throw new Error("A PDF page must store its source identity and source name together.");
+      }
+      if (
+        hasSourceInstanceId
+        && (
+          typeof scene.pdfPage.sourceInstanceId !== "string"
+          || !/^[a-zA-Z0-9_-]+$/.test(scene.pdfPage.sourceInstanceId)
+        )
+      ) {
+        throw new Error("A PDF page has an invalid source-instance identity.");
+      }
+      if (
+        hasSourceName
+        && (
+          typeof scene.pdfPage.sourceName !== "string"
+          || !scene.pdfPage.sourceName.trim()
+        )
+      ) {
+        throw new Error("A PDF page has an invalid source name.");
+      }
+      if (
+        typeof scene.pdfPage.sourceInstanceId === "string"
+        && typeof scene.pdfPage.sourceName === "string"
+      ) {
+        const existingSourceInstance = pdfSourceInstances.get(scene.pdfPage.sourceInstanceId);
+        if (
+          existingSourceInstance
+          && (
+            existingSourceInstance.documentId !== scene.pdfPage.documentId
+            || existingSourceInstance.sourceName !== scene.pdfPage.sourceName
+          )
+        ) {
+          throw new Error("A PDF source identity is assigned to inconsistent source metadata.");
+        }
+        pdfSourceInstances.set(scene.pdfPage.sourceInstanceId, {
+          documentId: scene.pdfPage.documentId,
+          sourceName: scene.pdfPage.sourceName,
+        });
+      }
       if (!Number.isInteger(scene.pdfPage.pageIndex) || scene.pdfPage.pageIndex < 0 || scene.pdfPage.pageIndex >= source.pageCount) {
         throw new Error("A PDF page has an invalid source-page index.");
       }
