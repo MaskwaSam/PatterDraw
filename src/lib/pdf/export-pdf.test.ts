@@ -33,6 +33,8 @@ import {
   getPdfAnnotationRasterBudget,
   getPdfPageExportBounds,
   getSlidePdfExportDimensions,
+  normalizePdfExportError,
+  PdfExportError,
 } from "./export-pdf";
 import { getPdfRasterBudget } from "./raster-limits";
 import { copySourcePageTransparencyGroup } from "./source-page";
@@ -317,6 +319,66 @@ describe("PDF export bounds", () => {
     expect(bounds.maxY).toBeGreaterThan(940);
   });
 
+  it("derives bounds from the same exportable annotation set used by rendering", () => {
+    const included = {
+      ...baseElement,
+      id: "included",
+      type: "rectangle",
+      x: -10,
+      y: -20,
+      width: 20,
+      height: 20,
+    };
+    const scene = {
+      id: "page",
+      name: "Page 1",
+      elements: [
+        baseElement,
+        included,
+        { ...included, id: "frame", type: "frame", x: -50_000 },
+        { ...included, id: "embed", type: "iframe", y: 50_000 },
+        { ...included, id: "deleted", isDeleted: true, x: 75_000 },
+      ],
+      appState: {},
+      files: {},
+      pdfPage: {
+        documentId: "pdf",
+        pageIndex: 0,
+        width: 600,
+        height: 800,
+        rotation: 0,
+        backgroundElementId: "background",
+      },
+    } satisfies SerializedScene;
+
+    expect(getPdfPageExportBounds(scene)).toEqual({
+      minX: -34,
+      minY: -44,
+      maxX: 600,
+      maxY: 800,
+      width: 634,
+      height: 844,
+    });
+  });
+
+  it("normalizes encrypted and unsupported export failures with recovery guidance", () => {
+    const encrypted = normalizePdfExportError(
+      new Error("Input document is encrypted"),
+      "locked.pdf",
+    );
+    expect(encrypted).toBeInstanceOf(PdfExportError);
+    expect(encrypted).toMatchObject({ code: "encrypted-source" });
+    expect(encrypted.message).toMatch(/unlocked copy.*re-import/i);
+
+    const unsupported = normalizePdfExportError(
+      new Error("visible Widget annotation without a reusable appearance"),
+      "form.pdf",
+    );
+    expect(unsupported).toBeInstanceOf(PdfExportError);
+    expect(unsupported).toMatchObject({ code: "unsupported-source" });
+    expect(unsupported.message).toMatch(/flattened copy.*re-import/i);
+  });
+
   it("caps raster dimensions for annotations spread a million units apart", () => {
     const dimensions = getPdfAnnotationExportDimensions(1_000_000, 1_000_000);
     expect(dimensions.width).toBeLessThanOrEqual(8_192);
@@ -431,6 +493,75 @@ describe("PDF export bounds", () => {
     const output = await PDFDocument.load(await outputBlob.arrayBuffer());
     expect(output.getPageCount()).toBe(1);
     expect(output.getPage(0).getSize()).toEqual({ width: 600, height: 800 });
+  });
+
+  it("reports structured export progress through the final save", async () => {
+    const source = await PDFDocument.create();
+    source.addPage([600, 800]);
+    const sourceBytes = await source.save();
+    const project = blankPdfProjectForIntegrity(sourceBytes.byteLength);
+    const progress: Array<{
+      phase: string;
+      documentPosition: number;
+      documentTotal: number;
+      pagePosition: number;
+      pageTotal: number;
+    }> = [];
+
+    await exportAnnotatedPdf(project, { pdf: sourceBytes }, "expand", {
+      onProgress: (update) => progress.push(update),
+    });
+
+    expect(progress).toContainEqual(expect.objectContaining({
+      phase: "loading",
+      documentPosition: 1,
+      documentTotal: 1,
+      pagePosition: 0,
+      pageTotal: 1,
+    }));
+    expect(progress).toContainEqual(expect.objectContaining({
+      phase: "rendering",
+      pagePosition: 1,
+      pageTotal: 1,
+    }));
+    expect(progress.at(-1)).toEqual(expect.objectContaining({ phase: "saving" }));
+  });
+
+  it("cancels before returning any partially assembled export", async () => {
+    const source = await PDFDocument.create();
+    source.addPage([600, 800]);
+    const sourceBytes = await source.save();
+    const project = blankPdfProjectForIntegrity(sourceBytes.byteLength);
+    const controller = new AbortController();
+    let returnedBlob: Blob | undefined;
+
+    const result = exportAnnotatedPdf(project, { pdf: sourceBytes }, "expand", {
+      signal: controller.signal,
+      onProgress: (update) => {
+        if (update.phase === "rendering") controller.abort();
+      },
+    }).then((blob) => {
+      returnedBlob = blob;
+      return blob;
+    });
+
+    await expect(result).rejects.toMatchObject({ name: "AbortError" });
+    expect(returnedBlob).toBeUndefined();
+  });
+
+  it("surfaces encrypted source loading as an actionable typed failure", async () => {
+    const sourceBytes = new Uint8Array([1, 2, 3, 4]);
+    const project = blankPdfProjectForIntegrity(sourceBytes.byteLength);
+    const loadSpy = vi.spyOn(PDFDocument, "load").mockRejectedValueOnce(
+      new Error("Input document to PDFDocument.load is encrypted"),
+    );
+
+    try {
+      await expect(exportAnnotatedPdf(project, { pdf: sourceBytes }))
+        .rejects.toMatchObject({ name: "PdfExportError", code: "encrypted-source" });
+    } finally {
+      loadSpy.mockRestore();
+    }
   });
 
   it("batches pages from one donor so shared PDF resources are copied once", async () => {

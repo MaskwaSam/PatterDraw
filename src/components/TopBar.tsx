@@ -21,16 +21,23 @@ import type {
 } from "../lib/feature-preferences";
 import type { WorkspaceMode } from "../lib/workspace-mode";
 import type { ThemePreference } from "../lib/theme-preference";
+import type {
+  PdfPreferenceKey,
+  PdfPreferences,
+} from "../lib/pdf/pdf-preferences";
 
 interface TopBarProps {
   title: string;
   status: "saved" | "saving" | "error";
   featurePreferences: FeaturePreferences;
+  pdfPreferences: PdfPreferences;
   themePreference: ThemePreference;
   onTitleChange: (title: string) => void;
   onFeaturePreferenceChange: (key: FeaturePreferenceKey, enabled: boolean) => void;
+  onPdfPreferenceChange: (key: PdfPreferenceKey, enabled: boolean) => void;
   onThemePreferenceChange: (preference: ThemePreference) => void;
   onRestoreFeaturePreferences: () => void;
+  onRestorePdfPreferences: () => void;
   onOpen: () => void;
   onSave: () => void;
   onEquation: () => void;
@@ -111,11 +118,14 @@ export function TopBar({
   title,
   status,
   featurePreferences,
+  pdfPreferences,
   themePreference,
   onTitleChange,
   onFeaturePreferenceChange,
+  onPdfPreferenceChange,
   onThemePreferenceChange,
   onRestoreFeaturePreferences,
+  onRestorePdfPreferences,
   onOpen,
   onSave,
   onEquation,
@@ -142,9 +152,12 @@ export function TopBar({
       <div className="topbar-document">
         <SettingsMenu
           preferences={featurePreferences}
+          pdfPreferences={pdfPreferences}
           themePreference={themePreference}
           onPreferenceChange={onFeaturePreferenceChange}
+          onPdfPreferenceChange={onPdfPreferenceChange}
           onThemePreferenceChange={onThemePreferenceChange}
+          onRestorePdfDefaults={onRestorePdfPreferences}
           onRestoreDefaults={onRestoreFeaturePreferences}
         />
         <div className="brand-mark" role="img" aria-label="PatterDraw">P</div>

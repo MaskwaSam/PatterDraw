@@ -32,10 +32,38 @@ import {
   getPdfExportRasterBudget,
   MAX_PDF_PAGE_EDGE_POINTS,
   pdfRasterCanvasToPngBytes,
+  releasePdfRasterCanvas,
   type PdfRasterBudget,
 } from "./raster-limits";
+import {
+  awaitPdfOperation,
+  reportPdfOperationProgress,
+  throwIfPdfOperationAborted,
+  type PdfOperationPhase,
+  type PdfOperationProgressCallback,
+} from "./operation-progress";
 
 export type PdfExportMode = "expand" | "openboard-fit";
+
+export interface ExportAnnotatedPdfOptions {
+  signal?: AbortSignal;
+  onProgress?: PdfOperationProgressCallback;
+}
+
+export interface ExportSlidesPdfOptions extends ExportAnnotatedPdfOptions {}
+
+export type PdfExportFailureCode = "encrypted-source" | "unsupported-source";
+
+export class PdfExportError extends Error {
+  constructor(
+    message: string,
+    public readonly code: PdfExportFailureCode,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "PdfExportError";
+  }
+}
 
 const EXPORT_PADDING = 24;
 const ANNOTATION_SCALE = 2;
@@ -48,11 +76,25 @@ function asFiles(scene: SerializedScene): BinaryFiles {
   return scene.files as unknown as BinaryFiles;
 }
 
+async function awaitExportCanvas(
+  promise: Promise<HTMLCanvasElement>,
+  signal?: AbortSignal,
+): Promise<HTMLCanvasElement> {
+  const cleanupAfterLateAbort = promise.then((canvas) => {
+    if (signal?.aborted) {
+      releasePdfRasterCanvas(canvas);
+      throwIfPdfOperationAborted(signal);
+    }
+    return canvas;
+  });
+  return awaitPdfOperation<HTMLCanvasElement>(cleanupAfterLateAbort, signal);
+}
+
 export function getPdfPageExportBounds(scene: SerializedScene): ExportBounds {
   if (!scene.pdfPage) throw new Error("Scene is not a PDF page workspace.");
-  const annotationElements = asElements(scene).filter(
-    (element) => !element.isDeleted && element.id !== scene.pdfPage?.backgroundElementId,
-  );
+  // This exact set is also passed to exportToCanvas. Elements omitted from
+  // annotation output must never influence expanded page geometry.
+  const annotationElements = pdfAnnotationElements(scene);
   const base = [0, 0, scene.pdfPage.width, scene.pdfPage.height] as const;
   if (!annotationElements.length) {
     return {
@@ -123,6 +165,7 @@ async function renderAnnotations(
   scene: SerializedScene,
   pageScale: number,
   rasterBudget: Readonly<PdfRasterBudget>,
+  signal?: AbortSignal,
 ): Promise<{
   bytes: Uint8Array;
   bounds: readonly [number, number, number, number];
@@ -131,7 +174,8 @@ async function renderAnnotations(
   const elements = pdfAnnotationElements(scene);
   if (!elements.length) return null;
   const bounds = getCommonBounds(elements);
-  const canvas = await exportToCanvas({
+  throwIfPdfOperationAborted(signal);
+  const canvasPromise = exportToCanvas({
     elements,
     files: asFiles(scene),
     appState: {
@@ -142,8 +186,11 @@ async function renderAnnotations(
     getDimensions: (width: number, height: number) => (
       getPdfAnnotationExportDimensions(width, height, pageScale, rasterBudget)
     ),
-  });
-  return { bytes: await pdfRasterCanvasToPngBytes(canvas), bounds };
+  }) as Promise<HTMLCanvasElement>;
+  const canvas = await awaitExportCanvas(canvasPromise, signal);
+  const bytes = await awaitPdfOperation(pdfRasterCanvasToPngBytes(canvas), signal);
+  throwIfPdfOperationAborted(signal);
+  return { bytes, bounds };
 }
 
 function pdfAnnotationElements(
@@ -157,6 +204,53 @@ function pdfAnnotationElements(
       element.type !== "frame" &&
       !isBlockedEmbeddedElementType(element.type),
   );
+}
+
+function reportExportProgress(
+  options: ExportAnnotatedPdfOptions,
+  phase: PdfOperationPhase,
+  documentPosition: number,
+  documentTotal: number,
+  pagePosition: number,
+  pageTotal: number,
+  documentName?: string,
+): void {
+  reportPdfOperationProgress(options.onProgress, {
+    operation: "export",
+    phase,
+    documentPosition,
+    documentTotal,
+    pagePosition,
+    pageTotal,
+    ...(documentName ? { documentName } : {}),
+  }, options.signal);
+}
+
+/** Convert parser-specific failures into stable, actionable export errors. */
+export function normalizePdfExportError(
+  error: unknown,
+  documentName?: string,
+): Error {
+  if (error instanceof Error && error.name === "AbortError") return error;
+  const message = error instanceof Error ? error.message : String(error);
+  const label = documentName ? `“${documentName}”` : "The source PDF";
+  if (/password|encrypted|encryption/i.test(message)) {
+    return new PdfExportError(
+      `${label} is password-protected or encrypted. Save or print an unlocked copy, re-import it, and export again.`,
+      "encrypted-source",
+      error instanceof Error ? { cause: error } : undefined,
+    );
+  }
+  if (
+    /unsupported|not supported|without a reusable appearance|NoZoom|NoRotate|invalid .* appearance|invalid .* transform|cannot (?:be )?embed|failed to parse/i.test(message)
+  ) {
+    return new PdfExportError(
+      `PatterDraw cannot safely preserve a PDF feature used by ${label}. Save or print a flattened copy, re-import it, and export again.`,
+      "unsupported-source",
+      error instanceof Error ? { cause: error } : undefined,
+    );
+  }
+  return error instanceof Error ? error : new Error(message);
 }
 
 export function getPdfAnnotationRasterBudget(
@@ -230,12 +324,14 @@ export async function exportAnnotatedPdf(
   project: ClassroomProject,
   pdfBytes: Record<PdfDocumentId, Uint8Array>,
   mode: PdfExportMode = "expand",
+  options: ExportAnnotatedPdfOptions = {},
 ): Promise<Blob> {
+  throwIfPdfOperationAborted(options.signal);
   const scenes = orderedPdfScenes(project)
     .filter((scene): scene is SerializedScene & { pdfPage: NonNullable<SerializedScene["pdfPage"]> } => !!scene.pdfPage);
   if (!scenes.length) throw new Error("This project has no imported PDF pages.");
 
-  const output = await PDFDocument.create();
+  const output = await awaitPdfOperation(PDFDocument.create(), options.signal);
   const rasterBudget = getPdfAnnotationRasterBudget(
     scenes,
     getBrowserPdfRasterBudget(),
@@ -245,6 +341,7 @@ export async function exportAnnotatedPdf(
   output.setProducer("PatterDraw offline PDF exporter");
 
   const targets = scenes.map((scene) => {
+    throwIfPdfOperationAborted(options.signal);
     const workspace = scene.pdfPage;
     const bounds = getPdfPageExportBounds(scene);
     const scale = mode === "openboard-fit"
@@ -284,6 +381,7 @@ export async function exportAnnotatedPdf(
   });
   const targetsByDocument = new Map<PdfDocumentId, typeof targets>();
   for (const target of targets) {
+    throwIfPdfOperationAborted(options.signal);
     const id = target.scene.pdfPage.documentId;
     const documentTargets = targetsByDocument.get(id);
     if (documentTargets) documentTargets.push(target);
@@ -293,24 +391,75 @@ export async function exportAnnotatedPdf(
   // Parse and flatten one donor PDF at a time. Its vector object graph is
   // copied into `output` before the next donor is opened, so every parsed
   // source context does not coexist with the growing export.
+  const documentTotal = targetsByDocument.size;
+  let documentIndex = 0;
   for (const [id, documentTargets] of targetsByDocument) {
+    documentIndex += 1;
+    throwIfPdfOperationAborted(options.signal);
     const bytes = pdfBytes[id];
     if (!bytes) throw new Error("The project is missing source PDF data.");
     const source = project.pdfDocuments[id];
     if (!source) throw new Error("The project is missing source PDF metadata.");
+    reportExportProgress(
+      options,
+      "validating",
+      documentIndex,
+      documentTotal,
+      0,
+      documentTargets.length,
+      source.name,
+    );
     if (bytes.byteLength !== source.byteLength) {
       throw new Error(`The source PDF data no longer matches the saved project for ${source.name}.`);
     }
-    if (source.sha256 && await sha256Hex(bytes) !== source.sha256) {
+    if (
+      source.sha256
+      && await awaitPdfOperation(sha256Hex(bytes), options.signal) !== source.sha256
+    ) {
       throw new Error(`The source PDF data no longer matches the saved project for ${source.name}.`);
     }
-    const sourceDocument = await PDFDocument.load(bytes, { updateMetadata: false });
-    prepareSourcePdfForEmbedding(
-      sourceDocument,
-      documentTargets.map((target) => target.scene.pdfPage.pageIndex),
+    reportExportProgress(
+      options,
+      "loading",
+      documentIndex,
+      documentTotal,
+      0,
+      documentTargets.length,
+      source.name,
     );
+    let sourceDocument: PDFDocument;
+    try {
+      sourceDocument = await awaitPdfOperation(
+        PDFDocument.load(bytes, { updateMetadata: false }),
+        options.signal,
+      );
+      reportExportProgress(
+        options,
+        "preflighting",
+        documentIndex,
+        documentTotal,
+        0,
+        documentTargets.length,
+        source.name,
+      );
+      prepareSourcePdfForEmbedding(
+        sourceDocument,
+        documentTargets.map((target) => target.scene.pdfPage.pageIndex),
+      );
+    } catch (error) {
+      throw normalizePdfExportError(error, source.name);
+    }
 
-    const preparedTargets = documentTargets.map((target) => {
+    const preparedTargets = documentTargets.map((target, targetIndex) => {
+      reportExportProgress(
+        options,
+        "preflighting",
+        documentIndex,
+        documentTotal,
+        targetIndex + 1,
+        documentTargets.length,
+        source.name,
+      );
       const { scene } = target;
       const workspace = scene.pdfPage;
       const sourcePage = sourceDocument.getPage(workspace.pageIndex);
@@ -332,24 +481,42 @@ export async function exportAnnotatedPdf(
     const contentTargets = preparedTargets.filter(
       ({ sourcePage }) => !!sourcePage.node.Contents(),
     );
-    const embeddedPages = await output.embedPages(
-      contentTargets.map(({ sourcePage }) => sourcePage),
-      contentTargets.map(({ sourceBox }) => sourceBox),
-    );
+    let embeddedPages: Awaited<ReturnType<PDFDocument["embedPages"]>>;
+    try {
+      embeddedPages = await awaitPdfOperation(output.embedPages(
+        contentTargets.map(({ sourcePage }) => sourcePage),
+        contentTargets.map(({ sourceBox }) => sourceBox),
+      ), options.signal);
+    } catch (error) {
+      throw normalizePdfExportError(error, source.name);
+    }
     const sourceObjectCopier = PDFObjectCopier.for(
       sourceDocument.context,
       output.context,
     );
     for (let index = 0; index < contentTargets.length; index += 1) {
+      reportExportProgress(
+        options,
+        "embedding",
+        documentIndex,
+        documentTotal,
+        index + 1,
+        contentTargets.length,
+        source.name,
+      );
       const { sourcePage, target } = contentTargets[index];
       const embeddedPage = embeddedPages[index];
       const workspace = target.scene.pdfPage;
-      await copySourcePageTransparencyGroup(
-        sourcePage,
-        embeddedPage,
-        sourceObjectCopier,
-      );
-      await embeddedPage.embed();
+      try {
+        await awaitPdfOperation(copySourcePageTransparencyGroup(
+          sourcePage,
+          embeddedPage,
+          sourceObjectCopier,
+        ), options.signal);
+        await awaitPdfOperation(embeddedPage.embed(), options.signal);
+      } catch (error) {
+        throw normalizePdfExportError(error, source.name);
+      }
       drawEmbeddedSourcePage(
         target.targetPage,
         embeddedPage,
@@ -362,12 +529,27 @@ export async function exportAnnotatedPdf(
       );
     }
 
-    for (const target of documentTargets) {
+    for (let targetIndex = 0; targetIndex < documentTargets.length; targetIndex += 1) {
+      const target = documentTargets[targetIndex];
+      reportExportProgress(
+        options,
+        "rendering",
+        documentIndex,
+        documentTotal,
+        targetIndex + 1,
+        documentTargets.length,
+        source.name,
+      );
       const { scene, targetPage } = target;
-      const annotations = await renderAnnotations(scene, target.scale, rasterBudget);
+      const annotations = await renderAnnotations(
+        scene,
+        target.scale,
+        rasterBudget,
+        options.signal,
+      );
       if (annotations) {
         const [x1, y1, x2, y2] = annotations.bounds;
-        const image = await output.embedPng(annotations.bytes);
+        const image = await awaitPdfOperation(output.embedPng(annotations.bytes), options.signal);
         const width = (x2 - x1) * target.scale;
         const height = (y2 - y1) * target.scale;
         targetPage.drawImage(image, {
@@ -376,17 +558,31 @@ export async function exportAnnotatedPdf(
           width,
           height,
         });
-        await image.embed();
+        await awaitPdfOperation(image.embed(), options.signal);
       }
     }
   }
 
-  return new Blob([bytesForBlob(await output.save())], { type: "application/pdf" });
+  reportExportProgress(
+    options,
+    "saving",
+    documentTotal,
+    documentTotal,
+    0,
+    scenes.length,
+  );
+  const savedBytes = await awaitPdfOperation(output.save(), options.signal);
+  throwIfPdfOperationAborted(options.signal);
+  return new Blob([bytesForBlob(savedBytes)], { type: "application/pdf" });
 }
 
-export async function exportSlidesPdf(project: ClassroomProject): Promise<Blob> {
+export async function exportSlidesPdf(
+  project: ClassroomProject,
+  options: ExportSlidesPdfOptions = {},
+): Promise<Blob> {
+  throwIfPdfOperationAborted(options.signal);
   if (!project.slideOrder.length) throw new Error("Add at least one frame slide before exporting.");
-  const output = await PDFDocument.create();
+  const output = await awaitPdfOperation(PDFDocument.create(), options.signal);
   const rasterBudget = getPdfExportRasterBudget(
     getBrowserPdfRasterBudget(),
     project.slideOrder.length,
@@ -394,7 +590,17 @@ export async function exportSlidesPdf(project: ClassroomProject): Promise<Blob> 
   output.setTitle(`${project.title} — slides`);
   output.setCreator("PatterDraw");
 
-  for (const slide of project.slideOrder) {
+  for (let slideIndex = 0; slideIndex < project.slideOrder.length; slideIndex += 1) {
+    const slide = project.slideOrder[slideIndex];
+    reportExportProgress(
+      options,
+      "rendering",
+      1,
+      1,
+      slideIndex + 1,
+      project.slideOrder.length,
+      `${project.title} — slides`,
+    );
     const scene = project.scenes[slide.sceneId];
     if (!scene) continue;
     const renderData = getSlideRenderData(scene, slide.frameId);
@@ -404,23 +610,38 @@ export async function exportSlidesPdf(project: ClassroomProject): Promise<Blob> 
       renderData.frame.height,
       rasterBudget,
     );
-    const canvas = await exportToCanvas({
+    const canvas = await awaitExportCanvas(exportToCanvas({
       elements: renderData.elements,
       files: renderData.files,
       exportingFrame: renderData.frame,
       appState: { exportBackground: true, viewBackgroundColor: "#ffffff" },
       exportPadding: 0,
       getDimensions: () => dimensions,
-    });
-    const image = await output.embedPng(await pdfRasterCanvasToPngBytes(canvas));
+    }) as Promise<HTMLCanvasElement>, options.signal);
+    const imageBytes = await awaitPdfOperation(
+      pdfRasterCanvasToPngBytes(canvas),
+      options.signal,
+    );
+    const image = await awaitPdfOperation(output.embedPng(imageBytes), options.signal);
     const page = output.addPage([
       Math.max(renderData.frame.width, 1),
       Math.max(renderData.frame.height, 1),
     ]);
     page.drawImage(image, { x: 0, y: 0, width: page.getWidth(), height: page.getHeight() });
-    await image.embed();
+    await awaitPdfOperation(image.embed(), options.signal);
   }
 
   if (!output.getPageCount()) throw new Error("No valid frame slides were found.");
-  return new Blob([bytesForBlob(await output.save())], { type: "application/pdf" });
+  reportExportProgress(
+    options,
+    "saving",
+    1,
+    1,
+    0,
+    project.slideOrder.length,
+    `${project.title} — slides`,
+  );
+  const savedBytes = await awaitPdfOperation(output.save(), options.signal);
+  throwIfPdfOperationAborted(options.signal);
+  return new Blob([bytesForBlob(savedBytes)], { type: "application/pdf" });
 }

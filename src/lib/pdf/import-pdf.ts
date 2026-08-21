@@ -29,6 +29,14 @@ import {
   type PdfRasterBudget,
   type PdfPageRasterSize,
 } from "./raster-limits";
+import {
+  awaitPdfOperation,
+  pdfAbortError,
+  reportPdfOperationProgress,
+  throwIfPdfOperationAborted,
+  type PdfOperationPhase,
+  type PdfOperationProgressCallback,
+} from "./operation-progress";
 import { withPdfWorkerMimeQuery } from "./worker-url";
 
 GlobalWorkerOptions.workerSrc = withPdfWorkerMimeQuery(pdfWorkerUrl);
@@ -64,6 +72,10 @@ interface ParsedPdfPages {
 export interface ImportPdfOptions {
   /** Abort an obsolete import when a newer open/navigation generation wins. */
   signal?: AbortSignal;
+  /** Structured progress for local UI. Positions are one-based; zero means document-level work. */
+  onProgress?: PdfOperationProgressCallback;
+  /** Maximum number of pages that can still fit in the destination project. */
+  maxPages?: number;
   /** Override the device-sensitive raster envelope in focused callers/tests. */
   rasterBudget?: Readonly<PdfRasterBudget>;
   /** Remaining project-content budget available for generated page PNGs. */
@@ -75,30 +87,40 @@ interface PdfImportRasterState {
   rasterPixels: number;
 }
 
-function abortError(): Error {
-  if (typeof DOMException === "function") return new DOMException("The operation was aborted.", "AbortError");
-  const error = new Error("The operation was aborted.");
-  error.name = "AbortError";
-  return error;
-}
+const PDF_HEADER = [0x25, 0x50, 0x44, 0x46, 0x2d] as const;
+const PDF_HEADER_SCAN_BYTES = 1_024;
 
-function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : abortError();
-}
-
-async function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) return promise;
-  throwIfAborted(signal);
-  let onAbort: (() => void) | undefined;
-  const abortPromise = new Promise<never>((_, reject) => {
-    onAbort = () => reject(signal.reason instanceof Error ? signal.reason : abortError());
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-  try {
-    return await Promise.race([promise, abortPromise]);
-  } finally {
-    if (onAbort) signal.removeEventListener("abort", onAbort);
+/** Detect a PDF from its bytes instead of trusting an extension or MIME label. */
+export function hasPdfByteSignature(bytes: Uint8Array): boolean {
+  const lastStart = Math.min(bytes.byteLength - PDF_HEADER.length, PDF_HEADER_SCAN_BYTES);
+  for (let offset = 0; offset <= lastStart; offset += 1) {
+    if (PDF_HEADER.every((byte, index) => bytes[offset + index] === byte)) return true;
   }
+  return false;
+}
+
+function assertPdfByteSignature(bytes: Uint8Array): void {
+  if (!hasPdfByteSignature(bytes)) {
+    throw new Error("This file does not contain a valid PDF header. Choose a PDF file.");
+  }
+}
+
+function reportImportProgress(
+  file: File,
+  options: ImportPdfOptions,
+  phase: PdfOperationPhase,
+  pagePosition = 0,
+  pageTotal = 0,
+): void {
+  reportPdfOperationProgress(options.onProgress, {
+    operation: "import",
+    phase,
+    documentPosition: 1,
+    documentTotal: 1,
+    pagePosition,
+    pageTotal,
+    documentName: file.name,
+  }, options.signal);
 }
 
 function assertRenderedPageBudget(
@@ -148,10 +170,10 @@ async function renderPageScene(
   rasterState: PdfImportRasterState,
   signal?: AbortSignal,
 ): Promise<SerializedScene> {
-  throwIfAborted(signal);
+  throwIfPdfOperationAborted(signal);
   const page = await pdfDocument.getPage(pageIndex + 1);
   try {
-    throwIfAborted(signal);
+    throwIfPdfOperationAborted(signal);
     const viewport = page.getViewport({ scale: 1 });
     const renderViewport = page.getViewport({ scale: rasterScale });
     const canvas = window.document.createElement("canvas");
@@ -167,12 +189,14 @@ async function renderPageScene(
       try {
         await renderTask.promise;
       } catch (error) {
-        if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : abortError();
+        if (signal?.aborted) {
+          throw signal.reason instanceof Error ? signal.reason : pdfAbortError();
+        }
         throw error;
       } finally {
         signal?.removeEventListener("abort", onAbort);
       }
-      throwIfAborted(signal);
+      throwIfPdfOperationAborted(signal);
       const sceneId = createLocalId();
       const backgroundElementId = createLocalId();
       const fileId = createLocalId() as FileId;
@@ -193,7 +217,7 @@ async function renderPageScene(
         encodedBudget,
         rasterState,
       );
-      throwIfAborted(signal);
+      throwIfPdfOperationAborted(signal);
       const file: BinaryFileData = {
         id: fileId,
         mimeType: "image/png",
@@ -250,25 +274,31 @@ async function renderPageScene(
 }
 
 async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promise<ParsedPdfPages> {
-  throwIfAborted(options.signal);
+  throwIfPdfOperationAborted(options.signal);
   const rasterBudget = options.rasterBudget ?? getBrowserPdfRasterBudget();
   const encodedBudget = getPdfImportEncodedByteBudget(
     rasterBudget,
     options.maxEncodedBytesPerDocument,
   );
   const rasterOptions = getPdfJsRasterOptions(rasterBudget);
-  const parseBytes = new Uint8Array(await file.arrayBuffer());
-  throwIfAborted(options.signal);
+  reportImportProgress(file, options, "reading");
+  const parseBytes = new Uint8Array(await awaitPdfOperation(file.arrayBuffer(), options.signal));
+  throwIfPdfOperationAborted(options.signal);
+  reportImportProgress(file, options, "validating");
+  assertPdfByteSignature(parseBytes);
   const sourceSha256 = await sha256Hex(parseBytes);
+  throwIfPdfOperationAborted(options.signal);
   const { assertPdfEmbeddedImageLimit } = await import("./embedded-image-limits");
-  await assertPdfEmbeddedImageLimit(parseBytes, rasterOptions.maxImageSize, {
+  reportImportProgress(file, options, "preflighting");
+  await awaitPdfOperation(assertPdfEmbeddedImageLimit(parseBytes, rasterOptions.maxImageSize, {
     immutableSha256: sourceSha256,
     maxEdge: rasterBudget.maxEdge,
     maxTotalPixels: rasterBudget.maxPixelsPerDocument,
     maxTotalEncodedBytes: encodedBudget.maxBytesPerDocument,
     signal: options.signal,
-  });
-  throwIfAborted(options.signal);
+  }), options.signal);
+  throwIfPdfOperationAborted(options.signal);
+  reportImportProgress(file, options, "loading");
   const loadingTask = getDocument({
     // PDF.js may transfer this buffer to its worker. Do not keep a second
     // full-size copy alive just to preserve the immutable source; reread the
@@ -291,18 +321,24 @@ async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promis
   options.signal?.addEventListener("abort", onAbort, { once: true });
 
   try {
-    const document = await awaitWithAbort(loadingTask.promise, options.signal);
-    throwIfAborted(options.signal);
+    const document = await awaitPdfOperation(loadingTask.promise, options.signal);
+    throwIfPdfOperationAborted(options.signal);
     if (document.numPages > MAX_PDF_PAGES) {
       throw new Error(`The PDF has more than ${MAX_PDF_PAGES} pages.`);
+    }
+    if (options.maxPages !== undefined && document.numPages > options.maxPages) {
+      const noun = options.maxPages === 1 ? "page" : "pages";
+      throw new Error(
+        `This PDF has ${document.numPages} pages, but only ${options.maxPages} more ${noun} can fit in this project.`,
+      );
     }
     const documentId = createLocalId();
     const pageSizes: PdfPageRasterSize[] = [];
     for (let pageIndex = 0; pageIndex < document.numPages; pageIndex += 1) {
-      throwIfAborted(options.signal);
+      reportImportProgress(file, options, "measuring", pageIndex + 1, document.numPages);
       const page = await document.getPage(pageIndex + 1);
       try {
-        throwIfAborted(options.signal);
+        throwIfPdfOperationAborted(options.signal);
         const viewport = page.getViewport({ scale: 1 });
         pageSizes.push({ width: viewport.width, height: viewport.height });
       } finally {
@@ -317,7 +353,7 @@ async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promis
     const scenes: SerializedScene[] = [];
     const rasterState: PdfImportRasterState = { encodedBytes: 0, rasterPixels: 0 };
     for (let pageIndex = 0; pageIndex < document.numPages; pageIndex += 1) {
-      throwIfAborted(options.signal);
+      reportImportProgress(file, options, "rendering", pageIndex + 1, document.numPages);
       scenes.push(await renderPageScene(
         document,
         documentId,
@@ -330,11 +366,11 @@ async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promis
         options.signal,
       ));
     }
-    throwIfAborted(options.signal);
+    throwIfPdfOperationAborted(options.signal);
     return { documentId, pageCount: document.numPages, scenes, sourceSha256 };
   } catch (error) {
     if (options.signal?.aborted) {
-      throw options.signal.reason instanceof Error ? options.signal.reason : abortError();
+      throw options.signal.reason instanceof Error ? options.signal.reason : pdfAbortError();
     }
     const message = error instanceof Error ? error.message : String(error);
     if (/password/i.test(message)) throw new Error("Password-protected PDFs are not supported.");
@@ -346,9 +382,14 @@ async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promis
 }
 
 export async function importPdf(file: File, options: ImportPdfOptions = {}): Promise<ImportedPdf> {
-  throwIfAborted(options.signal);
-  if (file.type && file.type !== "application/pdf") throw new Error("Choose a PDF file.");
+  throwIfPdfOperationAborted(options.signal);
   if (file.size > MAX_PDF_BYTES) throw new Error("The PDF is larger than the PatterDraw limit.");
+  if (
+    options.maxPages !== undefined
+    && (!Number.isSafeInteger(options.maxPages) || options.maxPages < 0)
+  ) {
+    throw new Error("The remaining PDF page capacity is invalid.");
+  }
   if (
     options.maxEncodedBytesPerDocument !== undefined
     && (!Number.isSafeInteger(options.maxEncodedBytesPerDocument)
@@ -358,13 +399,14 @@ export async function importPdf(file: File, options: ImportPdfOptions = {}): Pro
   }
 
   const parsed = await parsePdfPages(file, options);
-  throwIfAborted(options.signal);
-  const bytes = new Uint8Array(await file.arrayBuffer());
+  throwIfPdfOperationAborted(options.signal);
+  reportImportProgress(file, options, "validating", parsed.pageCount, parsed.pageCount);
+  const bytes = new Uint8Array(await awaitPdfOperation(file.arrayBuffer(), options.signal));
   if (bytes.byteLength !== file.size) {
     throw new Error("The local PDF changed while it was being imported.");
   }
   const sourceSha256 = await sha256Hex(bytes);
-  throwIfAborted(options.signal);
+  throwIfPdfOperationAborted(options.signal);
   if (sourceSha256 !== parsed.sourceSha256) {
     throw new Error("The local PDF changed while it was being imported.");
   }

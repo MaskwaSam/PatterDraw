@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   persistExperimentalFeaturesPreference,
   readExperimentalFeaturesPreference,
@@ -9,14 +9,27 @@ import type {
   FeaturePreferences,
 } from "../lib/feature-preferences";
 import type { ThemePreference } from "../lib/theme-preference";
+import {
+  persistPdfPreference,
+  readPdfPreferences,
+  restoreDefaultPdfPreferences,
+  subscribeToPdfPreferences,
+} from "../lib/pdf/pdf-preferences";
+import type {
+  PdfPreferenceKey,
+  PdfPreferences,
+} from "../lib/pdf/pdf-preferences";
 import { SettingsIcon } from "./Icons";
 import { useModalDialog } from "./useModalDialog";
 
-interface SettingsMenuProps {
+export interface SettingsMenuProps {
   preferences: FeaturePreferences;
+  pdfPreferences?: PdfPreferences;
   themePreference: ThemePreference;
   onPreferenceChange: (key: FeaturePreferenceKey, enabled: boolean) => void;
+  onPdfPreferenceChange?: (key: PdfPreferenceKey, enabled: boolean) => void;
   onThemePreferenceChange: (preference: ThemePreference) => void;
+  onRestorePdfDefaults?: () => void;
   onRestoreDefaults: () => void;
 }
 
@@ -58,17 +71,31 @@ const DRAWING_TOGGLES: ReadonlyArray<{
   { key: "snapToObjects", label: "Snap to objects", description: "Align shapes to nearby objects" },
 ];
 
+const PDF_TOGGLES: ReadonlyArray<{
+  key: PdfPreferenceKey;
+  label: string;
+  description: string;
+}> = [
+  {
+    key: "darkPdfPreview",
+    label: "Dark PDF preview",
+    description: "Dim PDF page backgrounds while using the dark theme",
+  },
+];
+
 function SettingsToggle({ checked, description, label, onChange }: SettingsToggleProps) {
+  const descriptionId = useId();
   return (
     <label className="settings-toggle">
       <span>
         <strong>{label}</strong>
-        <small>{description}</small>
+        <small id={descriptionId}>{description}</small>
       </span>
       <input
         type="checkbox"
         role="switch"
         aria-label={label}
+        aria-describedby={descriptionId}
         checked={checked}
         onChange={(event) => onChange(event.target.checked)}
       />
@@ -78,12 +105,16 @@ function SettingsToggle({ checked, description, label, onChange }: SettingsToggl
 
 export function SettingsMenu({
   preferences,
+  pdfPreferences,
   themePreference,
   onPreferenceChange,
+  onPdfPreferenceChange,
   onThemePreferenceChange,
+  onRestorePdfDefaults,
   onRestoreDefaults,
 }: SettingsMenuProps) {
   const [open, setOpen] = useState(false);
+  const [localPdfPreferences, setLocalPdfPreferences] = useState(readPdfPreferences);
   const [experimentalFeaturesEnabled, setExperimentalFeaturesEnabled] = useState(
     readExperimentalFeaturesPreference,
   );
@@ -94,8 +125,19 @@ export function SettingsMenu({
     open,
     returnFocusRef: triggerRef,
   });
+  const pdfPreferencesAreControlled = pdfPreferences !== undefined
+    && onPdfPreferenceChange !== undefined
+    && onRestorePdfDefaults !== undefined;
+  const displayedPdfPreferences = pdfPreferencesAreControlled
+    ? pdfPreferences
+    : localPdfPreferences;
 
   useEffect(() => subscribeToExperimentalFeaturesPreference(setExperimentalFeaturesEnabled), []);
+
+  useEffect(() => {
+    if (pdfPreferencesAreControlled) return undefined;
+    return subscribeToPdfPreferences(setLocalPdfPreferences);
+  }, [pdfPreferencesAreControlled]);
 
   useEffect(() => {
     if (!open) return;
@@ -113,8 +155,29 @@ export function SettingsMenu({
     persistExperimentalFeaturesPreference(enabled);
   };
 
+  const setPdfPreference = (key: PdfPreferenceKey, enabled: boolean) => {
+    if (pdfPreferencesAreControlled) {
+      onPdfPreferenceChange(key, enabled);
+      return;
+    }
+    setLocalPdfPreferences((current) => (
+      persistPdfPreference(current, key, enabled).preferences
+    ));
+  };
+
+  const restorePdfDefaults = () => {
+    if (pdfPreferencesAreControlled) {
+      onRestorePdfDefaults();
+      return;
+    }
+    setLocalPdfPreferences((current) => (
+      restoreDefaultPdfPreferences(current).preferences
+    ));
+  };
+
   const restoreDefaults = () => {
     onRestoreDefaults();
+    restorePdfDefaults();
     setExperimentalFeatures(false);
   };
 
@@ -162,6 +225,22 @@ export function SettingsMenu({
                 onChange={(enabled) => onPreferenceChange(toggle.key, enabled)}
               />
             ))}
+          </div>
+
+          <div className="settings-group" role="group" aria-labelledby="pdf-settings-label">
+            <h3 id="pdf-settings-label">PDF</h3>
+            {PDF_TOGGLES.map((toggle) => (
+              <SettingsToggle
+                key={toggle.key}
+                checked={displayedPdfPreferences[toggle.key]}
+                description={toggle.description}
+                label={toggle.label}
+                onChange={(enabled) => setPdfPreference(toggle.key, enabled)}
+              />
+            ))}
+            <div className="settings-group-actions">
+              <button type="button" onClick={restorePdfDefaults}>Restore PDF defaults</button>
+            </div>
           </div>
 
           <div className="settings-group" role="group" aria-labelledby="tool-settings-label">

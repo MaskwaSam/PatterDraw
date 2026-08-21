@@ -142,7 +142,12 @@ import {
   shiftPdfPage,
   type PdfPageDropEdge,
 } from "./lib/pdf/page-order";
+import {
+  assertProjectCanAcceptPdfPages,
+  remainingProjectSceneCapacity,
+} from "./lib/pdf/capacity";
 import type { PdfExportMode } from "./lib/pdf/export-pdf";
+import type { PdfOperationProgress } from "./lib/pdf/operation-progress";
 import {
   deleteSlideBoundary,
   detachElementsFromSlideFrames,
@@ -202,6 +207,13 @@ import {
   type FeaturePreferenceKey,
   type FeaturePreferences,
 } from "./lib/feature-preferences";
+import {
+  persistPdfPreference,
+  readPdfPreferences,
+  restoreDefaultPdfPreferences,
+  subscribeToPdfPreferences,
+  type PdfPreferenceKey,
+} from "./lib/pdf/pdf-preferences";
 import {
   DEFAULT_THEME_PREFERENCE,
   persistThemePreference,
@@ -702,6 +714,25 @@ function isAbortLikeError(error: unknown): boolean {
     || error instanceof Error && error.name === "AbortError";
 }
 
+function pdfOperationProgressMessage(progress: Readonly<PdfOperationProgress>): string {
+  const name = progress.documentName ? ` ${progress.documentName}` : "";
+  if (progress.pagePosition > 0 && progress.pageTotal > 0) {
+    const action = progress.phase === "measuring" ? "Preparing" : "Rendering";
+    return `${action}${name} — page ${progress.pagePosition} of ${progress.pageTotal}…`;
+  }
+  const action: Record<PdfOperationProgress["phase"], string> = {
+    reading: "Reading",
+    validating: "Checking",
+    preflighting: "Checking compatibility for",
+    loading: "Opening",
+    measuring: "Preparing",
+    rendering: "Rendering",
+    embedding: "Combining",
+    saving: "Finishing",
+  };
+  return `${action[progress.phase]}${name || " PDF"}…`;
+}
+
 function autosaveSnapshotsMatch(
   snapshot: LoadedClassroomProject | null,
   project: ClassroomProject,
@@ -967,6 +998,8 @@ export default function App() {
   const [activeSlideId, setActiveSlideId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(100);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
+  const [busyCanCancel, setBusyCanCancel] = useState(false);
+  const busyCancelRef = useRef<(() => void) | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [autosaveRecoveryDetail, setAutosaveRecoveryDetail] = useState<string | null>(null);
   const [autosaveRecoveryKind, setAutosaveRecoveryKind] = useState<AutosaveRecoveryKind | null>(null);
@@ -999,6 +1032,7 @@ export default function App() {
   const [isSlideFrameDrawingActive, setIsSlideFrameDrawingActive] = useState(false);
   const [isNavigationVisible, setIsNavigationVisible] = useState(true);
   const [featurePreferences, setFeaturePreferences] = useState(readFeaturePreferences);
+  const [pdfPreferences, setPdfPreferences] = useState(readPdfPreferences);
   const [themePreference, setThemePreferenceState] = useState(readThemePreference);
   const [prefersDarkTheme, setPrefersDarkTheme] = useState(systemPrefersDark);
   const [darkPdfPreviewUrls, setDarkPdfPreviewUrls] = useState<Record<string, string>>({});
@@ -1009,6 +1043,8 @@ export default function App() {
   );
   const featurePreferencesRef = useRef(featurePreferences);
   featurePreferencesRef.current = featurePreferences;
+  const pdfPreferencesRef = useRef(pdfPreferences);
+  pdfPreferencesRef.current = pdfPreferences;
   const applyingEditorPreferencesRef = useRef<Pick<
     FeaturePreferences,
     "penOnly" | "showGrid" | "snapToObjects"
@@ -1041,6 +1077,22 @@ export default function App() {
   }, []);
   const setThemePreference = useCallback((preference: ThemePreference) => {
     setThemePreferenceState(persistThemePreference(preference));
+  }, []);
+  const setPdfPreference = useCallback((key: PdfPreferenceKey, enabled: boolean) => {
+    const result = persistPdfPreference(pdfPreferencesRef.current, key, enabled);
+    pdfPreferencesRef.current = result.preferences;
+    setPdfPreferences(result.preferences);
+    if (result.status === "rolled-back") {
+      setErrorMessage("PDF settings could not be saved on this device. The previous setting was kept.");
+    }
+  }, []);
+  const restorePdfPreferences = useCallback(() => {
+    const result = restoreDefaultPdfPreferences(pdfPreferencesRef.current);
+    pdfPreferencesRef.current = result.preferences;
+    setPdfPreferences(result.preferences);
+    if (result.status === "rolled-back") {
+      setErrorMessage("PDF settings could not be restored on this device. The previous settings were kept.");
+    }
   }, []);
   const toggleFooterPreference = useCallback(() => {
     const next = persistFeaturePreference(
@@ -1076,6 +1128,10 @@ export default function App() {
     };
     featurePreferencesRef.current = nextPreferences;
     setFeaturePreferences(nextPreferences);
+  }), []);
+  useEffect(() => subscribeToPdfPreferences((nextPreferences) => {
+    pdfPreferencesRef.current = nextPreferences;
+    setPdfPreferences(nextPreferences);
   }), []);
   useEffect(() => subscribeToThemePreference(setThemePreferenceState), []);
   useEffect(() => subscribeToSystemTheme(setPrefersDarkTheme), []);
@@ -1269,6 +1325,7 @@ export default function App() {
   // (older importPdf versions may not consume the signal yet).
   const fileOpenGenerationRef = useRef(0);
   const fileOpenAbortControllerRef = useRef<AbortController | null>(null);
+  const pdfExportAbortControllerRef = useRef<AbortController | null>(null);
   const startupAutosaveAbortControllerRef = useRef<AbortController | null>(null);
   const autosaveSuspensionGenerationRef = useRef<number | null>(null);
   const pendingFrameIdRef = useRef<string | null>(null);
@@ -1505,6 +1562,9 @@ export default function App() {
       fileOpenGenerationRef.current += 1;
       fileOpenAbortControllerRef.current?.abort();
       fileOpenAbortControllerRef.current = null;
+      pdfExportAbortControllerRef.current?.abort();
+      pdfExportAbortControllerRef.current = null;
+      busyCancelRef.current = null;
       startupAutosaveAbortControllerRef.current?.abort();
       startupAutosaveAbortControllerRef.current = null;
       presentationInkGenerationRef.current += 1;
@@ -2939,10 +2999,30 @@ export default function App() {
   const handleFile = useCallback(async (file: File) => {
     const operation = beginFileOpenOperation();
     const isCurrentOperation = () => isCurrentFileOpenOperation(operation);
+    busyCancelRef.current = () => {
+      if (fileOpenGenerationRef.current !== operation.generation) return;
+      fileOpenAbortControllerRef.current?.abort();
+      busyCancelRef.current = null;
+      setBusyCanCancel(false);
+      setBusyMessage(null);
+      if (inputRef.current) inputRef.current.value = "";
+    };
+    setBusyCanCancel(true);
     setErrorMessage(null);
     setBusyMessage(`Opening ${file.name}…`);
     try {
-      const isPdfFile = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+      const lowerName = file.name.toLowerCase();
+      const knownNonPdfFile = lowerName.endsWith(".patterdraw")
+        || lowerName.endsWith(".canvasclassroom")
+        || lowerName.endsWith(".excalidraw")
+        || file.type === "application/vnd.excalidraw+json";
+      let isPdfFile = file.type === "application/pdf" || lowerName.endsWith(".pdf");
+      if (!isPdfFile && !knownNonPdfFile) {
+        const { hasPdfByteSignature } = await import("./lib/pdf/import-pdf");
+        const headerBytes = new Uint8Array(await file.slice(0, 1_029).arrayBuffer());
+        if (!isCurrentOperation()) return;
+        isPdfFile = hasPdfByteSignature(headerBytes);
+      }
       const replaceProtectedAutosave = autosaveRecoveryDetail !== null;
       if (
         replaceProtectedAutosave
@@ -2962,6 +3042,8 @@ export default function App() {
             || projectRef.current?.activeSceneId
             || "",
         ) || createBlankProject();
+        assertProjectCanAcceptPdfPages(preflightProject, 1);
+        const maxPages = remainingProjectSceneCapacity(preflightProject);
         const preflightSize = assertProjectCanAcceptAdditionalBytes(
           preflightProject,
           pdfBytesRef.current,
@@ -2974,6 +3056,10 @@ export default function App() {
         const { importPdf } = await import("./lib/pdf/import-pdf");
         const imported = await importPdf(file, {
           maxEncodedBytesPerDocument,
+          maxPages,
+          onProgress: (progress) => {
+            if (isCurrentOperation()) setBusyMessage(pdfOperationProgressMessage(progress));
+          },
           signal: operation.signal,
         });
         if (!isCurrentOperation()) return;
@@ -3039,8 +3125,8 @@ export default function App() {
         setEquationEditor(null);
         setMermaidEditor(null);
       } else if (
-        file.name.toLowerCase().endsWith(".patterdraw")
-        || file.name.toLowerCase().endsWith(".canvasclassroom")
+        lowerName.endsWith(".patterdraw")
+        || lowerName.endsWith(".canvasclassroom")
       ) {
         const bytes = await readBoundedProjectFileBytes(file);
         if (!isCurrentOperation()) return;
@@ -3053,7 +3139,7 @@ export default function App() {
         setBusyMessage(`Saving ${file.name} locally…`);
         await openLoadedProject(loaded, operation, replaceProtectedAutosave);
       } else if (
-        file.name.toLowerCase().endsWith(".excalidraw")
+        lowerName.endsWith(".excalidraw")
         || file.type === "application/vnd.excalidraw+json"
       ) {
         assertImportBlobBytes(file, MAX_NATIVE_SCENE_BLOB_BYTES, "Excalidraw file");
@@ -3079,7 +3165,9 @@ export default function App() {
         setErrorMessage(error instanceof Error ? error.message : String(error));
       }
     } finally {
-      if (isCurrentOperation()) {
+      if (fileOpenGenerationRef.current === operation.generation) {
+        busyCancelRef.current = null;
+        setBusyCanCancel(false);
         setBusyMessage(null);
         if (inputRef.current) inputRef.current.value = "";
       }
@@ -3187,20 +3275,47 @@ export default function App() {
     const currentProject = commitCurrentLiveScenePersistence();
     if (!currentProject) return;
     const exportPdfBytes = clonePdfBytes(pdfBytesRef.current);
+    pdfExportAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    pdfExportAbortControllerRef.current = controller;
+    busyCancelRef.current = () => {
+      if (pdfExportAbortControllerRef.current !== controller) return;
+      controller.abort();
+      busyCancelRef.current = null;
+      setBusyCanCancel(false);
+      setBusyMessage(null);
+    };
+    setBusyCanCancel(true);
     setExportOpen(false);
     setBusyMessage(kind === "slides" ? "Exporting slides…" : "Exporting annotated PDF…");
     try {
       await afterNextPaint();
       const { exportAnnotatedPdf, exportSlidesPdf } = await import("./lib/pdf/export-pdf");
+      const exportOptions = {
+        signal: controller.signal,
+        onProgress: (progress: PdfOperationProgress) => {
+          if (!controller.signal.aborted && pdfExportAbortControllerRef.current === controller) {
+            setBusyMessage(pdfOperationProgressMessage(progress));
+          }
+        },
+      };
       const blob = kind === "slides"
-        ? await exportSlidesPdf(currentProject)
-        : await exportAnnotatedPdf(currentProject, exportPdfBytes, kind);
+        ? await exportSlidesPdf(currentProject, exportOptions)
+        : await exportAnnotatedPdf(currentProject, exportPdfBytes, kind, exportOptions);
+      if (controller.signal.aborted || pdfExportAbortControllerRef.current !== controller) return;
       const suffix = kind === "slides" ? "slides" : kind === "expand" ? "annotated-expanded" : "annotated-openboard-fit";
       downloadBlob(blob, `${safeFileStem(currentProject.title)}-${suffix}.pdf`);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
+      if (!isAbortLikeError(error)) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
     } finally {
-      setBusyMessage(null);
+      if (pdfExportAbortControllerRef.current === controller) {
+        pdfExportAbortControllerRef.current = null;
+        busyCancelRef.current = null;
+        setBusyCanCancel(false);
+        setBusyMessage(null);
+      }
     }
   }, [commitCurrentLiveScenePersistence]);
 
@@ -4464,7 +4579,11 @@ export default function App() {
     const generation = ++darkPdfPreviewGenerationRef.current;
     const hydrationGeneration = sceneHydrationGenerationRef.current;
     const liveElements = api.getSceneElements();
-    if (editorTheme !== "dark" || suspendDarkPdfDisplayRef.current) {
+    if (
+      editorTheme !== "dark"
+      || !pdfPreferences.darkPdfPreview
+      || suspendDarkPdfDisplayRef.current
+    ) {
       retireActiveDarkPdfDisplayFile();
       darkPdfDisplayFileIdsRef.current.clear();
       darkPdfPreviewCacheRef.current.clear();
@@ -4490,6 +4609,7 @@ export default function App() {
         || generation !== darkPdfPreviewGenerationRef.current
         || hydrationGeneration !== sceneHydrationGenerationRef.current
         || editorThemeRef.current !== "dark"
+        || !pdfPreferencesRef.current.darkPdfPreview
         || suspendDarkPdfDisplayRef.current
         || nativeImageExportOpenRef.current
         || !darkPdfDisplaySceneIsCurrent(
@@ -4567,6 +4687,7 @@ export default function App() {
     darkPdfDisplayRevision,
     editorTheme,
     getDarkPdfDisplayFile,
+    pdfPreferences.darkPdfPreview,
     projectHydrationRevision,
     retireActiveDarkPdfDisplayFile,
   ]);
@@ -4614,7 +4735,11 @@ export default function App() {
       if (entries.length === Object.keys(current).length) return current;
       return Object.fromEntries(entries);
     });
-    if (editorTheme !== "dark" || stablePdfScenes.length === 0) {
+    if (
+      editorTheme !== "dark"
+      || !pdfPreferences.darkPdfPreview
+      || stablePdfScenes.length === 0
+    ) {
       darkPdfThumbnailCacheRef.current.clear();
       setDarkPdfPreviewUrls({});
       return;
@@ -4638,6 +4763,7 @@ export default function App() {
               cancelled
               || controller.signal.aborted
               || editorThemeRef.current !== "dark"
+              || !pdfPreferencesRef.current.darkPdfPreview
               || projectRef.current?.id !== projectId
             ) break;
             const retainedSceneIds = retainedDarkPdfThumbnailSceneIds(
@@ -4672,6 +4798,7 @@ export default function App() {
     };
   }, [
     editorTheme,
+    pdfPreferences.darkPdfPreview,
     darkPdfThumbnailTargetIdentity,
     getDarkPdfThumbnailUrl,
     pdfThumbnailIdentity,
@@ -5676,17 +5803,26 @@ export default function App() {
       && activeSceneIdRef.current === sourceSceneId
       && sceneHydrationGenerationRef.current === sourceHydrationGeneration
     );
+    busyCancelRef.current = () => {
+      if (fileOpenGenerationRef.current !== operation.generation) return;
+      fileOpenAbortControllerRef.current?.abort();
+      busyCancelRef.current = null;
+      setBusyCanCancel(false);
+      setBusyMessage(null);
+    };
+    setBusyCanCancel(true);
     setErrorMessage(null);
     setBusyMessage("Adding a blank PDF page…");
     try {
+      const sourceProject = projectRef.current;
+      if (!sourceProject) return;
+      assertProjectCanAcceptPdfPages(sourceProject, 1);
       const [{ importPdf }, { createBlankPdfFile }] = await Promise.all([
         import("./lib/pdf/import-pdf"),
         import("./lib/pdf/create-blank-page"),
       ]);
       const blankPdf = await createBlankPdfFile(workspace.width, workspace.height);
       if (!isCurrentOperation()) return;
-      const sourceProject = projectRef.current;
-      if (!sourceProject) return;
       const sourceSize = assertProjectCanAcceptAdditionalBytes(
         sourceProject,
         pdfBytesRef.current,
@@ -5698,6 +5834,10 @@ export default function App() {
       );
       const imported = await importPdf(blankPdf, {
         maxEncodedBytesPerDocument,
+        maxPages: remainingProjectSceneCapacity(sourceProject),
+        onProgress: (progress) => {
+          if (isCurrentOperation()) setBusyMessage(pdfOperationProgressMessage(progress));
+        },
         signal: operation.signal,
       });
       if (!isCurrentOperation()) return;
@@ -5733,7 +5873,11 @@ export default function App() {
         setErrorMessage(error instanceof Error ? error.message : String(error));
       }
     } finally {
-      if (isCurrentFileOperation()) setBusyMessage(null);
+      if (fileOpenGenerationRef.current === operation.generation) {
+        busyCancelRef.current = null;
+        setBusyCanCancel(false);
+        setBusyMessage(null);
+      }
     }
   }, [
     beginFileOpenOperation,
@@ -6140,6 +6284,7 @@ export default function App() {
           title={project.title}
           status={saveStatus}
           featurePreferences={featurePreferences}
+          pdfPreferences={pdfPreferences}
           themePreference={themePreference}
           onTitleChange={(title) => setProject((current) => current ? {
             ...current,
@@ -6148,8 +6293,10 @@ export default function App() {
             updatedAt: nowIso(),
           } : current)}
           onFeaturePreferenceChange={setFeaturePreference}
+          onPdfPreferenceChange={setPdfPreference}
           onThemePreferenceChange={setThemePreference}
           onRestoreFeaturePreferences={restoreFeaturePreferences}
+          onRestorePdfPreferences={restorePdfPreferences}
           onOpen={() => inputRef.current?.click()}
           onSave={saveProjectFile}
           onEquation={openEquationEditor}
@@ -6243,7 +6390,9 @@ export default function App() {
           project={project}
           pages={pdfScenes}
           activeSceneId={project.activeSceneId}
-          thumbnailDataUrls={editorTheme === "dark" ? darkPdfPreviewUrls : undefined}
+          thumbnailDataUrls={editorTheme === "dark" && pdfPreferences.darkPdfPreview
+            ? darkPdfPreviewUrls
+            : undefined}
           onOpenPage={openPdfPageFromRail}
           onMovePage={reorderPdfPage}
           onShiftPage={shiftPdfPagePosition}
@@ -6655,7 +6804,15 @@ export default function App() {
           onInsert={insertGeoGonSvg}
         />
       ) : null}
-      {busyMessage && <div className="busy-overlay" role="status"><span className="spinner" />{busyMessage}</div>}
+      {busyMessage && (
+        <div className="busy-overlay" role="status">
+          <span className="spinner" />
+          <span>{busyMessage}</span>
+          {busyCanCancel ? (
+            <button type="button" onClick={() => busyCancelRef.current?.()}>Cancel</button>
+          ) : null}
+        </div>
+      )}
       {errorMessage && (
         <div className="error-toast" role="alert"><span>{errorMessage}</span><button type="button" onClick={() => setErrorMessage(null)}>Dismiss</button></div>
       )}

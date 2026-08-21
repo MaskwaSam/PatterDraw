@@ -2081,6 +2081,10 @@ test("customizes optional features from device-local settings", async ({ page })
   for (const label of ["Slides", "PDF", "Insert tools", "Math tools", "Library", "Size & Position", "Project Find", "Status bar"]) {
     await expect(dialog.getByRole("switch", { name: label, exact: true })).toBeChecked();
   }
+  const pdfPreferenceLabels = ["Dark PDF preview"] as const;
+  for (const label of pdfPreferenceLabels) {
+    await expect(dialog.getByRole("switch", { name: label, exact: true })).toBeChecked();
+  }
   for (const label of ["Pen-only mode", "Show grid", "Snap to objects", "Icon-only controls"]) {
     await expect(dialog.getByRole("switch", { name: label, exact: true })).not.toBeChecked();
   }
@@ -2091,6 +2095,9 @@ test("customizes optional features from device-local settings", async ({ page })
   expect(await page.evaluate(() => localStorage.getItem("patterdraw:experimental-math-tools:v1"))).toBe("enabled");
 
   for (const label of ["Slides", "PDF", "Insert tools", "Math tools", "Library", "Size & Position", "Project Find", "Status bar"]) {
+    await dialog.getByRole("switch", { name: label, exact: true }).uncheck();
+  }
+  for (const label of pdfPreferenceLabels) {
     await dialog.getByRole("switch", { name: label, exact: true }).uncheck();
   }
 
@@ -2139,6 +2146,13 @@ test("customizes optional features from device-local settings", async ({ page })
     projectFind: false,
     iconOnlyControls: false,
   });
+  expect(await page.evaluate(() => JSON.parse(
+    localStorage.getItem("patterdraw:pdf-preferences:v1") || "null",
+  ))).toEqual({
+    darkPdfPreview: false,
+    sharperActivePdfPage: true,
+    offerVisualPdfFallback: true,
+  });
 
   await page.reload();
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
@@ -2149,6 +2163,9 @@ test("customizes optional features from device-local settings", async ({ page })
   await page.setViewportSize({ width: 390, height: 844 });
   await settings.click();
   await expect(dialog).toBeVisible();
+  for (const label of pdfPreferenceLabels) {
+    await expect(dialog.getByRole("switch", { name: label, exact: true })).not.toBeChecked();
+  }
   const mobileDialogBounds = await dialog.boundingBox();
   expect(mobileDialogBounds).not.toBeNull();
   expect(mobileDialogBounds?.x || 0).toBeGreaterThanOrEqual(0);
@@ -2157,6 +2174,9 @@ test("customizes optional features from device-local settings", async ({ page })
   await dialog.getByRole("button", { name: "Restore defaults", exact: true }).click();
 
   await expect(dialog.getByRole("switch", { name: "Slides", exact: true })).toBeChecked();
+  for (const label of pdfPreferenceLabels) {
+    await expect(dialog.getByRole("switch", { name: label, exact: true })).toBeChecked();
+  }
   await expect(dialog.getByRole("switch", { name: "Experimental math tools", exact: true })).not.toBeChecked();
   await expect(page.getByRole("button", { name: "Slides", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Insert", exact: true })).toBeVisible();
@@ -2183,6 +2203,13 @@ test("customizes optional features from device-local settings", async ({ page })
     iconOnlyControls: false,
   });
   expect(await page.evaluate(() => localStorage.getItem("patterdraw:experimental-math-tools:v1"))).toBeNull();
+  expect(await page.evaluate(() => JSON.parse(
+    localStorage.getItem("patterdraw:pdf-preferences:v1") || "null",
+  ))).toEqual({
+    darkPdfPreview: true,
+    sharperActivePdfPage: true,
+    offerVisualPdfFallback: true,
+  });
 });
 
 test("optionally hides redundant icon labels without removing accessible names", async ({ page }) => {
@@ -2907,6 +2934,62 @@ test("rejects an oversized embedded PDF image instead of importing a blank page"
   await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
   await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
   expect(warnings.some((warning) => warning.includes("Image exceeded maximum allowed size"))).toBe(false);
+});
+
+test("detects PDF content when the browser reports a generic MIME type", async ({ page }) => {
+  const document = await PDFDocument.create();
+  document.addPage([300, 200]);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "generic-mime-upload",
+    mimeType: "application/octet-stream",
+    buffer: Buffer.from(await document.save()),
+  });
+
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
+test("rejects a spoofed PDF extension before rendering pages", async ({ page }) => {
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "not-a-document.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from("This is not a PDF.", "utf8"),
+  });
+
+  await expect(page.getByRole("alert")).toContainText("does not contain a valid PDF header");
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
+});
+
+test("cancels an in-progress PDF import without committing partial pages", async ({ page }) => {
+  const document = await PDFDocument.create();
+  for (let index = 0; index < 3; index += 1) document.addPage([612, 792]);
+  const workerRoute = "**/*pdf.worker.min*";
+  await page.route(workerRoute, async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    await route.continue();
+  });
+
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "cancelled-import.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await document.save()),
+  });
+  const cancel = page.locator(".busy-overlay").getByRole("button", {
+    name: "Cancel",
+    exact: true,
+  });
+  await expect(cancel).toBeVisible();
+  await cancel.click();
+
+  await expect(page.locator(".busy-overlay")).toHaveCount(0);
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await page.unrouteAll({ behavior: "wait" });
 });
 
 test("rejects an oversized inline PDF image instead of importing a blank page", async ({ page }) => {
