@@ -68,6 +68,8 @@ export interface PdfRasterEnvironment {
   hardwareConcurrency?: number;
 }
 
+export type PdfRasterDeviceTier = "standard" | "low" | "very-low";
+
 export const DEFAULT_PDF_RASTER_BUDGET: Readonly<PdfRasterBudget> = Object.freeze({
   maxEdge: MAX_PDF_RASTER_EDGE,
   maxPixelsPerPage: MAX_PDF_RASTER_PIXELS_PER_PAGE,
@@ -116,32 +118,51 @@ function positiveFinite(value: number | undefined): number | undefined {
   return Number.isFinite(value) && (value ?? 0) > 0 ? value : undefined;
 }
 
-export function getPdfRasterBudget(
+export function getPdfRasterDeviceTier(
   environment: PdfRasterEnvironment = {},
-): Readonly<PdfRasterBudget> {
+): PdfRasterDeviceTier {
   const deviceMemory = positiveFinite(environment.deviceMemory);
   const hardwareConcurrency = positiveFinite(environment.hardwareConcurrency);
 
   // Chromium reports deviceMemory in coarse buckets. Prefer it when available
   // because a low core count alone does not imply low available memory.
   if (deviceMemory !== undefined) {
-    if (deviceMemory <= 2) return VERY_LOW_MEMORY_PDF_RASTER_BUDGET;
-    if (deviceMemory <= 4) return LOW_MEMORY_PDF_RASTER_BUDGET;
-    return DEFAULT_PDF_RASTER_BUDGET;
+    if (deviceMemory <= 2) return "very-low";
+    if (deviceMemory <= 4) return "low";
+    return "standard";
   }
   if (hardwareConcurrency !== undefined && hardwareConcurrency <= 2) {
-    return VERY_LOW_MEMORY_PDF_RASTER_BUDGET;
+    return "very-low";
   }
   if (hardwareConcurrency !== undefined && hardwareConcurrency <= 4) {
-    return LOW_MEMORY_PDF_RASTER_BUDGET;
+    return "low";
   }
-  return DEFAULT_PDF_RASTER_BUDGET;
+  return "standard";
+}
+
+export function getPdfRasterBudget(
+  environment: PdfRasterEnvironment = {},
+): Readonly<PdfRasterBudget> {
+  switch (getPdfRasterDeviceTier(environment)) {
+    case "very-low": return VERY_LOW_MEMORY_PDF_RASTER_BUDGET;
+    case "low": return LOW_MEMORY_PDF_RASTER_BUDGET;
+    default: return DEFAULT_PDF_RASTER_BUDGET;
+  }
 }
 
 export function getBrowserPdfRasterBudget(): Readonly<PdfRasterBudget> {
   if (typeof navigator === "undefined") return DEFAULT_PDF_RASTER_BUDGET;
   const browserNavigator = navigator as Navigator & { deviceMemory?: number };
   return getPdfRasterBudget({
+    deviceMemory: browserNavigator.deviceMemory,
+    hardwareConcurrency: browserNavigator.hardwareConcurrency,
+  });
+}
+
+export function getBrowserPdfRasterDeviceTier(): PdfRasterDeviceTier {
+  if (typeof navigator === "undefined") return "standard";
+  const browserNavigator = navigator as Navigator & { deviceMemory?: number };
+  return getPdfRasterDeviceTier({
     deviceMemory: browserNavigator.deviceMemory,
     hardwareConcurrency: browserNavigator.hardwareConcurrency,
   });

@@ -81,6 +81,11 @@ const PDF_TOGGLES: ReadonlyArray<{
     label: "Dark PDF preview",
     description: "Dim PDF page backgrounds while using the dark theme",
   },
+  {
+    key: "sharperActivePdfPage",
+    label: "Sharper active PDF page",
+    description: "Refine only the open page using device-adaptive source quality",
+  },
 ];
 
 function SettingsToggle({ checked, description, label, onChange }: SettingsToggleProps) {

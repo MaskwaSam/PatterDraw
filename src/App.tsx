@@ -135,10 +135,22 @@ import type { RenderedMermaid } from "./lib/mermaid/safe-mermaid";
 import { canonicalizePdfBackground } from "./lib/pdf/background";
 import { retireDarkPdfDisplayFile } from "./lib/pdf/dark-display-file";
 import {
+  createActivePdfPagePreviewKey,
+  getActivePdfPagePreviewTarget,
+  renderLightPdfPagePreview,
+  shouldRenderLightPdfPageRefinement,
+  type PdfPagePreviewQuality,
+  type PdfPagePreviewTheme,
+} from "./lib/pdf/active-page-preview";
+import {
   fitPdfRasterDimensions,
   getPdfRasterDimensions,
   renderDarkPdfPreview,
 } from "./lib/pdf/dark-preview";
+import {
+  getBrowserPdfRasterDeviceTier,
+  type PdfRasterDeviceTier,
+} from "./lib/pdf/raster-limits";
 import {
   darkPdfThumbnailRenderSceneIds,
   pruneDarkPdfThumbnails,
@@ -1027,23 +1039,54 @@ export function hydrationChangesMatch(
     );
 }
 
-function darkPdfSceneCacheKey(
-  projectId: string | undefined,
+function pdfPagePreviewCacheKey(
+  project: ClassroomProject | null | undefined,
   scene: SerializedScene,
+  preview: {
+    deviceTier: PdfRasterDeviceTier;
+    height: number;
+    quality: PdfPagePreviewQuality;
+    theme: PdfPagePreviewTheme;
+    width: number;
+  },
 ): string | null {
   const workspace = scene.pdfPage;
-  if (!workspace?.backgroundElementId) return null;
+  const sourceSha256 = workspace
+    ? project?.pdfDocuments[workspace.documentId]?.sha256
+    : undefined;
+  if (!workspace?.backgroundElementId || !sourceSha256) return null;
   // PDF source bytes and background identity are immutable project metadata.
   // Keeping element-array traversal out of this key prevents every ordinary
   // annotation edit from rescanning all page contents.
-  return JSON.stringify([
-    projectId || "project",
-    scene.id,
-    workspace.documentId,
-    workspace.pageIndex,
-    workspace.rotation,
-    workspace.backgroundElementId,
-  ]);
+  return createActivePdfPagePreviewKey({
+    sourceSha256,
+    pageIndex: workspace.pageIndex,
+    effectiveRotation: workspace.rotation,
+    theme: preview.theme,
+    quality: preview.quality,
+    deviceTier: preview.deviceTier,
+    width: preview.width,
+    height: preview.height,
+    occurrenceId: scene.id,
+  });
+}
+
+function darkPdfThumbnailCacheKey(
+  project: ClassroomProject | null | undefined,
+  scene: SerializedScene,
+): string | null {
+  const workspace = scene.pdfPage;
+  if (!workspace) return null;
+  const dimensions = fitPdfRasterDimensions({
+    width: Math.max(1, Math.ceil(workspace.width)),
+    height: Math.max(1, Math.ceil(workspace.height)),
+  }, undefined, 256);
+  return pdfPagePreviewCacheKey(project, scene, {
+    ...dimensions,
+    deviceTier: getBrowserPdfRasterDeviceTier(),
+    quality: "thumbnail",
+    theme: "dark",
+  });
 }
 
 function serializedValuesEqual(left: unknown, right: unknown): boolean {
@@ -1367,7 +1410,7 @@ export default function App() {
   // captures the outgoing PDF into the incoming Board (or vice versa).
   const hydratedSceneIdRef = useRef<string | null>(null);
   // A per-mount ID prevents imported user files from colliding with the one
-  // transient full-page dark raster that is removed from saves and exports.
+  // transient active-page raster that is removed from saves and exports.
   const darkPdfActiveFileIdRef = useRef(
     `patterdraw-dark-pdf-${createLocalId()}` as FileId,
   );
@@ -1385,10 +1428,15 @@ export default function App() {
     if (!api) return false;
     return retireDarkPdfDisplayFile(api, darkPdfActiveFileIdRef.current);
   }, [api]);
-  const getDarkPdfDisplayFile = useCallback(async (
+  const getActivePdfDisplayFile = useCallback(async (
     scene: SerializedScene,
+    preview: {
+      darkTreatment: boolean;
+      sharpen: boolean;
+      theme: PdfPagePreviewTheme;
+    },
     signal?: AbortSignal,
-  ): Promise<BinaryFileData> => {
+  ): Promise<BinaryFileData | null> => {
     const workspace = scene.pdfPage;
     const background = workspace
       ? scene.elements.find((element) => element.id === workspace.backgroundElementId)
@@ -1402,10 +1450,30 @@ export default function App() {
     const immutableSha256 = workspace
       ? projectRef.current?.pdfDocuments[workspace.documentId]?.sha256
       : undefined;
-    if (!workspace || !lightFileId || !lightDataUrl || !sourceBytes) {
+    if (!workspace || !lightFileId || !lightDataUrl || !sourceBytes || !immutableSha256) {
       return Promise.reject(new Error("The original PDF page is unavailable."));
     }
-    const cacheKey = darkPdfSceneCacheKey(projectRef.current?.id, scene);
+    const canonicalDimensions = await getPdfRasterDimensions(lightDataUrl);
+    const sharpTarget = getActivePdfPagePreviewTarget({
+      displayWidth: workspace.width,
+      displayHeight: workspace.height,
+      effectiveRotation: workspace.rotation,
+    });
+    const dimensions = preview.sharpen
+      ? { width: sharpTarget.width, height: sharpTarget.height }
+      : fitPdfRasterDimensions(canonicalDimensions);
+    if (
+      !preview.darkTreatment
+      && (!preview.sharpen
+        || !shouldRenderLightPdfPageRefinement(canonicalDimensions, dimensions))
+    ) return null;
+
+    const cacheKey = pdfPagePreviewCacheKey(projectRef.current, scene, {
+      ...dimensions,
+      deviceTier: sharpTarget.deviceTier,
+      quality: preview.sharpen ? sharpTarget.quality : "canonical",
+      theme: preview.theme,
+    });
     if (!cacheKey) throw new Error("The original PDF page is unavailable.");
     const cached = darkPdfPreviewCacheRef.current.get(cacheKey);
     if (cached) return cached;
@@ -1413,30 +1481,36 @@ export default function App() {
     // Retain at most the active full-resolution raster. Rail previews have a
     // separate bounded cache, while scene navigation replaces this entry.
     darkPdfPreviewCacheRef.current.clear();
-    const sourceDimensions = await getPdfRasterDimensions(lightDataUrl);
-    const { width, height } = fitPdfRasterDimensions(sourceDimensions);
-    const dataURL = await renderDarkPdfPreview({
-      bytes: sourceBytes,
-      immutableSha256,
-      pageIndex: workspace.pageIndex,
-      width,
-      height,
-      signal,
-    });
+    const dataURL = preview.darkTreatment
+      ? await renderDarkPdfPreview({
+          bytes: sourceBytes,
+          immutableSha256,
+          pageIndex: workspace.pageIndex,
+          ...dimensions,
+          signal,
+        })
+      : (await renderLightPdfPagePreview({
+          bytes: sourceBytes,
+          immutableSha256,
+          pageIndex: workspace.pageIndex,
+          effectiveRotation: workspace.rotation,
+          ...dimensions,
+          signal,
+        })).dataURL;
     const file: BinaryFileData = {
       id: darkPdfActiveFileIdRef.current,
       // Excalidraw applies an additional image-preservation filter to PNGs
-      // before its dark canvas filter. This display-only raster already
-      // compensates its picture regions, so opt out via the SVG MIME path;
-      // the browser still decodes the PNG data URL itself.
-      mimeType: "image/svg+xml",
+      // before its dark canvas filter. A custom dark raster already
+      // compensates its picture regions, so opt out via the SVG MIME path.
+      // Light refinements keep the normal PNG path and native theme behavior.
+      mimeType: preview.darkTreatment ? "image/svg+xml" : "image/png",
       dataURL,
       created: Date.now(),
     };
     if (!signal?.aborted) darkPdfPreviewCacheRef.current.set(cacheKey, file);
     return file;
   }, []);
-  const getDarkPdfThumbnailUrl = useCallback((
+  const getDarkPdfThumbnailUrl = useCallback(async (
     scene: SerializedScene,
     signal?: AbortSignal,
   ): Promise<DataURL> => {
@@ -1445,47 +1519,44 @@ export default function App() {
       ? scene.elements.find((element) => element.id === workspace.backgroundElementId)
       : undefined;
     const lightFileId = typeof background?.fileId === "string" ? background.fileId : null;
-    const lightFile = lightFileId
-      ? scene.files[lightFileId] as Record<string, unknown> | undefined
-      : undefined;
-    const lightDataUrl = typeof lightFile?.dataURL === "string" ? lightFile.dataURL : null;
     const sourceBytes = workspace ? pdfBytesRef.current[workspace.documentId] : undefined;
     const immutableSha256 = workspace
       ? projectRef.current?.pdfDocuments[workspace.documentId]?.sha256
       : undefined;
-    if (!workspace || !lightFileId || !lightDataUrl || !sourceBytes) {
-      return Promise.reject(new Error("The original PDF page is unavailable."));
+    if (!workspace || !lightFileId || !sourceBytes || !immutableSha256) {
+      throw new Error("The original PDF page is unavailable.");
     }
-    const cacheKey = darkPdfSceneCacheKey(projectRef.current?.id, scene);
-    if (!cacheKey) return Promise.reject(new Error("The original PDF page is unavailable."));
+    const cacheKey = darkPdfThumbnailCacheKey(projectRef.current, scene);
+    if (!cacheKey) throw new Error("The original PDF page is unavailable.");
     const cached = darkPdfThumbnailCacheRef.current.get(cacheKey);
     if (cached) {
       // Refresh insertion order so recently revisited pages survive the cap.
       darkPdfThumbnailCacheRef.current.delete(cacheKey);
       darkPdfThumbnailCacheRef.current.set(cacheKey, cached);
-      return Promise.resolve(cached.dataURL);
+      return cached.dataURL;
     }
 
-    return getPdfRasterDimensions(lightDataUrl).then(async (sourceDimensions) => {
-      const { width, height } = fitPdfRasterDimensions(sourceDimensions, undefined, 256);
-      const dataURL = await renderDarkPdfPreview({
-        bytes: sourceBytes,
-        immutableSha256,
-        pageIndex: workspace.pageIndex,
-        width,
-        height,
-        signal,
-      });
-      if (!signal?.aborted) {
-        storeDarkPdfThumbnail(
-          darkPdfThumbnailCacheRef.current,
-          cacheKey,
-          { dataURL, sceneId: scene.id },
-          MAX_DARK_PDF_THUMBNAILS,
-        );
-      }
-      return dataURL;
+    const { width, height } = fitPdfRasterDimensions({
+      width: Math.max(1, Math.ceil(workspace.width)),
+      height: Math.max(1, Math.ceil(workspace.height)),
+    }, undefined, 256);
+    const dataURL = await renderDarkPdfPreview({
+      bytes: sourceBytes,
+      immutableSha256,
+      pageIndex: workspace.pageIndex,
+      width,
+      height,
+      signal,
     });
+    if (!signal?.aborted) {
+      storeDarkPdfThumbnail(
+        darkPdfThumbnailCacheRef.current,
+        cacheKey,
+        { dataURL, sceneId: scene.id },
+        MAX_DARK_PDF_THUMBNAILS,
+      );
+    }
+    return dataURL;
   }, []);
   // Excalidraw can emit its initial blank scene after the API is ready but
   // before the asynchronously loaded classroom project reaches the editor.
@@ -2818,7 +2889,6 @@ export default function App() {
       : elements;
     const persistentElements = detachElementsFromSlideFrames(persistentBackgroundElements);
     const displayFileId = persistedScene
-      && editorThemeRef.current === "dark"
       && !suspendDarkPdfDisplayRef.current
       ? darkPdfDisplayFileIdsRef.current.get(sceneId)
       : undefined;
@@ -2858,7 +2928,6 @@ export default function App() {
           ? currentSceneRef.current
           : null;
         const liveDisplayFileId = liveScene
-          && editorThemeRef.current === "dark"
           && !suspendDarkPdfDisplayRef.current
           ? darkPdfDisplayFileIdsRef.current.get(sceneId)
           : undefined;
@@ -3583,7 +3652,7 @@ export default function App() {
     if (!api || !project) return;
     setExportOpen(false);
     setBusyMessage("Preparing image export…");
-    let suspendedDarkPdf = false;
+    let suspendedPdfPreview = false;
     const showDialog = () => {
       nativeImageExportOpenRef.current = true;
       restoreExportOptionsFocusRef.current = true;
@@ -3600,15 +3669,15 @@ export default function App() {
       await waitForSceneHydrationToSettle(() => switchingSceneRef.current);
       if (api.getSceneElements().length === 0) return;
       const scene = currentSceneRef.current;
-      if (scene?.pdfPage && editorThemeRef.current === "dark") {
-        suspendedDarkPdf = true;
+      if (scene?.pdfPage) {
+        suspendedPdfPreview = true;
         suspendDarkPdfDisplayRef.current = true;
         darkPdfPreviewGenerationRef.current += 1;
         for (const controller of darkPdfRenderControllersRef.current) controller.abort();
         darkPdfRenderControllersRef.current.clear();
         // Retire the full-page display raster while the background still
         // references it so Excalidraw invalidates the decoded-image cache. The
-        // native export dialog deliberately renders the canonical light page.
+        // native export dialog deliberately renders the canonical source page.
         retireActiveDarkPdfDisplayFile();
         darkPdfPreviewCacheRef.current.clear();
         darkPdfDisplayFileIdsRef.current.clear();
@@ -3627,7 +3696,7 @@ export default function App() {
       }
       showDialog();
     } catch (error) {
-      if (suspendedDarkPdf && !nativeImageExportOpenRef.current) {
+      if (suspendedPdfPreview && !nativeImageExportOpenRef.current) {
         suspendDarkPdfDisplayRef.current = false;
         setDarkPdfDisplayRevision((revision) => revision + 1);
       }
@@ -4790,37 +4859,43 @@ export default function App() {
     const generation = ++darkPdfPreviewGenerationRef.current;
     const hydrationGeneration = sceneHydrationGenerationRef.current;
     const liveElements = api.getSceneElements();
-    if (
-      editorTheme !== "dark"
-      || !pdfPreferences.darkPdfPreview
-      || suspendDarkPdfDisplayRef.current
-    ) {
-      retireActiveDarkPdfDisplayFile();
-      darkPdfDisplayFileIdsRef.current.clear();
+    const darkTreatment = editorTheme === "dark" && pdfPreferences.darkPdfPreview;
+    const sharpen = pdfPreferences.sharperActivePdfPage;
+    // Always return to the immutable canonical background before starting a
+    // replacement render. This prevents the previous page/theme/quality from
+    // remaining visible while its successor is still in flight.
+    retireActiveDarkPdfDisplayFile();
+    darkPdfDisplayFileIdsRef.current.clear();
+    const lightElements = canonicalizePdfBackground(
+      scene,
+      liveElements as unknown as readonly Record<string, unknown>[],
+    ) as unknown as readonly ExcalidrawElement[];
+    if (lightElements !== liveElements) {
+      api.updateScene({
+        elements: lightElements,
+        captureUpdate: CaptureUpdateAction.NEVER,
+      });
+    }
+    if ((!darkTreatment && !sharpen) || suspendDarkPdfDisplayRef.current) {
       darkPdfPreviewCacheRef.current.clear();
-      const lightElements = canonicalizePdfBackground(
-        scene,
-        liveElements as unknown as readonly Record<string, unknown>[],
-      ) as unknown as readonly ExcalidrawElement[];
-      if (lightElements !== liveElements) {
-        api.updateScene({
-          elements: lightElements,
-          captureUpdate: CaptureUpdateAction.NEVER,
-        });
-      }
       return;
     }
 
     let cancelled = false;
     const controller = new AbortController();
     darkPdfRenderControllersRef.current.add(controller);
-    void getDarkPdfDisplayFile(scene, controller.signal).then((file) => {
+    void getActivePdfDisplayFile(scene, {
+      darkTreatment,
+      sharpen,
+      theme: editorTheme,
+    }, controller.signal).then((file) => {
       if (
         cancelled
         || generation !== darkPdfPreviewGenerationRef.current
         || hydrationGeneration !== sceneHydrationGenerationRef.current
-        || editorThemeRef.current !== "dark"
-        || !pdfPreferencesRef.current.darkPdfPreview
+        || editorThemeRef.current !== editorTheme
+        || pdfPreferencesRef.current.darkPdfPreview !== pdfPreferences.darkPdfPreview
+        || pdfPreferencesRef.current.sharperActivePdfPage !== sharpen
         || suspendDarkPdfDisplayRef.current
         || nativeImageExportOpenRef.current
         || !darkPdfDisplaySceneIsCurrent(
@@ -4830,6 +4905,7 @@ export default function App() {
           switchingSceneRef.current,
         )
       ) return;
+      if (!file) return;
       darkPdfPreviewErrorsRef.current.delete(scene.id);
       darkPdfDisplayFileIdsRef.current.clear();
       darkPdfDisplayFileIdsRef.current.set(scene.id, file.id);
@@ -4864,7 +4940,7 @@ export default function App() {
           hydratedSceneIdRef.current,
           switchingSceneRef.current,
         )
-        || darkPdfPreviewErrorsRef.current.has(scene.id)
+        || (darkTreatment && darkPdfPreviewErrorsRef.current.has(scene.id))
       ) return;
       darkPdfDisplayFileIdsRef.current.clear();
       retireActiveDarkPdfDisplayFile();
@@ -4879,8 +4955,10 @@ export default function App() {
           captureUpdate: CaptureUpdateAction.NEVER,
         });
       }
-      darkPdfPreviewErrorsRef.current.add(scene.id);
-      api.setToast({ message: "This PDF page could not be shown in dark mode." });
+      if (darkTreatment) {
+        darkPdfPreviewErrorsRef.current.add(scene.id);
+        api.setToast({ message: "This PDF page could not be shown in dark mode." });
+      }
     }).finally(() => {
       darkPdfRenderControllersRef.current.delete(controller);
     });
@@ -4894,11 +4972,15 @@ export default function App() {
     currentScene?.id,
     currentScene?.pdfPage?.backgroundElementId,
     currentScene?.pdfPage?.documentId,
+    currentScene?.pdfPage?.height,
     currentScene?.pdfPage?.pageIndex,
+    currentScene?.pdfPage?.rotation,
+    currentScene?.pdfPage?.width,
     darkPdfDisplayRevision,
     editorTheme,
-    getDarkPdfDisplayFile,
+    getActivePdfDisplayFile,
     pdfPreferences.darkPdfPreview,
+    pdfPreferences.sharperActivePdfPage,
     projectHydrationRevision,
     retireActiveDarkPdfDisplayFile,
   ]);
@@ -4925,8 +5007,8 @@ export default function App() {
     return stablePdfScenes.map((scene) => project.scenes[scene.id] || scene);
   }, [project?.scenes, stablePdfScenes]);
   const pdfThumbnailIdentity = useMemo(() => JSON.stringify(
-    stablePdfScenes.map((scene) => darkPdfSceneCacheKey(project?.id, scene)),
-  ), [stablePdfScenes, project?.id]);
+    stablePdfScenes.map((scene) => darkPdfThumbnailCacheKey(project, scene)),
+  ), [stablePdfScenes, project?.pdfDocuments]);
   const darkPdfThumbnailSceneIds = useMemo(() => darkPdfThumbnailRenderSceneIds(
     stablePdfScenes.map((scene) => scene.id),
     project?.activeSceneId,
@@ -4937,7 +5019,7 @@ export default function App() {
     const validSceneIds = new Set(stablePdfScenes.map((scene) => scene.id));
     const validCacheKeys = new Set(
       stablePdfScenes
-        .map((scene) => darkPdfSceneCacheKey(project?.id, scene))
+        .map((scene) => darkPdfThumbnailCacheKey(project, scene))
         .filter((key): key is string => !!key),
     );
     pruneDarkPdfThumbnails(darkPdfThumbnailCacheRef.current, validCacheKeys);

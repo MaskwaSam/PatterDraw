@@ -10,6 +10,7 @@ import {
   getPdfImportRasterScale,
   getPdfExportRasterBudget,
   getPdfRasterBudget,
+  getPdfRasterDeviceTier,
   pdfRasterCanvasToPngBytes,
   pdfRasterCanvasToPngDataUrl,
   releasePdfRasterCanvas,
@@ -71,6 +72,18 @@ describe("PDF import raster limits", () => {
       .toBeLessThan(getPdfImportRasterScale(pages, 2, normal));
     expect(getPdfImportRasterScale(pages, 2, veryLow))
       .toBeLessThan(getPdfImportRasterScale(pages, 2, low));
+  });
+
+  it("classifies the same discrete device tiers used by the raster budgets", () => {
+    expect(getPdfRasterDeviceTier({ deviceMemory: 8, hardwareConcurrency: 2 }))
+      .toBe("standard");
+    expect(getPdfRasterDeviceTier({ deviceMemory: 4, hardwareConcurrency: 8 }))
+      .toBe("low");
+    expect(getPdfRasterDeviceTier({ deviceMemory: 2, hardwareConcurrency: 8 }))
+      .toBe("very-low");
+    expect(getPdfRasterDeviceTier({ hardwareConcurrency: 4 })).toBe("low");
+    expect(getPdfRasterDeviceTier({ hardwareConcurrency: 2 })).toBe("very-low");
+    expect(getPdfRasterDeviceTier({})).toBe("standard");
   });
 
   it("shares the document raster budget across multi-page exports", () => {

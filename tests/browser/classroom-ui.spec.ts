@@ -2205,7 +2205,7 @@ test("customizes optional features from device-local settings", async ({ page })
   for (const label of ["Slides", "PDF", "Insert tools", "Math tools", "Library", "Size & Position", "Project Find", "Status bar"]) {
     await expect(dialog.getByRole("switch", { name: label, exact: true })).toBeChecked();
   }
-  const pdfPreferenceLabels = ["Dark PDF preview"] as const;
+  const pdfPreferenceLabels = ["Dark PDF preview", "Sharper active PDF page"] as const;
   for (const label of pdfPreferenceLabels) {
     await expect(dialog.getByRole("switch", { name: label, exact: true })).toBeChecked();
   }
@@ -2274,7 +2274,7 @@ test("customizes optional features from device-local settings", async ({ page })
     localStorage.getItem("patterdraw:pdf-preferences:v1") || "null",
   ))).toEqual({
     darkPdfPreview: false,
-    sharperActivePdfPage: true,
+    sharperActivePdfPage: false,
     offerVisualPdfFallback: true,
   });
 
@@ -2978,6 +2978,140 @@ test("darkens PDF content while preserving embedded picture colours and canonica
   expect(browserErrors).toEqual([]);
 });
 
+test("refines only the active PDF page without persisting the sharper raster", async ({ page }) => {
+  test.setTimeout(120_000);
+  await openTestPdf(page, 2);
+
+  type SavedPdfProject = {
+    activeSceneId: string;
+    pdfPageOrder: string[];
+    scenes: Record<string, {
+      elements: Array<{ fileId?: string; id: string }>;
+      files: Record<string, { dataURL?: string }>;
+      pdfPage?: { backgroundElementId: string };
+    }>;
+  };
+  const readSaved = () => keyvalValue<SavedPdfProject>(
+    page,
+    "patterdraw:autosave:project:v1",
+  );
+  await expect.poll(readSaved, { timeout: 30_000 }).not.toBeNull();
+  const saved = await readSaved();
+  if (!saved) throw new Error("The PDF autosave was not created.");
+  const canonicalBackgrounds = Object.fromEntries(saved.pdfPageOrder.map((sceneId) => {
+    const scene = saved.scenes[sceneId];
+    const backgroundId = scene.pdfPage?.backgroundElementId;
+    const fileId = scene.elements.find((element) => element.id === backgroundId)?.fileId;
+    if (!backgroundId || !fileId) throw new Error("A canonical PDF background is missing.");
+    return [sceneId, { backgroundId, fileId, dataURL: scene.files[fileId]?.dataURL || "" }];
+  }));
+  const firstCanonical = canonicalBackgrounds[saved.pdfPageOrder[0]];
+  const canonicalDimensions = await page.evaluate((dataURL) => new Promise<{
+    height: number;
+    width: number;
+  }>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve({ height: image.naturalHeight, width: image.naturalWidth });
+    image.onerror = () => reject(new Error("The canonical PDF raster could not be decoded."));
+    image.src = dataURL;
+  }), firstCanonical.dataURL);
+  const readLiveDisplay = (backgroundId: string) => page.evaluate(({ backgroundId: id }) => {
+    const app = (window as unknown as {
+      h?: {
+        app?: {
+          files?: Record<string, { dataURL?: string }>;
+          imageCache?: Map<string, { image?: HTMLImageElement }>;
+          scene?: { getNonDeletedElement?: (elementId: string) => { fileId?: string } | null };
+        };
+      };
+    }).h?.app;
+    const backgroundFileId = app?.scene?.getNonDeletedElement?.(id)?.fileId || null;
+    const previewFileIds = Object.keys(app?.files || {})
+      .filter((fileId) => fileId.startsWith("patterdraw-dark-pdf"));
+    const image = backgroundFileId ? app?.imageCache?.get(backgroundFileId)?.image : undefined;
+    return {
+      backgroundFileId,
+      previewFileIds,
+      height: image?.naturalHeight || image?.height || null,
+      width: image?.naturalWidth || image?.width || null,
+    };
+  }, { backgroundId });
+
+  await expect.poll(async () => readLiveDisplay(firstCanonical.backgroundId), {
+    timeout: 30_000,
+  }).toMatchObject({
+    backgroundFileId: expect.stringMatching(/^patterdraw-dark-pdf-/),
+    previewFileIds: [expect.stringMatching(/^patterdraw-dark-pdf-/)],
+  });
+  await expect.poll(async () => {
+    const refinement = await readLiveDisplay(firstCanonical.backgroundId);
+    return (refinement.width || 0) > canonicalDimensions.width
+      && (refinement.height || 0) > canonicalDimensions.height;
+  }, { timeout: 30_000 }).toBe(true);
+  const firstRefinement = await readLiveDisplay(firstCanonical.backgroundId);
+  expect(firstRefinement.width || 0).toBeGreaterThan(canonicalDimensions.width);
+  expect(firstRefinement.height || 0).toBeGreaterThan(canonicalDimensions.height);
+
+  const settings = page.getByRole("button", { name: "Settings", exact: true });
+  await settings.click();
+  const sharper = page.getByRole("dialog", { name: "Settings", exact: true })
+    .getByRole("switch", { name: "Sharper active PDF page", exact: true });
+  await expect(sharper).toBeChecked();
+  await sharper.uncheck();
+  await page.keyboard.press("Escape");
+  await expect.poll(async () => (await readLiveDisplay(firstCanonical.backgroundId)).backgroundFileId)
+    .toBe(firstCanonical.fileId);
+  expect(await page.evaluate(() => JSON.parse(
+    localStorage.getItem("patterdraw:pdf-preferences:v1") || "null",
+  )?.sharperActivePdfPage)).toBe(false);
+
+  await settings.click();
+  await sharper.check();
+  await page.keyboard.press("Escape");
+  await expect.poll(async () => (await readLiveDisplay(firstCanonical.backgroundId)).backgroundFileId, {
+    timeout: 30_000,
+  }).toMatch(/^patterdraw-dark-pdf-/);
+
+  const secondSceneId = saved.pdfPageOrder[1];
+  const secondCanonical = canonicalBackgrounds[secondSceneId];
+  await page.getByRole("button", { name: /Open output page 2:/ }).click();
+  await expect.poll(async () => readLiveDisplay(secondCanonical.backgroundId), {
+    timeout: 30_000,
+  }).toMatchObject({
+    backgroundFileId: expect.stringMatching(/^patterdraw-dark-pdf-/),
+    previewFileIds: [expect.stringMatching(/^patterdraw-dark-pdf-/)],
+  });
+
+  await expect.poll(async () => {
+    const current = await readSaved();
+    if (!current) return null;
+    return current.pdfPageOrder.map((sceneId) => {
+      const scene = current.scenes[sceneId];
+      const backgroundId = scene.pdfPage?.backgroundElementId;
+      const fileId = scene.elements.find((element) => element.id === backgroundId)?.fileId;
+      return {
+        backgroundIsCanonical: fileId === canonicalBackgrounds[sceneId].fileId,
+        hasTransientFile: Object.keys(scene.files).some((id) => id.startsWith("patterdraw-dark-pdf")),
+      };
+    });
+  }, { timeout: 15_000 }).toEqual([
+    { backgroundIsCanonical: true, hasTransientFile: false },
+    { backgroundIsCanonical: true, hasTransientFile: false },
+  ]);
+
+  const downloadEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  const archive = unzipSync(new Uint8Array(await downloadBytes(await downloadEvent)));
+  const manifest = JSON.parse(strFromU8(archive["project.json"])) as SavedPdfProject;
+  for (const scene of Object.values(manifest.scenes)) {
+    expect(Object.keys(scene.files).some((id) => id.startsWith("patterdraw-dark-pdf"))).toBe(false);
+    const backgroundId = scene.pdfPage?.backgroundElementId;
+    if (!backgroundId) continue;
+    expect(scene.elements.find((element) => element.id === backgroundId)?.fileId)
+      .not.toMatch(/^patterdraw-dark-pdf-/);
+  }
+});
+
 test("keeps native image export light when a dark PDF render is still pending", async ({ page }) => {
   test.setTimeout(60_000);
   await useDownloadBasedImageExport(page);
@@ -3022,18 +3156,20 @@ test("keeps native image export light when a dark PDF render is still pending", 
     const app = (window as unknown as {
       h?: {
         app?: {
-          files?: Record<string, unknown>;
+          files?: Record<string, { dataURL?: string }>;
           scene?: { getNonDeletedElement?: (id: string) => { fileId?: string } | null };
         };
       };
     }).h?.app;
+    const previewFiles = Object.entries(app?.files || {})
+      .filter(([id]) => id.startsWith("patterdraw-dark-pdf"));
     return {
       backgroundIsLight: app?.scene?.getNonDeletedElement?.(backgroundId)?.fileId === lightFileId,
-      darkFileCount: Object.keys(app?.files || {})
-        .filter((id) => id.startsWith("patterdraw-dark-pdf")).length,
+      largePreviewFileCount: previewFiles
+        .filter(([, file]) => (file.dataURL?.length || 0) >= 1_024).length,
     };
   }, { backgroundId: backgroundId || "", lightFileId: lightFileId || "" });
-  expect(liveState).toEqual({ backgroundIsLight: true, darkFileCount: 0 });
+  expect(liveState).toEqual({ backgroundIsLight: true, largePreviewFileCount: 0 });
 
   await page.unroute(workerRoute);
   await nativeDialog.locator(".Modal__content").focus();
