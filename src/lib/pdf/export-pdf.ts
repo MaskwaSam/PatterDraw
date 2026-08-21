@@ -42,6 +42,7 @@ import {
   type PdfOperationPhase,
   type PdfOperationProgressCallback,
 } from "./operation-progress";
+import { isPatterDrawPdfAnnotation } from "./annotations";
 
 export type PdfExportMode = "expand" | "openboard-fit";
 
@@ -199,8 +200,10 @@ function pdfAnnotationElements(
   if (!scene.pdfPage) return [];
   return asElements(scene).filter(
     (element): element is NonDeletedExcalidrawElement =>
-      !element.isDeleted &&
-      element.id !== scene.pdfPage?.backgroundElementId &&
+      isPatterDrawPdfAnnotation(scene, element) &&
+      // Frames are counted and clearable user annotations, but are wrapper
+      // navigation boundaries rather than visible PDF ink. Blocked embeds are
+      // rejected at project-safety boundaries and remain defense-in-depth here.
       element.type !== "frame" &&
       !isBlockedEmbeddedElementType(element.type),
   );

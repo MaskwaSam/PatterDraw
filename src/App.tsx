@@ -34,6 +34,10 @@ import {
   type PdfInsertOperationProgress,
   type PdfInsertSubmission,
 } from "./components/PdfInsertDialog";
+import {
+  ClearPdfAnnotationsDialog,
+  type PdfAnnotationScopeSummaries,
+} from "./components/ClearPdfAnnotationsDialog";
 import { PresentationOverlay } from "./components/PresentationOverlay";
 import { StrokeWidthExtensions } from "./components/StrokeWidthExtensions";
 import { MathToolsMenuExtension } from "./components/MathToolsMenuExtension";
@@ -153,6 +157,14 @@ import {
   assertProjectCanAcceptPdfPages,
   remainingProjectSceneCapacity,
 } from "./lib/pdf/capacity";
+import {
+  clearPdfAnnotations,
+  getPdfAnnotationScopeSummary,
+  undoPdfAnnotationClear,
+  type PdfAnnotationClearScope,
+  type PdfAnnotationClearTransaction,
+} from "./lib/pdf/annotations";
+import { assertPdfAdditionPreservesAnnotationUndo } from "./lib/pdf/annotation-undo-reservation";
 import type { PdfExportMode } from "./lib/pdf/export-pdf";
 import type { PdfOperationProgress } from "./lib/pdf/operation-progress";
 import {
@@ -197,6 +209,7 @@ import {
 import {
   assertProjectCanAcceptAdditionalBytes,
   assertProjectFitsContentBudget,
+  getProjectContentSize,
   getJsonUtf8ByteLength,
 } from "./lib/project-budget";
 import {
@@ -319,6 +332,7 @@ export type PendingScenePersistence = {
   elements: readonly ExcalidrawElement[];
   appState: AppState;
   files: BinaryFiles;
+  preserveDeleted?: boolean;
 };
 
 /**
@@ -336,6 +350,18 @@ export function preservePendingScenePersistence(
   if (!pending) return { pending: buffered, buffered: null };
   if (pending.sceneId === buffered.sceneId) return { pending: buffered, buffered: null };
   return { pending, buffered };
+}
+
+export function preserveDeletedForPendingPdfUndo(
+  pending: PendingScenePersistence | null,
+  affectedPageIds: readonly string[] | undefined,
+): PendingScenePersistence | null {
+  if (
+    !pending
+    || pending.preserveDeleted === true
+    || !affectedPageIds?.includes(pending.sceneId)
+  ) return pending;
+  return { ...pending, preserveDeleted: true };
 }
 
 type SceneHydrationBaseline = {
@@ -356,6 +382,55 @@ type PendingPdfInsert = {
   selectedPageId: string;
   hydrationGeneration: number;
 };
+type PendingPdfAnnotationClear = {
+  projectId: string;
+  sceneId: string;
+  summaries: PdfAnnotationScopeSummaries;
+  sourceName?: string;
+};
+type PendingPdfAnnotationClearUndo = {
+  token: number;
+  transaction: PdfAnnotationClearTransaction;
+};
+type PdfAnnotationClearToast = {
+  token: number;
+  annotationCount: number;
+  affectedPageCount: number;
+  expiresAt: number;
+};
+
+function pdfAnnotationScopeSummaries(
+  project: ClassroomProject,
+  sceneId: string,
+): PdfAnnotationScopeSummaries {
+  return {
+    page: getPdfAnnotationScopeSummary(project, sceneId, "page"),
+    "source-document": getPdfAnnotationScopeSummary(project, sceneId, "source-document"),
+    "all-pdf-pages": getPdfAnnotationScopeSummary(project, sceneId, "all-pdf-pages"),
+  };
+}
+
+export function pdfAnnotationSummaryMatches(
+  displayed: PdfAnnotationScopeSummaries[PdfAnnotationClearScope],
+  fresh: PdfAnnotationScopeSummaries[PdfAnnotationClearScope],
+): boolean {
+  return displayed.annotationCount === fresh.annotationCount
+    && displayed.affectedPageCount === fresh.affectedPageCount
+    && displayed.sourceIdentity === fresh.sourceIdentity
+    && displayed.affectedPageIds.length === fresh.affectedPageIds.length
+    && displayed.affectedPageIds.every((sceneId, index) => sceneId === fresh.affectedPageIds[index]);
+}
+
+export function pdfAnnotationUndoFitsContentBudget(
+  project: ClassroomProject,
+  pdfData: Record<PdfDocumentId, Uint8Array>,
+  maxBytes = MAX_PROJECT_BYTES,
+): boolean {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new Error("The project size limit is invalid.");
+  }
+  return getProjectContentSize(project, pdfData).totalBytes <= maxBytes;
+}
 export type SceneOperationFence = {
   projectId: string;
   sceneId: string;
@@ -779,11 +854,43 @@ function mermaidDataForElement(element: ExcalidrawElement | undefined): {
     : null;
 }
 
+export function preserveDeletedSceneRecords(
+  elements: readonly ExcalidrawElement[],
+  files: BinaryFiles,
+  serializedElements: readonly Record<string, unknown>[],
+  serializedFiles: Record<string, Record<string, unknown>>,
+): {
+  elements: readonly Record<string, unknown>[];
+  files: Record<string, Record<string, unknown>>;
+} {
+  const serializedById = new Map(serializedElements.map((element) => [element.id, element]));
+  const orderedElements: Record<string, unknown>[] = [];
+  for (const element of elements) {
+    if (element.isDeleted === true) {
+      orderedElements.push(element as unknown as Record<string, unknown>);
+      continue;
+    }
+    const serialized = serializedById.get(element.id);
+    if (!serialized) continue;
+    orderedElements.push(serialized);
+    serializedById.delete(element.id);
+  }
+  orderedElements.push(...serializedById.values());
+  const preservedFiles = { ...serializedFiles };
+  for (const element of elements) {
+    if (element.isDeleted !== true || element.type !== "image" || !element.fileId) continue;
+    const file = files[element.fileId];
+    if (file) preservedFiles[element.fileId] = file as unknown as Record<string, unknown>;
+  }
+  return { elements: orderedElements, files: preservedFiles };
+}
+
 function serializedSceneFromChange(
   previous: SerializedScene,
   elements: readonly ExcalidrawElement[],
   appState: AppState,
   files: BinaryFiles,
+  preserveDeleted = false,
 ): SerializedScene {
   const exported = JSON.parse(serializeAsJSON(elements, appState, files, "local")) as {
     elements: readonly Record<string, unknown>[];
@@ -796,6 +903,19 @@ function serializedSceneFromChange(
   delete exported.appState.theme;
   delete exported.appState.gridModeEnabled;
   canonicalizePersistedWrapperTool(exported.appState);
+  if (preserveDeleted) {
+    // Excalidraw's local serializer intentionally removes tombstones and
+    // files referenced only by them. Annotation clear/undo needs those exact
+    // records for collision checks and must not orphan tombstone-owned files.
+    const preserved = preserveDeletedSceneRecords(
+      elements,
+      files,
+      exported.elements,
+      exported.files || {},
+    );
+    exported.elements = preserved.elements;
+    exported.files = preserved.files;
+  }
   return sanitizeScene({
     ...previous,
     elements: exported.elements,
@@ -967,6 +1087,7 @@ function projectWithPendingScene(
     namedElements,
     pending.appState,
     pending.files,
+    pending.preserveDeleted === true,
   );
   if (
     serializedValuesEqual(scene, previousScene)
@@ -1022,6 +1143,8 @@ export default function App() {
   const [pdfInsertCancelling, setPdfInsertCancelling] = useState(false);
   const [pdfInsertProgress, setPdfInsertProgress] = useState<PdfInsertOperationProgress | null>(null);
   const pdfInsertOperationGenerationRef = useRef<number | null>(null);
+  const [pendingPdfAnnotationClear, setPendingPdfAnnotationClear] = useState<PendingPdfAnnotationClear | null>(null);
+  const [pdfAnnotationClearToast, setPdfAnnotationClearToast] = useState<PdfAnnotationClearToast | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [autosaveRecoveryDetail, setAutosaveRecoveryDetail] = useState<string | null>(null);
   const [autosaveRecoveryKind, setAutosaveRecoveryKind] = useState<AutosaveRecoveryKind | null>(null);
@@ -1192,6 +1315,10 @@ export default function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const pdfInsertInputRef = useRef<HTMLInputElement>(null);
   const pdfInsertTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const pdfPageActionsTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const pendingPdfAnnotationClearUndoRef = useRef<PendingPdfAnnotationClearUndo | null>(null);
+  const pdfAnnotationClearUndoTimerRef = useRef<number | null>(null);
+  const pdfAnnotationClearUndoTokenRef = useRef(0);
   const libraryInputRef = useRef<HTMLInputElement>(null);
   const insertTriggerRef = useRef<HTMLButtonElement>(null);
   const exportOptionsTriggerRef = useRef<HTMLButtonElement>(null);
@@ -1201,6 +1328,35 @@ export default function App() {
   const shellRef = useRef<HTMLDivElement>(null);
   const editorHostRef = useRef<HTMLDivElement>(null);
   const safeClipboardReadGuardRef = useRef(false);
+  const finalizePendingPdfAnnotationClearUndo = useCallback(() => {
+    const pending = pendingPdfAnnotationClearUndoRef.current;
+    pendingPdfAnnotationClearUndoRef.current = null;
+    if (pdfAnnotationClearUndoTimerRef.current !== null) {
+      window.clearTimeout(pdfAnnotationClearUndoTimerRef.current);
+      pdfAnnotationClearUndoTimerRef.current = null;
+    }
+    if (pending) {
+      setPdfAnnotationClearToast((current) => current?.token === pending.token ? null : current);
+    }
+  }, []);
+  useEffect(() => {
+    const expirePendingUndo = () => {
+      const pending = pendingPdfAnnotationClearUndoRef.current;
+      if (pending && Date.now() >= pending.transaction.expiresAt) {
+        finalizePendingPdfAnnotationClearUndo();
+      }
+    };
+    document.addEventListener("visibilitychange", expirePendingUndo);
+    window.addEventListener("focus", expirePendingUndo);
+    return () => {
+      document.removeEventListener("visibilitychange", expirePendingUndo);
+      window.removeEventListener("focus", expirePendingUndo);
+      const timer = pdfAnnotationClearUndoTimerRef.current;
+      if (timer !== null) window.clearTimeout(timer);
+      pdfAnnotationClearUndoTimerRef.current = null;
+      pendingPdfAnnotationClearUndoRef.current = null;
+    };
+  }, [finalizePendingPdfAnnotationClearUndo]);
   const projectRef = useRef<ClassroomProject | null>(project);
   const pdfBytesRef = useRef<Record<PdfDocumentId, Uint8Array>>(pdfBytes);
   const currentSceneRef = useRef<SerializedScene | null>(null);
@@ -1507,6 +1663,22 @@ export default function App() {
       sceneHydrationInnerFrameRef.current = null;
     }
   }, []);
+  const cancelFileOpenOperations = useCallback((clearUi = false) => {
+    fileOpenGenerationRef.current += 1;
+    fileOpenAbortControllerRef.current?.abort();
+    fileOpenAbortControllerRef.current = null;
+    startupAutosaveAbortControllerRef.current?.abort();
+    startupAutosaveAbortControllerRef.current = null;
+    pdfInsertOperationGenerationRef.current = null;
+    if (!clearUi) return;
+    busyCancelRef.current = null;
+    setBusyCanCancel(false);
+    setBusyMessage(null);
+    setPendingPdfInsert(null);
+    setPdfInsertProcessing(false);
+    setPdfInsertCancelling(false);
+    setPdfInsertProgress(null);
+  }, []);
   const beginFileOpenOperation = useCallback((): FileOpenOperation => {
     abortSceneOperations(true);
     startupAutosaveAbortControllerRef.current?.abort();
@@ -1623,7 +1795,10 @@ export default function App() {
       pendingScenePersistenceRef.current,
       bufferedHydrationChangeRef.current,
     );
-    pendingScenePersistenceRef.current = adopted.pending;
+    pendingScenePersistenceRef.current = preserveDeletedForPendingPdfUndo(
+      adopted.pending,
+      pendingPdfAnnotationClearUndoRef.current?.transaction.affectedPageIds,
+    );
     bufferedHydrationChangeRef.current = adopted.buffered;
     if (scenePersistenceTimerRef.current !== null) {
       window.clearTimeout(scenePersistenceTimerRef.current);
@@ -1688,7 +1863,7 @@ export default function App() {
     });
     return nextProject;
   }, []);
-  const commitLiveScenePersistence = useCallback((sceneId: string) => {
+  const commitLiveScenePersistence = useCallback((sceneId: string, preserveDeleted = false) => {
     const committed = commitPendingScenePersistence();
     const liveSceneId = hydratedSceneIdRef.current;
     if (
@@ -1699,19 +1874,24 @@ export default function App() {
     ) return committed;
     const scene = committed.scenes[sceneId];
     if (!scene) return committed;
+    const preserveDeletedForUndo = pendingPdfAnnotationClearUndoRef.current
+      ?.transaction.affectedPageIds.includes(sceneId) === true;
     // Destructive controls can run before Excalidraw's debounced onChange
     // reaches pendingScenePersistenceRef. Capture the editor synchronously,
     // but send it through the same canonicalization, slide detachment,
     // serialization, and file filtering pipeline as an ordinary scene edit.
     pendingScenePersistenceRef.current = {
       sceneId,
-      elements: api.getSceneElements(),
+      // Destructive wrapper transactions must retain Excalidraw tombstones:
+      // they can still own local files and are part of safe annotation undo.
+      elements: api.getSceneElementsIncludingDeleted(),
       appState: api.getAppState(),
       files: persistentFilesForScene(
         scene,
         api.getFiles(),
         transientDarkPdfFileIdsRef.current,
       ),
+      preserveDeleted: preserveDeleted || preserveDeletedForUndo,
     };
     return commitPendingScenePersistence();
   }, [api, commitPendingScenePersistence]);
@@ -2887,6 +3067,7 @@ export default function App() {
   ): Promise<boolean> => {
     const isCurrentOperation = () => !operation || isCurrentFileOpenOperation(operation);
     if (!isCurrentOperation()) return false;
+    finalizePendingPdfAnnotationClearUndo();
     // A user can draw before the outgoing scene's two hydration paints have
     // completed. Fold that buffered edit into the old project before this
     // replacement starts, rather than clearing it below with the other
@@ -3016,6 +3197,7 @@ export default function App() {
     beginSceneHydration,
     commitLiveScenePersistence,
     commitPendingScenePersistence,
+    finalizePendingPdfAnnotationClearUndo,
     flushAutosave,
     isCurrentFileOpenOperation,
   ]);
@@ -3111,6 +3293,11 @@ export default function App() {
           pdfDocuments: { ...base.pdfDocuments, [imported.source.id]: imported.source },
         };
         assertProjectFitsContentBudget(nextProject, nextPdfBytes);
+        assertPdfAdditionPreservesAnnotationUndo(
+          nextProject,
+          nextPdfBytes,
+          pendingPdfAnnotationClearUndoRef.current?.transaction,
+        );
         if (replaceProtectedAutosave) {
           setBusyMessage(`Saving ${file.name} locally…`);
           const contentSize = await saveAutosave(nextProject, nextPdfBytes, {
@@ -5735,6 +5922,161 @@ export default function App() {
     } : current);
   }, []);
 
+  const requestPdfAnnotationClear = useCallback((sceneId: string) => {
+    try {
+      abortSceneOperations(true);
+      cancelFileOpenOperations(true);
+      const currentProject = commitLiveScenePersistence(sceneId, true);
+      const scene = currentProject?.scenes[sceneId];
+      if (!currentProject || !scene?.pdfPage) {
+        throw new Error("The selected PDF page no longer exists.");
+      }
+      const summaries = pdfAnnotationScopeSummaries(currentProject, sceneId);
+      setErrorMessage(null);
+      setPendingPdfAnnotationClear({
+        projectId: currentProject.id,
+        sceneId,
+        summaries,
+        sourceName: scene.pdfPage.sourceName
+          || currentProject.pdfDocuments[scene.pdfPage.documentId]?.name,
+      });
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, [abortSceneOperations, cancelFileOpenOperations, commitLiveScenePersistence]);
+
+  const closePdfAnnotationClearDialog = useCallback(() => {
+    setPendingPdfAnnotationClear(null);
+  }, []);
+
+  const confirmPdfAnnotationClear = useCallback((scope: PdfAnnotationClearScope) => {
+    const pending = pendingPdfAnnotationClear;
+    if (!pending) return;
+    try {
+      abortSceneOperations(true);
+      cancelFileOpenOperations(true);
+      const currentProject = commitLiveScenePersistence(pending.sceneId, true);
+      if (!currentProject || currentProject.id !== pending.projectId) {
+        throw new Error("The PDF document changed before annotations could be cleared.");
+      }
+      const freshSummaries = pdfAnnotationScopeSummaries(currentProject, pending.sceneId);
+      if (!pdfAnnotationSummaryMatches(pending.summaries[scope], freshSummaries[scope])) {
+        const scene = currentProject.scenes[pending.sceneId];
+        setPendingPdfAnnotationClear({
+          ...pending,
+          summaries: freshSummaries,
+          sourceName: scene?.pdfPage?.sourceName
+            || (scene?.pdfPage
+              ? currentProject.pdfDocuments[scene.pdfPage.documentId]?.name
+              : pending.sourceName),
+        });
+        setErrorMessage("Annotations changed while this dialog was open. Review the updated counts, then confirm again.");
+        return;
+      }
+      setErrorMessage(null);
+      const now = Date.now();
+      const cleared = clearPdfAnnotations(currentProject, pending.sceneId, scope, {
+        now,
+        updatedAt: nowIso(),
+      });
+      // Replace an older reversible action only after every validation and
+      // the new atomic clear have succeeded. A stale confirmation or failed
+      // clear attempt must not consume the still-valid prior Undo.
+      finalizePendingPdfAnnotationClearUndo();
+      const activeSceneId = activeSceneIdRef.current || cleared.project.activeSceneId;
+      const activeScene = cleared.project.scenes[activeSceneId];
+      const activeSceneWasCleared = cleared.transaction.affectedPageIds.includes(activeSceneId);
+      const token = ++pdfAnnotationClearUndoTokenRef.current;
+
+      pendingProjectSearchTargetRef.current = null;
+      projectRef.current = cleared.project;
+      activeSceneIdRef.current = cleared.project.activeSceneId;
+      pendingPdfAnnotationClearUndoRef.current = { token, transaction: cleared.transaction };
+      pdfAnnotationClearUndoTimerRef.current = window.setTimeout(() => {
+        if (pendingPdfAnnotationClearUndoRef.current?.token === token) {
+          finalizePendingPdfAnnotationClearUndo();
+        }
+      }, Math.max(0, cleared.transaction.expiresAt - Date.now()));
+      setPdfAnnotationClearToast({
+        token,
+        annotationCount: cleared.summary.annotationCount,
+        affectedPageCount: cleared.summary.affectedPageCount,
+        expiresAt: cleared.transaction.expiresAt,
+      });
+      setPendingPdfAnnotationClear(null);
+      setProject(cleared.project);
+      if (activeSceneWasCleared && activeScene) loadSceneIntoEditor(activeScene);
+    } catch (error) {
+      setPendingPdfAnnotationClear(null);
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, [
+    abortSceneOperations,
+    cancelFileOpenOperations,
+    commitLiveScenePersistence,
+    finalizePendingPdfAnnotationClearUndo,
+    loadSceneIntoEditor,
+    pendingPdfAnnotationClear,
+  ]);
+
+  const undoPdfAnnotationClearAction = useCallback(() => {
+    const pending = pendingPdfAnnotationClearUndoRef.current;
+    if (!pending) return;
+    const now = Date.now();
+    if (now >= pending.transaction.expiresAt) {
+      finalizePendingPdfAnnotationClearUndo();
+      return;
+    }
+    try {
+      abortSceneOperations(true);
+      cancelFileOpenOperations(true);
+      const activeSceneId = activeSceneIdRef.current
+        || projectRef.current?.activeSceneId
+        || "";
+      const currentProject = commitLiveScenePersistence(activeSceneId, true);
+      if (!currentProject) throw new Error("The current project is unavailable.");
+      const restored = undoPdfAnnotationClear(currentProject, pending.transaction, {
+        now,
+        updatedAt: nowIso(),
+      });
+      const activeScene = restored.project.scenes[activeSceneId];
+      const activeSceneWasRestored = restored.affectedPageIds.includes(activeSceneId);
+
+      if (!pdfAnnotationUndoFitsContentBudget(restored.project, pdfBytesRef.current)) {
+        setErrorMessage(
+          "Annotations could not be restored because the project is now too large to save safely. Remove recently added content and try Undo again before it expires.",
+        );
+        return;
+      }
+
+      finalizePendingPdfAnnotationClearUndo();
+      setErrorMessage(null);
+      pendingProjectSearchTargetRef.current = null;
+      projectRef.current = restored.project;
+      activeSceneIdRef.current = restored.project.activeSceneId;
+      setProject(restored.project);
+      if (activeSceneWasRestored && activeScene) loadSceneIntoEditor(activeScene);
+    } catch (error) {
+      finalizePendingPdfAnnotationClearUndo();
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, [
+    abortSceneOperations,
+    cancelFileOpenOperations,
+    commitLiveScenePersistence,
+    finalizePendingPdfAnnotationClearUndo,
+    loadSceneIntoEditor,
+  ]);
+
+  useEffect(() => {
+    if (!pendingPdfAnnotationClear) return;
+    if (
+      project?.id === pendingPdfAnnotationClear.projectId
+      && project.activeSceneId === pendingPdfAnnotationClear.sceneId
+    ) return;
+    setPendingPdfAnnotationClear(null);
+  }, [pendingPdfAnnotationClear, project?.activeSceneId, project?.id]);
+
   const deletePdfPage = useCallback((sceneId: string) => {
     if (!project) return;
     const initialScene = project.scenes[sceneId];
@@ -5743,6 +6085,7 @@ export default function App() {
     const initialPageIndex = initialOrder.indexOf(sceneId);
     if (initialPageIndex < 0) return;
     if (!window.confirm(`Delete output page ${initialPageIndex + 1}? This removes the page and its annotations from the project.`)) return;
+    finalizePendingPdfAnnotationClearUndo();
 
     // Keep deletion as an explicit scene-persistence boundary, matching page
     // addition and every other scene switch. This also prevents an unrelated
@@ -5804,7 +6147,12 @@ export default function App() {
       });
     }
     if (!remainingOrder.length) setWorkspaceMode("board");
-  }, [beginSceneHydration, commitLiveScenePersistence, project]);
+  }, [
+    beginSceneHydration,
+    commitLiveScenePersistence,
+    finalizePendingPdfAnnotationClearUndo,
+    project,
+  ]);
 
   const addPdfPage = useCallback(async () => {
     const workspace = currentScene?.pdfPage;
@@ -5889,6 +6237,11 @@ export default function App() {
         pdfDocuments: { ...current.pdfDocuments, [source.id]: source },
       };
       assertProjectFitsContentBudget(nextProject, nextPdfBytes);
+      assertPdfAdditionPreservesAnnotationUndo(
+        nextProject,
+        nextPdfBytes,
+        pendingPdfAnnotationClearUndoRef.current?.transaction,
+      );
       beginSceneHydration();
       pendingFrameIdRef.current = null;
       pendingCreatedFrameIdRef.current = null;
@@ -6132,6 +6485,11 @@ export default function App() {
         },
       );
       if (!isCurrentOperation()) return;
+      assertPdfAdditionPreservesAnnotationUndo(
+        imported.project,
+        imported.pdfBytes,
+        pendingPdfAnnotationClearUndoRef.current?.transaction,
+      );
       beginSceneHydration();
       pendingFrameIdRef.current = null;
       pendingProjectSearchTargetRef.current = null;
@@ -6676,6 +7034,8 @@ export default function App() {
           onAddBlankPage={() => void addPdfPage()}
           onInsertPdfPages={openPdfInsertFilePicker}
           addPageTriggerRef={pdfInsertTriggerRef}
+          pageActionsTriggerRef={pdfPageActionsTriggerRef}
+          onRequestClearAnnotations={requestPdfAnnotationClear}
           onDeletePage={deletePdfPage}
           width={pdfRailWidth}
           onWidthChange={setPdfRailWidth}
@@ -7045,6 +7405,15 @@ export default function App() {
           returnFocusRef={pdfInsertTriggerRef}
         />
       ) : null}
+      {pendingPdfAnnotationClear ? (
+        <ClearPdfAnnotationsDialog
+          summaries={pendingPdfAnnotationClear.summaries}
+          sourceName={pendingPdfAnnotationClear.sourceName}
+          onCancel={closePdfAnnotationClearDialog}
+          onConfirm={confirmPdfAnnotationClear}
+          returnFocusRef={pdfPageActionsTriggerRef}
+        />
+      ) : null}
       {exportOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={closeExportDialog}>
           <section ref={exportDialogRef} className="export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title" tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
@@ -7120,6 +7489,16 @@ export default function App() {
       )}
       {errorMessage && (
         <div className="error-toast" role="alert"><span>{errorMessage}</span><button type="button" onClick={() => setErrorMessage(null)}>Dismiss</button></div>
+      )}
+      {pdfAnnotationClearToast && (
+        <div className="pdf-annotation-clear-toast" role="status">
+          <span>
+            Cleared {pdfAnnotationClearToast.annotationCount} {pdfAnnotationClearToast.annotationCount === 1 ? "annotation" : "annotations"}
+            {" from "}{pdfAnnotationClearToast.affectedPageCount} {pdfAnnotationClearToast.affectedPageCount === 1 ? "page" : "pages"}
+          </span>
+          <span aria-hidden="true">—</span>
+          <button type="button" onClick={undoPdfAnnotationClearAction}>Undo</button>
+        </div>
       )}
     </div>
   );

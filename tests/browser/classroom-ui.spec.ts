@@ -79,6 +79,34 @@ async function renderPdfPage(
   }
 }
 
+async function pdfPageTexts(bytes: Uint8Array): Promise<string[]> {
+  const loadingTask = getDocument({
+    data: Uint8Array.from(bytes),
+    useSystemFonts: false,
+    useWorkerFetch: false,
+    useWasm: false,
+    standardFontDataUrl: pdfStandardFontDataUrl,
+  });
+  const document = await loadingTask.promise;
+  try {
+    const texts: string[] = [];
+    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+      const page = await document.getPage(pageNumber);
+      try {
+        const content = await page.getTextContent();
+        texts.push(content.items
+          .map((item) => ("str" in item ? item.str : ""))
+          .join(" "));
+      } finally {
+        page.cleanup();
+      }
+    }
+    return texts;
+  } finally {
+    await loadingTask.destroy();
+  }
+}
+
 function matchingPixelBounds(
   page: RenderedPdfPage,
   matches: (red: number, green: number, blue: number) => boolean,
@@ -287,6 +315,102 @@ async function openTestPdf(page: import("@playwright/test").Page, pageCount = 1)
     { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT },
   )
     .toMatchObject({ locked: true });
+}
+
+async function labelledPdfBytes(labels: readonly string[]): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const font = await document.embedFont(StandardFonts.Helvetica);
+  for (const [index, label] of labels.entries()) {
+    const page = document.addPage([612 + index * 8, 792 + index * 8]);
+    page.drawText(label, {
+      x: 72,
+      y: page.getHeight() - 96,
+      size: 18,
+      font,
+      color: rgb(0, 0, 0),
+    });
+  }
+  return document.save();
+}
+
+async function drawPdfRectangleAnnotation(
+  page: import("@playwright/test").Page,
+  startOffset: { x: number; y: number },
+  endOffset: { x: number; y: number },
+): Promise<void> {
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+  await dragOnBoard(page, startOffset, endOffset);
+  await page.getByTestId("toolbar-selection").check({ force: true });
+}
+
+async function typePdfTextAnnotation(
+  page: import("@playwright/test").Page,
+  text: string,
+): Promise<void> {
+  await page.getByTestId("toolbar-text").check({ force: true });
+  const editor = await page.locator(".editor-host").boundingBox();
+  if (!editor) throw new Error("PDF editor has no visible bounds.");
+  await page.mouse.click(editor.x + editor.width / 2, editor.y + editor.height / 2);
+  const textEditor = page.locator("textarea.excalidraw-wysiwyg");
+  await expect(textEditor).toBeVisible();
+  await textEditor.fill(text);
+  await textEditor.press("ControlOrMeta+Enter");
+}
+
+async function openPdfAnnotationClearDialog(
+  page: import("@playwright/test").Page,
+  outputPage: number,
+) {
+  const actionsButton = page.getByRole("button", {
+    name: `More actions for output page ${outputPage}`,
+    exact: true,
+  });
+  await actionsButton.click();
+  const actionsMenu = page.getByRole("menu", {
+    name: `Actions for output page ${outputPage}`,
+    exact: true,
+  });
+  await expect(actionsMenu).toBeVisible();
+  await actionsMenu.getByRole("menuitem", { name: "Clear annotations…", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Clear annotations", exact: true });
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
+async function deletePdfPageThroughActions(
+  page: import("@playwright/test").Page,
+  outputPage: number,
+): Promise<void> {
+  await page.getByRole("button", {
+    name: `More actions for output page ${outputPage}`,
+    exact: true,
+  }).click();
+  const actionsMenu = page.getByRole("menu", {
+    name: `Actions for output page ${outputPage}`,
+    exact: true,
+  });
+  await expect(actionsMenu).toBeVisible();
+  await actionsMenu.getByRole("menuitem", { name: "Delete page", exact: true }).click();
+}
+
+async function autosavedPdfAnnotationCounts(
+  page: import("@playwright/test").Page,
+): Promise<number[]> {
+  const project = await keyvalValue<{
+    pdfPageOrder: string[];
+    scenes: Record<string, {
+      elements: Array<{ id?: string; isDeleted?: boolean }>;
+      pdfPage?: { backgroundElementId: string };
+    }>;
+  }>(page, "patterdraw:autosave:project:v1");
+  return (project?.pdfPageOrder || []).map((sceneId) => {
+    const scene = project?.scenes[sceneId];
+    if (!scene?.pdfPage) return 0;
+    return scene.elements.filter((element) => (
+      element.isDeleted !== true
+      && element.id !== scene.pdfPage?.backgroundElementId
+    )).length;
+  });
 }
 
 async function oversizedEmbeddedImagePdfBytes(painted = true): Promise<Uint8Array> {
@@ -8898,6 +9022,417 @@ test("inserts ordered pages from multiple PDFs atomically and deduplicates ident
   }>(page, "patterdraw:autosave:project:v1"))?.pdfDocuments || {})).toHaveLength(3);
 });
 
+test("clears one inserted PDF source while preserving a duplicate source and restores it with Undo", async ({ page }) => {
+  test.setTimeout(120_000);
+  const mainBytes = await labelledPdfBytes(["MAIN_NATIVE_PAGE_1", "MAIN_NATIVE_PAGE_2"]);
+  const periodicBytes = await labelledPdfBytes(["PERIODIC_NATIVE_PAGE"]);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "main-labelled.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(mainBytes),
+  });
+
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await expect(pages).toHaveCount(2, { timeout: 20_000 });
+  await drawPdfRectangleAnnotation(page, { x: 310, y: 230 }, { x: 390, y: 290 });
+  await expect(pages.nth(0).locator(".pdf-annotation-count")).toHaveText("1");
+  await pages.nth(1).locator(".pdf-page-open").click();
+  await drawPdfRectangleAnnotation(page, { x: 330, y: 250 }, { x: 420, y: 320 });
+  await expect(pages.nth(1).locator(".pdf-annotation-count")).toHaveText("1");
+
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
+  await page.getByLabel("Select PDFs to insert").setInputFiles([
+    { name: "periodic-table.pdf", mimeType: "application/pdf", buffer: Buffer.from(periodicBytes) },
+    { name: "periodic-copy.pdf", mimeType: "application/pdf", buffer: Buffer.from(periodicBytes) },
+  ]);
+  const insertDialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(insertDialog).toBeVisible({ timeout: 30_000 });
+  await insertDialog.getByRole("button", { name: "Insert 2 pages", exact: true }).click();
+  await expect(insertDialog).toHaveCount(0, { timeout: 30_000 });
+  await expect(pages).toHaveCount(4, { timeout: 30_000 });
+  await expect(pages.nth(2)).toContainText("periodic-table.pdf");
+  await expect(pages.nth(3)).toContainText("periodic-copy.pdf");
+  await expect(pages.nth(2)).toHaveClass(/is-selected/);
+
+  // Opening page actions immediately after text entry proves the live editor
+  // is committed before annotation counts are calculated.
+  await typePdfTextAnnotation(page, "PERIODIC_USER_MARK");
+  let clearDialog = await openPdfAnnotationClearDialog(page, 3);
+  await expect(clearDialog.getByText("1 annotation on 1 affected page", { exact: true })).toBeVisible();
+  await expect(clearDialog.getByText(
+    "1 annotation on 1 affected page · periodic-table.pdf",
+    { exact: true },
+  )).toBeVisible();
+  await expect(clearDialog.getByText("3 annotations on 3 affected pages", { exact: true })).toBeVisible();
+  await clearDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  await pages.nth(3).locator(".pdf-page-open").click();
+  await drawPdfRectangleAnnotation(page, { x: 350, y: 270 }, { x: 440, y: 340 });
+  await expect(pages.nth(3).locator(".pdf-annotation-count")).toHaveText("1");
+  await pages.nth(2).locator(".pdf-page-open").click();
+
+  await page.keyboard.press("ControlOrMeta+f");
+  const query = page.getByRole("searchbox", { name: "Find text across project", exact: true });
+  await query.fill("PERIODIC_USER_MARK");
+  await expect(page.locator(".project-find-result")).toHaveCount(1);
+
+  clearDialog = await openPdfAnnotationClearDialog(page, 3);
+  await expect(clearDialog.getByText(
+    "1 annotation on 1 affected page · periodic-table.pdf",
+    { exact: true },
+  )).toBeVisible();
+  await expect(clearDialog.getByText("4 annotations on 4 affected pages", { exact: true })).toBeVisible();
+  await expect(clearDialog).toContainText(
+    "does not remove text, forms, graphics, or annotations already contained in the original PDF",
+  );
+  await clearDialog.getByRole("radio", { name: /Pages from this source PDF/ }).check();
+  await clearDialog.getByRole("button", { name: "Clear 1 annotation", exact: true }).click();
+
+  const toast = page.locator(".pdf-annotation-clear-toast");
+  await expect(toast).toContainText("Cleared 1 annotation from 1 page");
+  await expect(pages.nth(0).locator(".pdf-annotation-count")).toHaveText("1");
+  await expect(pages.nth(1).locator(".pdf-annotation-count")).toHaveText("1");
+  await expect(pages.nth(2).locator(".pdf-annotation-count")).toHaveCount(0);
+  await expect(pages.nth(3).locator(".pdf-annotation-count")).toHaveText("1");
+  await page.keyboard.press("ControlOrMeta+f");
+  const clearedQuery = page.getByRole("searchbox", { name: "Find text across project", exact: true });
+  await clearedQuery.fill("PERIODIC_USER_MARK");
+  await expect(page.locator(".project-find-result")).toHaveCount(0);
+  await expect(page.locator(".project-find-empty")).toHaveText("No matching text.");
+
+  await drawPdfRectangleAnnotation(page, { x: 380, y: 300 }, { x: 470, y: 370 });
+  await expect(pages.nth(2).locator(".pdf-annotation-count")).toHaveText("1");
+  await toast.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(toast).toHaveCount(0);
+  await expect(pages.nth(2).locator(".pdf-annotation-count")).toHaveText("2");
+  await page.keyboard.press("ControlOrMeta+f");
+  const restoredQuery = page.getByRole("searchbox", { name: "Find text across project", exact: true });
+  await restoredQuery.fill("PERIODIC_USER_MARK");
+  await expect(page.locator(".project-find-result")).toHaveCount(1);
+  await expect.poll(() => autosavedPdfAnnotationCounts(page), { timeout: 20_000 })
+    .toEqual([1, 1, 2, 1]);
+
+  const persisted = await keyvalValue<{
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder: string[];
+    scenes: Record<string, {
+      pdfPage?: { documentId: string; sourceInstanceId?: string; sourceName?: string };
+    }>;
+  }>(page, "patterdraw:autosave:project:v1");
+  expect(Object.keys(persisted?.pdfDocuments || {})).toHaveLength(2);
+  const sourcePages = (persisted?.pdfPageOrder || []).slice(2).map(
+    (sceneId) => persisted?.scenes[sceneId]?.pdfPage,
+  );
+  expect(sourcePages[0]?.documentId).toBe(sourcePages[1]?.documentId);
+  expect(sourcePages[0]?.sourceInstanceId).not.toBe(sourcePages[1]?.sourceInstanceId);
+  expect(sourcePages.map((workspace) => workspace?.sourceName)).toEqual([
+    "periodic-table.pdf",
+    "periodic-copy.pdf",
+  ]);
+
+  const saveEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  const archiveBytes = await downloadBytes(await saveEvent);
+  await page.reload();
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "clear-source-undo-roundtrip.patterdraw",
+    mimeType: "application/vnd.patterdraw+zip",
+    buffer: archiveBytes,
+  });
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(pages).toHaveCount(4, { timeout: 20_000 });
+  await expect.poll(() => autosavedPdfAnnotationCounts(page), { timeout: 20_000 })
+    .toEqual([1, 1, 2, 1]);
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  const exportEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: /Annotated PDF — expand pages/ }).click();
+  const exportedBytes = await downloadBytes(await exportEvent);
+  expect((await PDFDocument.load(exportedBytes)).getPageCount()).toBe(4);
+  expect(await pdfPageTexts(exportedBytes)).toEqual([
+    "MAIN_NATIVE_PAGE_1",
+    "MAIN_NATIVE_PAGE_2",
+    "PERIODIC_NATIVE_PAGE",
+    "PERIODIC_NATIVE_PAGE",
+  ]);
+});
+
+test("clears one page and then all PDF annotations with empty scopes and expiry handled safely", async ({ page }) => {
+  test.setTimeout(120_000);
+  const sourceBytes = await labelledPdfBytes(["CLEAR_NATIVE_PAGE_1", "CLEAR_NATIVE_PAGE_2"]);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "clear-scopes.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(sourceBytes),
+  });
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await expect(pages).toHaveCount(2, { timeout: 20_000 });
+
+  await drawPdfRectangleAnnotation(page, { x: 300, y: 220 }, { x: 380, y: 280 });
+  await expect(pages.nth(0).locator(".pdf-annotation-count")).toHaveText("1");
+  await pages.nth(1).locator(".pdf-page-open").click();
+  await drawPdfRectangleAnnotation(page, { x: 320, y: 240 }, { x: 400, y: 300 });
+  await drawPdfRectangleAnnotation(page, { x: 430, y: 310 }, { x: 500, y: 370 });
+  await expect(pages.nth(1).locator(".pdf-annotation-count")).toHaveText("2");
+  await pages.nth(0).locator(".pdf-page-open").click();
+  await expect(pages.nth(0)).toHaveClass(/is-selected/);
+
+  let clearDialog = await openPdfAnnotationClearDialog(page, 1);
+  await expect(clearDialog.getByText("1 annotation on 1 affected page", { exact: true })).toBeVisible();
+  await expect(clearDialog.getByText(
+    "3 annotations on 2 affected pages · clear-scopes.pdf",
+    { exact: true },
+  )).toBeVisible();
+  await expect(clearDialog.getByText("3 annotations on 2 affected pages", { exact: true })).toBeVisible();
+  await expect(clearDialog.getByRole("radio", { name: /This page/ })).toBeChecked();
+  await clearDialog.getByRole("button", { name: "Clear 1 annotation", exact: true }).click();
+  await expect.poll(() => autosavedPdfAnnotationCounts(page), { timeout: 20_000 })
+    .toEqual([0, 2]);
+
+  clearDialog = await openPdfAnnotationClearDialog(page, 1);
+  const pageScope = clearDialog.getByRole("radio", { name: /This page/ });
+  const sourceScope = clearDialog.getByRole("radio", { name: /Pages from this source PDF/ });
+  const allScope = clearDialog.getByRole("radio", { name: /All PDF pages/ });
+  await expect(pageScope).toBeDisabled();
+  await expect(sourceScope).toBeChecked();
+  await expect(clearDialog.getByText("0 annotations on 0 affected pages", { exact: true })).toBeVisible();
+  await expect(clearDialog.getByText(
+    "2 annotations on 1 affected page · clear-scopes.pdf",
+    { exact: true },
+  )).toBeVisible();
+  await expect(clearDialog.getByText("2 annotations on 1 affected page", { exact: true })).toBeVisible();
+  await allScope.check();
+  await clearDialog.getByRole("button", { name: "Clear 2 annotations", exact: true }).click();
+  await expect(page.locator(".pdf-annotation-clear-toast"))
+    .toContainText("Cleared 2 annotations from 1 page");
+  await expect.poll(() => autosavedPdfAnnotationCounts(page), { timeout: 20_000 })
+    .toEqual([0, 0]);
+
+  // Advance only the focus expiry event, then restore the native clock so
+  // subsequent persistence timestamps remain representative.
+  await page.evaluate(() => {
+    const realNow = Date.now;
+    const expiredNow = realNow() + 11_000;
+    Date.now = () => expiredNow;
+    window.dispatchEvent(new Event("focus"));
+    Date.now = realNow;
+  });
+  await expect(page.locator(".pdf-annotation-clear-toast")).toHaveCount(0);
+
+  clearDialog = await openPdfAnnotationClearDialog(page, 1);
+  await expect(clearDialog.getByRole("radio", { name: /This page/ })).toBeDisabled();
+  await expect(clearDialog.getByRole("radio", { name: /Pages from this source PDF/ })).toBeDisabled();
+  await expect(clearDialog.getByRole("radio", { name: /All PDF pages/ })).toBeDisabled();
+  await expect(clearDialog.getByRole("button", { name: "Clear 0 annotations", exact: true })).toBeDisabled();
+  await clearDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  const saveEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  const archiveBytes = await downloadBytes(await saveEvent);
+  await page.reload();
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "clear-all-roundtrip.patterdraw",
+    mimeType: "application/vnd.patterdraw+zip",
+    buffer: archiveBytes,
+  });
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(pages).toHaveCount(2, { timeout: 20_000 });
+  await expect(pages.locator(".pdf-annotation-count")).toHaveCount(0);
+  await expect.poll(() => autosavedPdfAnnotationCounts(page), { timeout: 20_000 })
+    .toEqual([0, 0]);
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  const exportEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: /Annotated PDF — expand pages/ }).click();
+  const exportedBytes = await downloadBytes(await exportEvent);
+  expect(await pdfPageTexts(exportedBytes)).toEqual([
+    "CLEAR_NATIVE_PAGE_1",
+    "CLEAR_NATIVE_PAGE_2",
+  ]);
+});
+
+test("restores annotations while cancelling an in-flight PDF insertion before it can commit", async ({ page }) => {
+  test.setTimeout(60_000);
+  await openTestPdf(page);
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  const supplemental = await PDFDocument.create();
+  supplemental.addPage([360, 480]);
+  const supplementalBytes = Buffer.from(await supplemental.save());
+
+  // Warm the PDF inspector before starting the ten-second Undo window. The
+  // actual submission below remains delayed and independently cancellable.
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
+  await page.getByLabel("Select PDFs to insert").setInputFiles({
+    name: "inspection-warmup.pdf",
+    mimeType: "application/pdf",
+    buffer: supplementalBytes,
+  });
+  const warmupDialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(warmupDialog).toBeVisible({ timeout: 20_000 });
+  await warmupDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(warmupDialog).toHaveCount(0);
+
+  await page.evaluate(() => {
+    const originalArrayBuffer = File.prototype.arrayBuffer;
+    const calls = new WeakMap<File, number>();
+    File.prototype.arrayBuffer = function arrayBufferWithDelayedImport() {
+      if (this.name !== "slow-after-clear.pdf") return originalArrayBuffer.call(this);
+      const call = (calls.get(this) || 0) + 1;
+      calls.set(this, call);
+      if (call !== 2) return originalArrayBuffer.call(this);
+      return new Promise<ArrayBuffer>((resolve, reject) => {
+        window.setTimeout(() => originalArrayBuffer.call(this).then(resolve, reject), 3_000);
+      });
+    };
+  });
+
+  await drawPdfRectangleAnnotation(page, { x: 310, y: 230 }, { x: 390, y: 290 });
+  await expect(pages.first().locator(".pdf-annotation-count")).toHaveText("1");
+
+  // Dev-mode PDF inspection can take longer than the product's ten-second
+  // Undo window on a cold worker. Freeze only the app-observed clock and move
+  // that one expiry timer out of the way so this test deterministically forces
+  // the intended async interleaving rather than testing machine speed.
+  await page.evaluate(() => {
+    const testWindow = window as Window & {
+      __patterdrawUndoRaceClock?: {
+        now: typeof Date.now;
+        setTimeout: typeof window.setTimeout;
+      };
+    };
+    const nativeNow = Date.now;
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    const frozenNow = nativeNow();
+    testWindow.__patterdrawUndoRaceClock = { now: nativeNow, setTimeout: nativeSetTimeout };
+    Date.now = () => frozenNow;
+    window.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]) => (
+      nativeSetTimeout(handler, delay !== undefined && delay >= 9_000 ? 60_000 : delay, ...args)
+    )) as typeof window.setTimeout;
+  });
+
+  const clearDialog = await openPdfAnnotationClearDialog(page, 1);
+  await clearDialog.getByRole("button", { name: "Clear 1 annotation", exact: true }).click();
+  const toast = page.locator(".pdf-annotation-clear-toast");
+  await expect(toast).toContainText("Cleared 1 annotation from 1 page");
+  await expect(pages.first().locator(".pdf-annotation-count")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  // The visible Undo toast intentionally covers this menu on the narrow rail;
+  // force the queued insertion intent so the cancellation race is exercised.
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click({ force: true });
+  await page.getByLabel("Select PDFs to insert").setInputFiles({
+    name: "slow-after-clear.pdf",
+    mimeType: "application/pdf",
+    buffer: supplementalBytes,
+  });
+  const insertDialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(insertDialog).toBeVisible({ timeout: 20_000 });
+  await insertDialog.getByRole("button", { name: "Insert 1 page", exact: true }).click();
+
+  // The modal deliberately covers the wrapper-level Undo control. Dispatching
+  // its click directly forces the otherwise narrow async race: Undo must
+  // invalidate the pending insertion before publishing the restored scene.
+  await toast.getByRole("button", { name: "Undo", exact: true }).evaluate((button: HTMLButtonElement) => {
+    button.click();
+  });
+  await page.evaluate(() => {
+    const testWindow = window as Window & {
+      __patterdrawUndoRaceClock?: {
+        now: typeof Date.now;
+        setTimeout: typeof window.setTimeout;
+      };
+    };
+    const native = testWindow.__patterdrawUndoRaceClock;
+    if (!native) return;
+    Date.now = native.now;
+    window.setTimeout = native.setTimeout;
+    delete testWindow.__patterdrawUndoRaceClock;
+  });
+  await expect(insertDialog).toHaveCount(0);
+  await expect(toast).toHaveCount(0);
+  await expect(pages).toHaveCount(1);
+  await expect(pages.first().locator(".pdf-annotation-count")).toHaveText("1");
+  await expect.poll(() => autosavedPdfAnnotationCounts(page), { timeout: 20_000 }).toEqual([1]);
+
+  // Let the delayed File.arrayBuffer settle; its stale continuation must not
+  // append a page or replace the restored annotation state.
+  await page.waitForTimeout(3_250);
+  await expect(pages).toHaveCount(1);
+  await expect(pages.first().locator(".pdf-annotation-count")).toHaveText("1");
+  await expect.poll(() => autosavedPdfAnnotationCounts(page), { timeout: 20_000 }).toEqual([1]);
+});
+
+test("keeps an appended PDF page when Undo restores earlier annotations", async ({ page }) => {
+  test.setTimeout(60_000);
+  await openTestPdf(page);
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  const appended = await PDFDocument.create();
+  appended.addPage([420, 560]);
+  const appendedBytes = Buffer.from(await appended.save());
+
+  await drawPdfRectangleAnnotation(page, { x: 310, y: 230 }, { x: 390, y: 290 });
+  const clearDialog = await openPdfAnnotationClearDialog(page, 1);
+  await clearDialog.getByRole("button", { name: "Clear 1 annotation", exact: true }).click();
+  const toast = page.locator(".pdf-annotation-clear-toast");
+  await expect(toast).toContainText("Cleared 1 annotation from 1 page");
+
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "appended-after-clear.pdf",
+    mimeType: "application/pdf",
+    buffer: appendedBytes,
+  });
+  await expect(pages).toHaveCount(2, { timeout: 20_000 });
+  await expect(pages.nth(1)).toContainText("appended-after-clear.pdf");
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await toast.getByRole("button", { name: "Undo", exact: true }).click();
+
+  await expect(toast).toHaveCount(0);
+  await expect(pages).toHaveCount(2);
+  await expect(pages.nth(0).locator(".pdf-annotation-count")).toHaveText("1");
+  await expect(pages.nth(1).locator(".pdf-annotation-count")).toHaveCount(0);
+  await expect.poll(() => autosavedPdfAnnotationCounts(page), { timeout: 20_000 }).toEqual([1, 0]);
+});
+
+test("requires fresh confirmation when annotation counts change while clearing", async ({ page }) => {
+  test.setTimeout(60_000);
+  await openTestPdf(page);
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await drawPdfRectangleAnnotation(page, { x: 310, y: 230 }, { x: 390, y: 290 });
+  await expect(pages.first().locator(".pdf-annotation-count")).toHaveText("1");
+
+  const clearDialog = await openPdfAnnotationClearDialog(page, 1);
+  await expect(clearDialog.getByRole("button", { name: "Clear 1 annotation", exact: true })).toBeVisible();
+
+  // Keep the rendered dialog open while allowing a real pointer gesture on
+  // the editor beneath it. This deterministically models a queued editor
+  // update landing between the displayed count and destructive confirmation.
+  await page.addStyleTag({
+    content: ".pdf-clear-annotations-backdrop { pointer-events: none !important; } .pdf-clear-annotations-dialog { pointer-events: auto !important; }",
+  });
+  await drawPdfRectangleAnnotation(page, { x: 900, y: 260 }, { x: 990, y: 330 });
+
+  await clearDialog.getByRole("button", { name: "Clear 1 annotation", exact: true }).click();
+  await expect(clearDialog).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText(
+    "Annotations changed while this dialog was open. Review the updated counts, then confirm again.",
+  );
+  await expect(clearDialog.getByText("2 annotations on 1 affected page", { exact: true })).toHaveCount(2);
+  await expect(clearDialog.getByText(
+    "2 annotations on 1 affected page · toolbar-position.pdf",
+    { exact: true },
+  )).toBeVisible();
+  await expect(clearDialog.getByRole("button", { name: "Clear 2 annotations", exact: true })).toBeVisible();
+
+  await clearDialog.getByRole("button", { name: "Clear 2 annotations", exact: true }).click();
+  await expect(clearDialog).toHaveCount(0);
+  await expect(page.locator(".pdf-annotation-clear-toast"))
+    .toContainText("Cleared 2 annotations from 1 page");
+  await expect(pages.first().locator(".pdf-annotation-count")).toHaveCount(0);
+  await expect.poll(() => autosavedPdfAnnotationCounts(page), { timeout: 20_000 }).toEqual([0]);
+});
+
 test("adds a blank PDF page, reopens the project on Board, and exports it", async ({ page }) => {
   test.setTimeout(60_000);
   await openTestPdf(page);
@@ -8985,10 +9520,7 @@ test("cleans deleted PDF bytes atomically when Web Locks are unavailable", async
   )?.byteLength || 0).toBeGreaterThan(0);
 
   page.once("dialog", (dialog) => void dialog.accept());
-  await page.locator("#pdf-page-rail .pdf-page-item")
-    .first()
-    .getByRole("button", { name: "Delete selected page", exact: true })
-    .click();
+  await deletePdfPageThroughActions(page, 1);
 
   await expect.poll(async () => Object.keys((
     await keyvalValue<{ pdfDocuments: Record<string, unknown> }>(
@@ -9014,16 +9546,16 @@ test("deletes the selected PDF page without renumbering its source page", async 
   const pages = page.locator("#pdf-page-rail .pdf-page-item");
   await expect(pages).toHaveCount(2, { timeout: 15_000 });
   await expect(pages.first()).toHaveClass(/is-selected/);
-  const pageDelete = pages.first().getByRole("button", { name: "Delete selected page", exact: true });
-  await expect(pageDelete).toBeVisible();
-  await expect(pageDelete).toHaveText("");
-  await expect(pageDelete.locator("svg")).toHaveCount(1);
-  await expect(pages.nth(1).getByRole("button", { name: "Delete selected page", exact: true })).toHaveCount(0);
+  const pageActions = pages.first().getByRole("button", { name: "More actions for output page 1", exact: true });
+  await expect(pageActions).toBeVisible();
+  await expect(pageActions).toHaveText("");
+  await expect(pageActions.locator("svg")).toHaveCount(1);
+  await expect(pages.nth(1).getByRole("button", { name: "More actions for output page 2", exact: true })).toHaveCount(0);
   page.once("dialog", async (dialog) => {
     expect(dialog.message()).toContain("Delete output page 1?");
     await dialog.accept();
   });
-  await pageDelete.click();
+  await deletePdfPageThroughActions(page, 1);
 
   await expect(pages).toHaveCount(1);
   await expect(pages.first()).toHaveClass(/is-selected/);
@@ -9060,7 +9592,7 @@ test("deletes the selected PDF page without renumbering its source page", async 
     expect(dialog.message()).toContain("Delete output page 1?");
     await dialog.accept();
   });
-  await page.getByRole("button", { name: "Delete selected page", exact: true }).click();
+  await deletePdfPageThroughActions(page, 1);
   await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
   await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
 });

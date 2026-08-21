@@ -73,8 +73,12 @@ const { canonicalizePersistedWrapperTool } = await import("./lib/safety");
 const {
   darkPdfDisplaySceneIsCurrent,
   hydrationChangesMatch,
+  pdfAnnotationSummaryMatches,
+  pdfAnnotationUndoFitsContentBudget,
   presentationInkPointerDownIsCurrent,
   presentationInkStrokeIsCurrent,
+  preserveDeletedForPendingPdfUndo,
+  preserveDeletedSceneRecords,
   preservePendingScenePersistence,
   prefersReducedMotion,
   readBoundedProjectFileBytes,
@@ -210,6 +214,94 @@ describe("scene hydration buffer ordering", () => {
     const result = preservePendingScenePersistence(pending("scene-a", 10), pending("scene-b", 20));
     expect(result.pending?.sceneId).toBe("scene-a");
     expect(result.buffered?.sceneId).toBe("scene-b");
+  });
+});
+
+describe("destructive scene persistence", () => {
+  it("promotes affected pending scenes so PDF clear Undo retains tombstones", () => {
+    const affected = {
+      sceneId: "pdf-page-a",
+      elements: [],
+      appState: {},
+      files: {},
+    } as unknown as PendingScene;
+    const unrelated = {
+      ...affected,
+      sceneId: "pdf-page-b",
+    } as unknown as PendingScene;
+
+    const promoted = preserveDeletedForPendingPdfUndo(affected, ["pdf-page-a"]);
+
+    expect(promoted).not.toBe(affected);
+    expect(promoted?.preserveDeleted).toBe(true);
+    expect(preserveDeletedForPendingPdfUndo(promoted, ["pdf-page-a"])).toBe(promoted);
+    expect(preserveDeletedForPendingPdfUndo(unrelated, ["pdf-page-a"])).toBe(unrelated);
+    expect(preserveDeletedForPendingPdfUndo(affected, undefined)).toBe(affected);
+  });
+
+  it("retains tombstones in z-order and their otherwise orphaned local files", () => {
+    const liveElements = [
+      { id: "live-a", type: "rectangle", isDeleted: false },
+      { id: "deleted-image", type: "image", isDeleted: true, fileId: "deleted-file" },
+      { id: "live-b", type: "text", isDeleted: false },
+    ] as unknown as Parameters<typeof preserveDeletedSceneRecords>[0];
+    const files = {
+      "deleted-file": { id: "deleted-file", dataURL: "data:image/png;base64,AA==" },
+      "live-file": { id: "live-file", dataURL: "data:image/png;base64,AQ==" },
+    } as unknown as Parameters<typeof preserveDeletedSceneRecords>[1];
+
+    const result = preserveDeletedSceneRecords(
+      liveElements,
+      files,
+      [
+        { id: "live-a", type: "rectangle", serialized: true },
+        { id: "live-b", type: "text", serialized: true },
+        { id: "serializer-extra", type: "line", serialized: true },
+      ],
+      {
+        "live-file": { id: "live-file", dataURL: "data:image/png;base64,AQ==" },
+      },
+    );
+
+    expect(result.elements.map((element) => element.id)).toEqual([
+      "live-a",
+      "deleted-image",
+      "live-b",
+      "serializer-extra",
+    ]);
+    expect(result.elements[1]).toBe(liveElements[1]);
+    expect(Object.keys(result.files).sort()).toEqual(["deleted-file", "live-file"]);
+  });
+});
+
+describe("PDF annotation transaction guards", () => {
+  const summary = {
+    scope: "source-document" as const,
+    anchorPageId: "page-a",
+    annotationCount: 2,
+    affectedPageCount: 2,
+    affectedPageIds: ["page-a", "page-b"],
+    pages: [
+      { sceneId: "page-a", annotationCount: 1 },
+      { sceneId: "page-b", annotationCount: 1 },
+    ],
+    sourceIdentity: "source-a",
+  };
+
+  it("requires renewed confirmation when destructive scope counts or page identities change", () => {
+    expect(pdfAnnotationSummaryMatches(summary, { ...summary })).toBe(true);
+    expect(pdfAnnotationSummaryMatches(summary, { ...summary, annotationCount: 3 })).toBe(false);
+    expect(pdfAnnotationSummaryMatches(summary, { ...summary, affectedPageCount: 1 })).toBe(false);
+    expect(pdfAnnotationSummaryMatches(summary, { ...summary, affectedPageIds: ["page-b", "page-a"] })).toBe(false);
+    expect(pdfAnnotationSummaryMatches(summary, { ...summary, sourceIdentity: "source-b" })).toBe(false);
+  });
+
+  it("accepts an undo exactly at the content boundary and rejects one byte beyond it", async () => {
+    const { createBlankProject } = await import("./types");
+    const project = createBlankProject(new Date("2026-08-20T12:00:00.000Z"));
+    const exactBytes = new TextEncoder().encode(JSON.stringify(project, null, 2)).byteLength;
+    expect(pdfAnnotationUndoFitsContentBudget(project, {}, exactBytes)).toBe(true);
+    expect(pdfAnnotationUndoFitsContentBudget(project, {}, exactBytes - 1)).toBe(false);
   });
 });
 

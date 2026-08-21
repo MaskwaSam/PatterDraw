@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent, type MutableRefObject, type PointerEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type MutableRefObject, type PointerEvent } from "react";
 import type { ClassroomProject, SceneId, SerializedScene } from "../types";
+import { countPdfPageAnnotations } from "../lib/pdf/annotations";
 import type { PdfPageDropEdge } from "../lib/pdf/page-order";
-import { ChevronDownIcon, DownIcon, DragIcon, HidePanelIcon, PdfIcon, PlusIcon, TrashIcon, UpIcon } from "./Icons";
+import { ChevronDownIcon, DownIcon, DragIcon, HidePanelIcon, InkIcon, MoreIcon, PdfIcon, PlusIcon, TrashIcon, UpIcon } from "./Icons";
 
 const PDF_PAGE_DRAG_TYPE = "application/x-patterdraw-pdf-page";
+const PDF_PAGE_ACTION_MENU_GAP = 5;
 export const PDF_RAIL_MIN_WIDTH = 180;
 export const PDF_RAIL_MAX_WIDTH = 420;
 export const PDF_RAIL_DEFAULT_WIDTH = 224;
@@ -24,6 +26,8 @@ interface PdfPageRailProps {
   onAddBlankPage: () => void;
   onInsertPdfPages: () => void;
   addPageTriggerRef?: MutableRefObject<HTMLButtonElement | null>;
+  pageActionsTriggerRef?: MutableRefObject<HTMLButtonElement | null>;
+  onRequestClearAnnotations: (sceneId: SceneId) => void;
   onDeletePage: (sceneId: SceneId) => void;
   width: number;
   onWidthChange: (width: number) => void;
@@ -48,10 +52,7 @@ function thumbnailDataUrl(scene: SerializedScene): string | null {
 function annotationCount(scene: SerializedScene): number {
   const cached = annotationCountCache.get(scene);
   if (cached !== undefined) return cached;
-  let count = 0;
-  for (const element of scene.elements) {
-    if (element.id !== scene.pdfPage?.backgroundElementId && element.isDeleted !== true) count += 1;
-  }
+  const count = countPdfPageAnnotations(scene);
   annotationCountCache.set(scene, count);
   return count;
 }
@@ -67,6 +68,8 @@ export function PdfPageRail({
   onAddBlankPage,
   onInsertPdfPages,
   addPageTriggerRef,
+  pageActionsTriggerRef,
+  onRequestClearAnnotations,
   onDeletePage,
   width,
   onWidthChange,
@@ -76,8 +79,14 @@ export function PdfPageRail({
   const [dropTarget, setDropTarget] = useState<{ id: SceneId; edge: PdfPageDropEdge } | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [actionSceneId, setActionSceneId] = useState<SceneId | null>(null);
+  const [actionMenuPlacement, setActionMenuPlacement] = useState<"above" | "below">("below");
+  const [actionMenuMaxHeight, setActionMenuMaxHeight] = useState<number | null>(null);
   const addButtonRef = useRef<HTMLButtonElement | null>(null);
   const addMenuRef = useRef<HTMLDivElement>(null);
+  const actionButtonRef = useRef<HTMLButtonElement | null>(null);
+  const actionMenuRef = useRef<HTMLDivElement>(null);
+  const actionMenuInitialFocusRef = useRef<"first" | "last">("first");
   const resizeStartRef = useRef<{ pointerId: number; clientX: number; width: number } | null>(null);
 
   useEffect(() => {
@@ -107,9 +116,94 @@ export function PdfPageRail({
     };
   }, [addMenuOpen]);
 
+  useEffect(() => {
+    if (!actionSceneId) return;
+    const focusFrame = window.requestAnimationFrame(() => {
+      const items = [...(actionMenuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? [])];
+      const item = actionMenuInitialFocusRef.current === "last" ? items.at(-1) : items[0];
+      item?.focus();
+    });
+    const closeFromOutside = (event: globalThis.PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (actionMenuRef.current?.contains(target) || actionButtonRef.current?.contains(target)) return;
+      setActionSceneId(null);
+    };
+    const closeFromEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setActionSceneId(null);
+      window.requestAnimationFrame(() => actionButtonRef.current?.focus());
+    };
+    document.addEventListener("pointerdown", closeFromOutside, true);
+    window.addEventListener("keydown", closeFromEscape, true);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener("pointerdown", closeFromOutside, true);
+      window.removeEventListener("keydown", closeFromEscape, true);
+    };
+  }, [actionSceneId]);
+
+  useLayoutEffect(() => {
+    if (!actionSceneId) return;
+    const trigger = actionButtonRef.current;
+    const menu = actionMenuRef.current;
+    const scrollViewport = trigger?.closest<HTMLElement>(".rail-scroll");
+    if (!trigger || !menu || !scrollViewport) return;
+
+    const updatePlacement = () => {
+      const triggerBounds = trigger.getBoundingClientRect();
+      const menuBounds = menu.getBoundingClientRect();
+      const viewportBounds = scrollViewport.getBoundingClientRect();
+      const menuHeight = Math.max(menuBounds.height, menu.scrollHeight);
+      const requiredSpace = menuHeight + PDF_PAGE_ACTION_MENU_GAP;
+      const spaceAbove = Math.max(0, triggerBounds.top - viewportBounds.top);
+      const spaceBelow = Math.max(0, viewportBounds.bottom - triggerBounds.bottom);
+      const placement = spaceBelow >= requiredSpace || spaceBelow >= spaceAbove ? "below" : "above";
+      const availableSpace = placement === "below" ? spaceBelow : spaceAbove;
+      setActionMenuPlacement((current) => current === placement ? current : placement);
+      setActionMenuMaxHeight((current) => {
+        const next = Math.max(0, Math.floor(availableSpace - PDF_PAGE_ACTION_MENU_GAP));
+        return current === next ? current : next;
+      });
+    };
+
+    updatePlacement();
+    scrollViewport.addEventListener("scroll", updatePlacement, { passive: true });
+    window.addEventListener("resize", updatePlacement);
+    return () => {
+      scrollViewport.removeEventListener("scroll", updatePlacement);
+      window.removeEventListener("resize", updatePlacement);
+    };
+  }, [actionSceneId]);
+
+  useEffect(() => {
+    setActionSceneId(null);
+  }, [activeSceneId]);
+
   function handleAddMenuKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
       if (event.key === "Tab") setAddMenuOpen(false);
+      return;
+    }
+    const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')];
+    if (!items.length) return;
+    event.preventDefault();
+    const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? items.length - 1
+        : event.key === "ArrowUp"
+          ? (currentIndex <= 0 ? items.length - 1 : currentIndex - 1)
+          : (currentIndex + 1) % items.length;
+    items[nextIndex].focus();
+  }
+
+  function handlePageActionsKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      if (event.key === "Tab") setActionSceneId(null);
       return;
     }
     const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')];
@@ -174,7 +268,7 @@ export function PdfPageRail({
           return (
             <li
               key={scene.id}
-              className={`pdf-page-item${scene.id === activeSceneId ? " is-selected" : ""}${targetClass}`}
+              className={`pdf-page-item${scene.id === activeSceneId ? " is-selected" : ""}${actionSceneId === scene.id ? " is-actions-open" : ""}${targetClass}`}
               onDragOver={(event) => {
                 if (!draggingId || draggingId === scene.id) return;
                 event.preventDefault();
@@ -214,17 +308,6 @@ export function PdfPageRail({
                   <span>{isBlankPage ? "Added page" : `Original page ${workspace.pageIndex + 1}`}</span>
                 </span>
               </button>
-              {scene.id === activeSceneId ? (
-                <button
-                  className="thumbnail-delete-button pdf-page-delete"
-                  type="button"
-                  aria-label="Delete selected page"
-                  title="Delete selected page"
-                  onClick={() => onDeletePage(scene.id)}
-                >
-                  <TrashIcon />
-                </button>
-              ) : null}
               <div className="pdf-page-actions" aria-label={`Actions for output page ${index + 1}`}>
                 <button
                   type="button"
@@ -267,6 +350,74 @@ export function PdfPageRail({
                 >
                   <DownIcon />
                 </button>
+                {scene.id === activeSceneId ? (
+                  <div className="pdf-page-actions-menu-wrap">
+                    <button
+                      ref={(button) => {
+                        actionButtonRef.current = button;
+                        if (pageActionsTriggerRef) pageActionsTriggerRef.current = button;
+                      }}
+                      className="pdf-page-actions-menu-button"
+                      type="button"
+                      aria-label={`More actions for output page ${index + 1}`}
+                      title="More page actions"
+                      aria-haspopup="menu"
+                      aria-expanded={actionSceneId === scene.id}
+                      aria-controls={`pdf-page-actions-${scene.id}`}
+                      onKeyDown={(event) => {
+                        if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+                        event.preventDefault();
+                        actionMenuInitialFocusRef.current = event.key === "ArrowUp" ? "last" : "first";
+                        setActionMenuPlacement("below");
+                        setActionMenuMaxHeight(null);
+                        setAddMenuOpen(false);
+                        setActionSceneId(scene.id);
+                      }}
+                      onClick={() => {
+                        actionMenuInitialFocusRef.current = "first";
+                        setActionMenuPlacement("below");
+                        setActionMenuMaxHeight(null);
+                        setAddMenuOpen(false);
+                        setActionSceneId((current) => current === scene.id ? null : scene.id);
+                      }}
+                    >
+                      <MoreIcon />
+                    </button>
+                    {actionSceneId === scene.id ? (
+                      <div
+                        id={`pdf-page-actions-${scene.id}`}
+                        ref={actionMenuRef}
+                        className={`pdf-page-actions-menu is-${actionMenuPlacement}`}
+                        role="menu"
+                        aria-label={`Actions for output page ${index + 1}`}
+                        style={actionMenuMaxHeight === null ? undefined : { maxHeight: `${actionMenuMaxHeight}px` }}
+                        onKeyDown={handlePageActionsKeyDown}
+                      >
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            setActionSceneId(null);
+                            onRequestClearAnnotations(scene.id);
+                          }}
+                        >
+                          <InkIcon /><span>Clear annotations…</span>
+                        </button>
+                        <button
+                          className="is-danger"
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            setActionSceneId(null);
+                            onDeletePage(scene.id);
+                          }}
+                        >
+                          <TrashIcon /><span>Delete page</span>
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             </li>
           );
@@ -288,9 +439,13 @@ export function PdfPageRail({
           onKeyDown={(event) => {
             if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
             event.preventDefault();
+            setActionSceneId(null);
             setAddMenuOpen(true);
           }}
-          onClick={() => setAddMenuOpen((open) => !open)}
+          onClick={() => {
+            setActionSceneId(null);
+            setAddMenuOpen((open) => !open);
+          }}
         >
           <PlusIcon /><span className="icon-label">Add page</span><ChevronDownIcon className="pdf-add-page-chevron" />
         </button>

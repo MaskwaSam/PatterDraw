@@ -809,6 +809,10 @@ button { color: inherit; }
 }
 .pdf-page-item:hover { background: #f6f8fb; }
 .pdf-page-item.is-selected { border-color: #a9c1f7; background: var(--accent-soft); box-shadow: 0 0 0 1px #d4e1ff; }
+.pdf-page-item.is-actions-open {
+  z-index: 40;
+  content-visibility: visible;
+}
 .pdf-page-item.is-drop-before::before,
 .pdf-page-item.is-drop-after::after { content: ""; position: absolute; z-index: 2; left: 5px; right: 5px; height: 3px; border-radius: 999px; background: var(--accent); }
 .pdf-page-item.is-drop-before::before { top: -7px; }
@@ -837,18 +841,50 @@ button { color: inherit; }
 .pdf-page-actions button { cursor: pointer; }
 .pdf-page-actions button:hover:not(:disabled),
 .pdf-drag-handle:hover { border-color: #cbd3df; background: #fff; color: #2e3b53; }
+.pdf-page-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .pdf-page-actions button:disabled { opacity: .3; cursor: default; }
 .pdf-page-actions svg,
 .pdf-drag-handle svg { width: 15px; height: 15px; }
-.pdf-page-delete {
+.pdf-page-actions-menu-wrap { position: relative; }
+.pdf-page-actions .pdf-page-actions-menu-button[aria-expanded="true"] { border-color: #9db2dd; background: #fff; color: #204aa5; }
+.pdf-page-actions .pdf-page-actions-menu {
   position: absolute;
-  z-index: 2;
-  top: 35px;
-  left: 3px;
-  width: 27px;
-  height: 27px;
+  z-index: 35;
+  right: 0;
+  width: min(172px, calc(var(--pdf-rail-width, 224px) - 28px));
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 5px;
+  border: 1px solid #c9d1de;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 10px 28px rgb(15 23 42 / 22%);
 }
-.pdf-page-delete svg { width: 15px; height: 15px; }
+.pdf-page-actions .pdf-page-actions-menu.is-above { bottom: calc(100% + 5px); }
+.pdf-page-actions .pdf-page-actions-menu.is-below { top: calc(100% + 5px); }
+.pdf-page-actions .pdf-page-actions-menu button {
+  width: 100%;
+  height: auto;
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: 19px minmax(0, 1fr);
+  justify-content: stretch;
+  gap: 7px;
+  padding: 7px 9px;
+  border: 0;
+  background: transparent;
+  color: #263249;
+  text-align: left;
+}
+.pdf-page-actions .pdf-page-actions-menu button:hover,
+.pdf-page-actions .pdf-page-actions-menu button:focus-visible { outline: none; background: var(--accent-soft); color: #204aa5; }
+.pdf-page-actions .pdf-page-actions-menu button.is-danger { color: #9b2f2f; }
+.pdf-page-actions .pdf-page-actions-menu button.is-danger:hover,
+.pdf-page-actions .pdf-page-actions-menu button.is-danger:focus-visible { background: #fff1f1; color: #922c2c; }
+.pdf-page-actions .pdf-page-actions-menu button span { align-self: center; font-size: 11px; font-weight: 680; line-height: 1.25; }
 .pdf-drag-handle { cursor: grab; }
 .pdf-drag-handle:active { cursor: grabbing; }
 .rail-empty { display: grid; justify-items: center; gap: 8px; padding: 22px 8px; text-align: center; color: var(--muted); font-size: 12px; line-height: 1.45; }
@@ -1549,6 +1585,44 @@ button { color: inherit; }
 .export-dialog span { color: var(--muted); font-size: 12px; line-height: 1.4; }
 .dialog-cancel { margin-top: 7px; padding: 8px 11px; border: 1px solid #ccd2dc; border-radius: 7px; background: #fff; cursor: pointer; }
 
+.pdf-clear-annotations-dialog {
+  width: min(540px, 100%);
+  max-height: calc(100dvh - 40px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 22px;
+  border: 1px solid #cfd5df;
+  border-radius: 11px;
+  background: #fff;
+  box-shadow: 0 18px 60px rgb(15 23 42 / 25%);
+}
+.pdf-clear-annotations-heading { margin-bottom: 10px; }
+.pdf-clear-annotations-description { margin: 0 0 14px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.pdf-clear-annotation-scopes { display: grid; gap: 7px; margin: 0; padding: 0; border: 0; }
+.pdf-clear-annotation-scopes legend { margin: 0 0 2px; padding: 0; color: #263249; font-size: 12px; font-weight: 750; }
+.pdf-clear-annotation-scopes label {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 11px 12px;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  background: #fff;
+  color: #263249;
+  cursor: pointer;
+}
+.pdf-clear-annotation-scopes label:has(input:checked) { border-color: #7b9de8; background: var(--accent-soft); }
+.pdf-clear-annotation-scopes label.is-disabled { opacity: .5; cursor: default; }
+.pdf-clear-annotation-scopes input { flex: 0 0 auto; margin: 2px 0 0; accent-color: var(--accent); }
+.pdf-clear-annotation-scopes label > span { min-width: 0; display: grid; gap: 3px; }
+.pdf-clear-annotation-scopes strong { font-size: 12px; line-height: 1.3; }
+.pdf-clear-annotation-scopes small { color: var(--muted); font-size: 10px; line-height: 1.4; }
+.pdf-clear-annotations-safety { margin: 14px 0 0; padding: 10px 11px; border: 1px solid #d8dee8; border-radius: 7px; background: #f7f8fa; color: #4b566b; font-size: 11px; line-height: 1.5; }
+.pdf-clear-annotations-actions { margin-top: 15px; }
+.pdf-clear-annotations-actions .dialog-primary.is-danger { border-color: #9f2f2f; background: #b63737; }
+.pdf-clear-annotations-actions .dialog-primary.is-danger:hover:not(:disabled) { background: #962c2c; }
+
 .pdf-insert-dialog {
   width: min(760px, 100%);
   max-height: calc(100dvh - 40px);
@@ -2043,6 +2117,46 @@ button { color: inherit; }
 .error-toast { position: fixed; z-index: 310; right: 18px; bottom: 58px; max-width: 440px; display: flex; align-items: center; gap: 16px; padding: 12px 13px; border: 1px solid #e8b6b6; border-radius: 8px; background: #fff7f7; color: #7d2525; box-shadow: 0 8px 30px rgb(80 20 20 / 16%); font-size: 13px; }
 .error-toast span { min-width: 0; overflow-wrap: anywhere; }
 .error-toast button { flex: 0 0 auto; border: 0; background: transparent; color: #8d3030; font-size: 12px; font-weight: 700; cursor: pointer; }
+.pdf-annotation-clear-toast {
+  position: fixed;
+  /* Keep Undo behind modal/busy backdrops so it cannot race an in-flight
+     destructive or atomic operation that owns the current project snapshot. */
+  z-index: 190;
+  left: 18px;
+  bottom: 58px;
+  max-width: min(520px, calc(100vw - 36px));
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 13px;
+  border: 1px solid #a9bad9;
+  border-radius: 8px;
+  background: #f4f7ff;
+  color: #293b61;
+  box-shadow: 0 8px 30px rgb(29 54 101 / 18%);
+  font-size: 13px;
+}
+.pdf-annotation-clear-toast > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.pdf-annotation-clear-toast button {
+  flex: 0 0 auto;
+  padding: 3px 5px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #204aa5;
+  font-size: 12px;
+  font-weight: 760;
+  cursor: pointer;
+}
+.pdf-annotation-clear-toast button:hover { background: #e4ecff; }
+.pdf-annotation-clear-toast button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* An error can appear while the reversible toast is still alive. Keep the
+   alert at its established bottom-right position and move the status above
+   the app chrome instead of letting two fixed surfaces cover each other. */
+.error-toast + .pdf-annotation-clear-toast {
+  top: calc(70px + var(--safe-area-top));
+  bottom: auto;
+}
 .autosave-recovery-banner {
   position: fixed;
   z-index: 250;
@@ -2181,11 +2295,13 @@ button { color: inherit; }
   .slide-settings-popover,
   .slide-thumbnail-menu,
   .pdf-add-page-menu,
+  .pdf-page-actions-menu,
   .slide-rail,
   .pdf-page-rail,
   .pdf-rail-actions,
   .statusbar,
   .export-dialog,
+  .pdf-clear-annotations-dialog,
   .pdf-insert-dialog,
   .math-tools-dialog,
   .geogon-dialog,
@@ -2211,6 +2327,8 @@ button { color: inherit; }
   .slide-settings-label,
   .rail-empty strong,
   .pdf-page-label strong,
+  .pdf-clear-annotation-scopes legend,
+  .pdf-clear-annotation-scopes strong,
   .page-status,
   .zoom-status,
   .math-tool-card h3,
@@ -2253,6 +2371,8 @@ button { color: inherit; }
   .slide-aspect-segments button,
   .slide-thumbnail-menu,
   .pdf-add-page-menu button,
+  .pdf-page-actions-menu button,
+  .pdf-clear-annotation-scopes label,
   .pdf-insert-row-actions button,
   .pdf-insert-placement label,
   .toggle-morph-button,
@@ -2313,6 +2433,17 @@ button { color: inherit; }
 .app-shell[data-theme="dark"] .pdf-add-page-menu button { color: #e0e8f5; }
 .app-shell[data-theme="dark"] .pdf-add-page-menu button:hover,
 .app-shell[data-theme="dark"] .pdf-add-page-menu button:focus-visible { background: #29446f; color: #dbe7ff; }
+.app-shell[data-theme="dark"] .pdf-page-actions .pdf-page-actions-menu button { background: transparent; color: #e0e8f5; }
+.app-shell[data-theme="dark"] .pdf-page-actions .pdf-page-actions-menu button:hover,
+.app-shell[data-theme="dark"] .pdf-page-actions .pdf-page-actions-menu button:focus-visible,
+.app-shell[data-theme="dark"] .pdf-page-actions .pdf-page-actions-menu-button[aria-expanded="true"] { border-color: #617391; background: #29446f; color: #dbe7ff; }
+.app-shell[data-theme="dark"] .pdf-page-actions .pdf-page-actions-menu button.is-danger { color: #ffb4bf; }
+.app-shell[data-theme="dark"] .pdf-page-actions .pdf-page-actions-menu button.is-danger:hover,
+.app-shell[data-theme="dark"] .pdf-page-actions .pdf-page-actions-menu button.is-danger:focus-visible { background: #512b35; color: #ffc4cc; }
+.app-shell[data-theme="dark"] .pdf-clear-annotation-scopes label:has(input:checked) { border-color: #7196eb; background: #29446f; }
+.app-shell[data-theme="dark"] .pdf-clear-annotations-safety { border-color: #45536b; background: #111a28; color: #c0cbdb; }
+.app-shell[data-theme="dark"] .pdf-clear-annotations-actions .dialog-primary.is-danger { border-color: #a74a55; background: #a9323f; color: #fff; }
+.app-shell[data-theme="dark"] .pdf-clear-annotations-actions .dialog-primary.is-danger:hover:not(:disabled) { background: #8f2935; }
 .app-shell[data-theme="dark"] :is(
   .pdf-insert-section-heading h3,
   .pdf-insert-file-details strong,
@@ -2625,6 +2756,9 @@ button { color: inherit; }
 .app-shell[data-theme="dark"] .busy-overlay { background: rgb(16 23 34 / 84%); color: #e7edf7; }
 .app-shell[data-theme="dark"] .error-toast { border-color: #8f4b57; background: #351d26; color: #ffc5cd; }
 .app-shell[data-theme="dark"] .error-toast button { color: #ffb4bf; }
+.app-shell[data-theme="dark"] .pdf-annotation-clear-toast { border-color: #506a9c; background: #1c3158; color: #dbe7ff; }
+.app-shell[data-theme="dark"] .pdf-annotation-clear-toast button { color: #a9c2ff; }
+.app-shell[data-theme="dark"] .pdf-annotation-clear-toast button:hover { background: #29446f; }
 .app-shell[data-theme="dark"] .project-find-panel { color: #e7edf7; }
 .app-shell[data-theme="dark"] .project-find-title { color: #e7edf7; }
 .app-shell[data-theme="dark"] :is(.project-find-canvas-search, .project-find-query, .project-find-result) {
@@ -2802,9 +2936,17 @@ button { color: inherit; }
   }
   .presentation-palette-label { display: none; }
   .modal-backdrop { padding: 10px; }
-  .pdf-insert-backdrop {
+  :is(.pdf-insert-backdrop, .pdf-clear-annotations-backdrop) {
     padding: calc(8px + var(--safe-area-top)) calc(8px + var(--safe-area-right)) calc(8px + var(--safe-area-bottom)) calc(8px + var(--safe-area-left));
   }
+  .pdf-clear-annotations-dialog {
+    width: 100%;
+    max-height: calc(100dvh - var(--safe-area-top) - var(--safe-area-bottom) - 16px);
+    padding: 15px;
+  }
+  .pdf-clear-annotation-scopes label { min-height: 48px; align-items: center; }
+  .pdf-clear-annotations-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .pdf-clear-annotations-actions :is(.dialog-cancel, .dialog-primary) { min-height: 44px; width: 100%; }
   .pdf-insert-dialog {
     width: 100%;
     max-height: calc(100dvh - var(--safe-area-top) - var(--safe-area-bottom) - 16px);
@@ -2870,6 +3012,13 @@ button { color: inherit; }
    the first row between the document title and icon-only mode tabs. This
    avoids both the old 142px header and title/action overlap at 360–430px. */
 @media (max-width: 439px) {
+  .pdf-annotation-clear-toast {
+    right: calc(8px + var(--safe-area-right));
+    left: calc(8px + var(--safe-area-left));
+    max-width: none;
+  }
+  .pdf-annotation-clear-toast > span[aria-hidden="true"] { display: none; }
+  .error-toast + .pdf-annotation-clear-toast { top: calc(104px + var(--safe-area-top)); }
   .app-shell,
   .app-shell.is-slide-mode,
   .app-shell.is-pdf-mode { grid-template-rows: calc(96px + var(--safe-area-top)) minmax(0, 1fr); }
