@@ -3,7 +3,7 @@ import { PDFDocument } from "pdf-lib";
 
 const PRODUCTION_EDITOR_MOUNT_TIMEOUT = 90_000;
 
-type StoredElement = {
+type StoredElement = Record<string, unknown> & {
   id?: string;
   type?: string;
   text?: string;
@@ -16,7 +16,12 @@ type StoredProject = {
   pdfPageOrder?: string[];
   scenes: Record<string, {
     elements: StoredElement[];
-    pdfPage?: { documentId: string; pageIndex: number; viewRotation?: number };
+    pdfPage?: {
+      documentId: string;
+      pageIndex: number;
+      viewRotation?: number;
+      backgroundElementId?: string;
+    };
   }>;
 };
 
@@ -38,6 +43,30 @@ async function autosavedProject(page: import("@playwright/test").Page): Promise<
   });
 }
 
+async function setAutosavedProject(
+  page: import("@playwright/test").Page,
+  project: StoredProject,
+): Promise<void> {
+  await page.evaluate(async (storedProject) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("keyval", "readwrite");
+      transaction.objectStore("keyval").put(
+        storedProject,
+        "patterdraw:autosave:project:v1",
+      );
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+  }, project);
+}
+
 function liveElements(project: StoredProject | undefined): Array<Pick<StoredElement, "id" | "type" | "text">> {
   const scene = project?.scenes[project.activeSceneId];
   return (scene?.elements || [])
@@ -46,7 +75,15 @@ function liveElements(project: StoredProject | undefined): Array<Pick<StoredElem
 }
 
 async function addText(page: import("@playwright/test").Page, text: string): Promise<void> {
-  await page.getByTestId("toolbar-text").check({ force: true });
+  const textTool = page.getByTestId("toolbar-text");
+  await textTool.click({ force: true });
+  if (!await textTool.isChecked()) {
+    // The compact mobile toolbar can close in the same turn as a synthetic
+    // tool click. The documented keyboard shortcut reaches the same editor
+    // command without bypassing application state.
+    await page.keyboard.press("t");
+  }
+  await expect(textTool).toBeChecked();
   const editor = await page.locator(".editor-host").boundingBox();
   if (!editor) throw new Error("Editor host has no visible bounds.");
   await page.mouse.click(editor.x + 220, editor.y + 180);
@@ -55,6 +92,104 @@ async function addText(page: import("@playwright/test").Page, text: string): Pro
   await textEditor.fill(text);
   await textEditor.press("ControlOrMeta+Enter");
   await expect(textEditor).toHaveCount(0);
+}
+
+async function addRectangle(
+  page: import("@playwright/test").Page,
+  xOffset: number,
+): Promise<void> {
+  const rectangleTool = page.getByTestId("toolbar-rectangle");
+  await rectangleTool.click({ force: true });
+  if (!await rectangleTool.isChecked()) await page.keyboard.press("r");
+  await expect(rectangleTool).toBeChecked();
+  const editor = await page.locator(".editor-host").boundingBox();
+  if (!editor) throw new Error("Editor host has no visible bounds.");
+  const startX = editor.x + editor.width / 2 + xOffset;
+  const startY = editor.y + editor.height / 2 - 55;
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  await page.mouse.move(startX + 50, startY + 40, { steps: 6 });
+  await page.mouse.up();
+  await page.getByTestId("toolbar-selection").click({ force: true });
+}
+
+async function installSeparatedBoundLabelFallbackFixture(
+  page: import("@playwright/test").Page,
+): Promise<void> {
+  await expect.poll(async () => {
+    const project = await autosavedProject(page);
+    const elements = project?.scenes[project.activeSceneId]?.elements || [];
+    return {
+      rectangles: elements.filter((element) => (
+        element.type === "rectangle" && element.isDeleted !== true
+      )).length,
+      text: elements.filter((element) => (
+        element.type === "text" && element.isDeleted !== true
+      )).length,
+    };
+  }).toEqual({ rectangles: 2, text: 1 });
+
+  const saved = await autosavedProject(page);
+  if (!saved) throw new Error("The production fallback fixture was not autosaved.");
+  const scene = saved.scenes[saved.activeSceneId];
+  if (!scene?.pdfPage?.backgroundElementId) {
+    throw new Error("The production fallback fixture has no PDF background.");
+  }
+  const rectangles = scene.elements.filter((element) => (
+    element.type === "rectangle" && element.isDeleted !== true
+  ));
+  const label = scene.elements.find((element) => (
+    element.type === "text" && element.isDeleted !== true
+  ));
+  const container = rectangles[0];
+  const separator = rectangles[1];
+  if (!container?.id || !separator?.id || !label?.id) {
+    throw new Error("The production fallback annotations are incomplete.");
+  }
+  const boundContainer: StoredElement = {
+    ...container,
+    boundElements: [{ id: label.id, type: "text" }],
+  };
+  const vectorSeparator: StoredElement = {
+    ...separator,
+    boundElements: null,
+    roughness: 0,
+    strokeStyle: "solid",
+    fillStyle: "solid",
+    roundness: null,
+    strokeColor: "#008000",
+    backgroundColor: "#00ff00",
+    opacity: 100,
+  };
+  const boundLabel: StoredElement = { ...label, containerId: container.id };
+  const targetIds = new Set([container.id, separator.id, label.id]);
+  const reordered = scene.elements.filter((element) => (
+    !element.id || !targetIds.has(element.id)
+  ));
+  const backgroundIndex = reordered.findIndex(
+    (element) => element.id === scene.pdfPage?.backgroundElementId,
+  );
+  reordered.splice(
+    backgroundIndex + 1,
+    0,
+    boundContainer,
+    vectorSeparator,
+    boundLabel,
+  );
+  await setAutosavedProject(page, {
+    ...saved,
+    scenes: {
+      ...saved.scenes,
+      [saved.activeSceneId]: { ...scene, elements: reordered },
+    },
+  });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({
+    timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT,
+  });
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/);
+  await expect(page.locator(".pdf-annotation-count")).toHaveText("3");
 }
 
 test.beforeEach(async ({ page }) => {
@@ -332,4 +467,58 @@ test("keeps duplicate, rotate, delete, and Undo usable across production viewpor
     viewRotations: [0, 90],
   });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("confirms a visual PDF fallback without bypassing the hybrid default", async ({ page }) => {
+  const sourceDocument = await PDFDocument.create();
+  sourceDocument.addPage([400, 240]);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "production-hybrid-fallback.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await sourceDocument.save()),
+  });
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1, {
+    timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT,
+  });
+  // On the 320px project the PDF rail is an intentional modal drawer; close
+  // it before interacting with the editor toolbar, then restore it after ink.
+  await page.getByRole("button", { name: "Hide PDF pages", exact: true }).click();
+  await addRectangle(page, -95);
+  await addRectangle(page, -20);
+  await addText(page, "PRODUCTION_VISUAL_FALLBACK");
+  await page.getByRole("button", { name: "Show PDF pages", exact: true }).click();
+  await installSeparatedBoundLabelFallbackFixture(page);
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  await page.getByRole("button", { name: /Annotated PDF — expand pages/ }).click();
+  const fallback = page.getByRole("dialog", {
+    name: "Use visual PDF fallback?",
+    exact: true,
+  });
+  await expect(fallback).toBeVisible({ timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
+  await expect(fallback).toContainText("confirmation applies only to this export");
+  const dialogBounds = await fallback.boundingBox();
+  expect(dialogBounds).not.toBeNull();
+  expect(dialogBounds?.x || 0).toBeGreaterThanOrEqual(-1);
+  expect((dialogBounds?.x || 0) + (dialogBounds?.width || 0)).toBeLessThanOrEqual(
+    await page.evaluate(() => window.innerWidth + 1),
+  );
+
+  const downloadEvent = page.waitForEvent("download");
+  await fallback.getByRole("button", {
+    name: "Continue with visual PDF",
+    exact: true,
+  }).click();
+  const download = await downloadEvent;
+  const stream = await download.createReadStream();
+  if (!stream) throw new Error("The visual fallback download has no bytes.");
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+  expect((await PDFDocument.load(Buffer.concat(chunks))).getPageCount()).toBe(1);
+  await expect(fallback).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Settings", exact: true })
+    .getByRole("switch", { name: "Offer visual PDF fallback", exact: true }))
+    .toBeChecked();
 });

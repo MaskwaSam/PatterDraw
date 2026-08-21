@@ -357,6 +357,104 @@ async function typePdfTextAnnotation(
   await textEditor.press("ControlOrMeta+Enter");
 }
 
+async function installSeparatedBoundLabelFallbackFixture(
+  page: import("@playwright/test").Page,
+): Promise<void> {
+  type StoredElement = Record<string, unknown> & {
+    id: string;
+    type: string;
+    isDeleted?: boolean;
+  };
+  type StoredProject = Record<string, unknown> & {
+    activeSceneId: string;
+    scenes: Record<string, Record<string, unknown> & {
+      elements: StoredElement[];
+      pdfPage?: { backgroundElementId?: string };
+    }>;
+  };
+  await expect.poll(async () => {
+    const saved = await keyvalValue<StoredProject>(
+      page,
+      "patterdraw:autosave:project:v1",
+    );
+    const elements = saved?.scenes[saved.activeSceneId]?.elements || [];
+    return {
+      rectangles: elements.filter((element) => (
+        element.type === "rectangle" && element.isDeleted !== true
+      )).length,
+      text: elements.filter((element) => (
+        element.type === "text" && element.isDeleted !== true
+      )).length,
+    };
+  }).toEqual({ rectangles: 2, text: 1 });
+
+  const saved = await keyvalValue<StoredProject>(
+    page,
+    "patterdraw:autosave:project:v1",
+  );
+  if (!saved) throw new Error("The PDF fallback fixture was not autosaved.");
+  const scene = saved.scenes[saved.activeSceneId];
+  if (!scene?.pdfPage?.backgroundElementId) {
+    throw new Error("The PDF fallback fixture has no source background.");
+  }
+  const rectangles = scene.elements.filter((element) => (
+    element.type === "rectangle" && element.isDeleted !== true
+  ));
+  const label = scene.elements.find((element) => (
+    element.type === "text" && element.isDeleted !== true
+  ));
+  const container = rectangles[0];
+  const separator = rectangles[1];
+  if (!container || !separator || !label) {
+    throw new Error("The PDF fallback fixture annotations are incomplete.");
+  }
+  const boundContainer: StoredElement = {
+    ...container,
+    boundElements: [{ id: label.id, type: "text" }],
+  };
+  const vectorSeparator: StoredElement = {
+    ...separator,
+    boundElements: null,
+    roughness: 0,
+    strokeStyle: "solid",
+    fillStyle: "solid",
+    roundness: null,
+    strokeColor: "#008000",
+    backgroundColor: "#00ff00",
+    opacity: 100,
+  };
+  const boundLabel: StoredElement = {
+    ...label,
+    containerId: container.id,
+  };
+  const targetIds = new Set([container.id, separator.id, label.id]);
+  const reordered = scene.elements.filter((element) => !targetIds.has(element.id));
+  const backgroundIndex = reordered.findIndex(
+    (element) => element.id === scene.pdfPage?.backgroundElementId,
+  );
+  reordered.splice(
+    backgroundIndex + 1,
+    0,
+    boundContainer,
+    vectorSeparator,
+    boundLabel,
+  );
+  await setKeyvalValue(page, "patterdraw:autosave:project:v1", {
+    ...saved,
+    updatedAt: new Date().toISOString(),
+    scenes: {
+      ...saved.scenes,
+      [saved.activeSceneId]: { ...scene, elements: reordered },
+    },
+  });
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible();
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/);
+  await expect(page.locator(".pdf-annotation-count")).toHaveText("3");
+}
+
 async function openPdfAnnotationClearDialog(
   page: import("@playwright/test").Page,
   outputPage: number,
@@ -2238,7 +2336,11 @@ test("customizes optional features from device-local settings", async ({ page })
   for (const label of ["Slides", "PDF", "Insert tools", "Math tools", "Library", "Size & Position", "Project Find", "Status bar"]) {
     await expect(dialog.getByRole("switch", { name: label, exact: true })).toBeChecked();
   }
-  const pdfPreferenceLabels = ["Dark PDF preview", "Sharper active PDF page"] as const;
+  const pdfPreferenceLabels = [
+    "Dark PDF preview",
+    "Sharper active PDF page",
+    "Offer visual PDF fallback",
+  ] as const;
   for (const label of pdfPreferenceLabels) {
     await expect(dialog.getByRole("switch", { name: label, exact: true })).toBeChecked();
   }
@@ -2308,7 +2410,7 @@ test("customizes optional features from device-local settings", async ({ page })
   ))).toEqual({
     darkPdfPreview: false,
     sharperActivePdfPage: false,
-    offerVisualPdfFallback: true,
+    offerVisualPdfFallback: false,
   });
 
   await page.reload();
@@ -9855,6 +9957,12 @@ test("restores a deleted last-source PDF page and finalizes Undo on a later rota
   await expect(toast).toHaveCount(0);
   await expect(pages).toHaveCount(2, { timeout: 20_000 });
   await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await expect.poll(async () => (
+    await keyvalValue<DeleteStoredProject>(
+      page,
+      "patterdraw:autosave:project:v1",
+    )
+  )?.pdfPageOrder).toEqual(beforeDelete.pdfPageOrder);
   const restored = await keyvalValue<DeleteStoredProject>(
     page,
     "patterdraw:autosave:project:v1",
@@ -10139,6 +10247,71 @@ test("rotates PDF content, annotations, and off-page writing through persistence
     sourceBlueBounds,
   );
   expect(nonWhitePixelsAfter(restoredExport, 400)).toBeGreaterThan(10);
+});
+
+test("requires one-shot consent for a visual PDF fallback and respects its setting", async ({ page }) => {
+  test.setTimeout(120_000);
+  await openTestPdf(page);
+  await drawPdfRectangleAnnotation(page, { x: 310, y: 230 }, { x: 390, y: 290 });
+  await drawPdfRectangleAnnotation(page, { x: 430, y: 310 }, { x: 500, y: 370 });
+  await typePdfTextAnnotation(page, "VISUAL_FALLBACK_SENTINEL");
+  await expect(page.locator(".pdf-annotation-count")).toHaveText("3");
+  await installSeparatedBoundLabelFallbackFixture(page);
+
+  const downloads: string[] = [];
+  page.on("download", (download) => downloads.push(download.suggestedFilename()));
+  const requestExpandedExport = async () => {
+    await page.getByRole("button", { name: "More export options", exact: true }).click();
+    await page.getByRole("button", { name: /Annotated PDF — expand pages/ }).click();
+  };
+  const fallbackDialog = page.getByRole("dialog", {
+    name: "Use visual PDF fallback?",
+    exact: true,
+  });
+
+  await requestExpandedExport();
+  await expect(fallbackDialog).toBeVisible({ timeout: 20_000 });
+  await expect(fallbackDialog).toContainText("flattens PatterDraw annotations into page images");
+  await expect(fallbackDialog).toContainText("ask again every time");
+  await expect(fallbackDialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await fallbackDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(fallbackDialog).toHaveCount(0);
+  await page.waitForTimeout(150);
+  expect(downloads).toEqual([]);
+
+  await requestExpandedExport();
+  await expect(fallbackDialog).toBeVisible({ timeout: 20_000 });
+  const visualDownload = page.waitForEvent("download");
+  await fallbackDialog.getByRole("button", {
+    name: "Continue with visual PDF",
+    exact: true,
+  }).click();
+  const visualBytes = await downloadBytes(await visualDownload);
+  expect((await PDFDocument.load(visualBytes)).getPageCount()).toBe(1);
+  await expect(fallbackDialog).toHaveCount(0);
+
+  // Consent is intentionally not remembered; the same later hybrid fidelity
+  // incompatibility must present the decision again.
+  await requestExpandedExport();
+  await expect(fallbackDialog).toBeVisible({ timeout: 20_000 });
+  await fallbackDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(fallbackDialog).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+  await settings.getByRole("switch", {
+    name: "Offer visual PDF fallback",
+    exact: true,
+  }).uncheck();
+  await page.keyboard.press("Escape");
+  await expect(settings).toHaveCount(0);
+
+  await requestExpandedExport();
+  await expect(fallbackDialog).toHaveCount(0);
+  await expect(page.getByRole("alert")).toContainText(
+    "Visual PDF fallback offers are turned off in PDF settings",
+  );
+  expect(downloads).toHaveLength(1);
 });
 
 test("cleans deleted PDF bytes atomically when Web Locks are unavailable", async ({ page }) => {

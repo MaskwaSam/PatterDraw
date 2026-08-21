@@ -38,6 +38,7 @@ import {
   ClearPdfAnnotationsDialog,
   type PdfAnnotationScopeSummaries,
 } from "./components/ClearPdfAnnotationsDialog";
+import { VisualPdfFallbackDialog } from "./components/VisualPdfFallbackDialog";
 import { PresentationOverlay } from "./components/PresentationOverlay";
 import { StrokeWidthExtensions } from "./components/StrokeWidthExtensions";
 import { MathToolsMenuExtension } from "./components/MathToolsMenuExtension";
@@ -353,6 +354,11 @@ type SlideFrameGesture = {
 };
 type PendingPresentationTransition = { frameId: string; animate: boolean; durationMs: number };
 type PendingProjectSearchTarget = Pick<ProjectSearchResult, "elementId" | "sceneId">;
+type PendingVisualPdfFallback = {
+  project: ClassroomProject;
+  pdfBytes: Record<PdfDocumentId, Uint8Array>;
+  mode: PdfExportMode;
+};
 export type PendingScenePersistence = {
   sceneId: string;
   elements: readonly ExcalidrawElement[];
@@ -1267,6 +1273,7 @@ export default function App() {
       })
   ));
   const [exportOpen, setExportOpen] = useState(false);
+  const [pendingVisualPdfFallback, setPendingVisualPdfFallback] = useState<PendingVisualPdfFallback | null>(null);
   const [isLibraryOpen, setIsLibraryOpen] = useState(false);
   const [isProjectFindOpen, setIsProjectFindOpen] = useState(false);
   const [isSizePositionOpen, setIsSizePositionOpen] = useState(false);
@@ -3630,10 +3637,12 @@ export default function App() {
     if (followupNeeded) flushAutosave(true);
   }, [autosaveRecoveryDetail, autosaveRecoveryKind, commitCurrentLiveScenePersistence, flushAutosave]);
 
-  const runPdfExport = useCallback(async (kind: "slides" | PdfExportMode) => {
-    const currentProject = commitCurrentLiveScenePersistence();
-    if (!currentProject) return;
-    const exportPdfBytes = clonePdfBytes(pdfBytesRef.current);
+  const executePdfExport = useCallback(async (
+    currentProject: ClassroomProject,
+    exportPdfBytes: Record<PdfDocumentId, Uint8Array>,
+    kind: "slides" | PdfExportMode,
+    annotationMode: "hybrid" | "visual" = "hybrid",
+  ) => {
     pdfExportAbortControllerRef.current?.abort();
     const controller = new AbortController();
     pdfExportAbortControllerRef.current = controller;
@@ -3649,7 +3658,11 @@ export default function App() {
     setBusyMessage(kind === "slides" ? "Exporting slides…" : "Exporting annotated PDF…");
     try {
       await afterNextPaint();
-      const { exportAnnotatedPdf, exportSlidesPdf } = await import("./lib/pdf/export-pdf");
+      const {
+        exportAnnotatedPdf,
+        exportSlidesPdf,
+        PdfHybridFallbackRequiredError,
+      } = await import("./lib/pdf/export-pdf");
       const exportOptions = {
         signal: controller.signal,
         onProgress: (progress: PdfOperationProgress) => {
@@ -3658,9 +3671,36 @@ export default function App() {
           }
         },
       };
-      const blob = kind === "slides"
-        ? await exportSlidesPdf(currentProject, exportOptions)
-        : await exportAnnotatedPdf(currentProject, exportPdfBytes, kind, exportOptions);
+      let blob: Blob;
+      if (kind === "slides") {
+        blob = await exportSlidesPdf(currentProject, exportOptions);
+      } else {
+        try {
+          blob = await exportAnnotatedPdf(currentProject, exportPdfBytes, kind, {
+            ...exportOptions,
+            annotationMode,
+          });
+        } catch (error) {
+          if (
+            annotationMode === "hybrid"
+            && error instanceof PdfHybridFallbackRequiredError
+          ) {
+            if (pdfPreferencesRef.current.offerVisualPdfFallback) {
+              setPendingVisualPdfFallback({
+                project: currentProject,
+                pdfBytes: exportPdfBytes,
+                mode: kind,
+              });
+              return;
+            }
+            throw new Error(
+              "Higher-fidelity PDF export could not safely preserve this annotation stack. Visual PDF fallback offers are turned off in PDF settings.",
+              { cause: error },
+            );
+          }
+          throw error;
+        }
+      }
       if (controller.signal.aborted || pdfExportAbortControllerRef.current !== controller) return;
       const suffix = kind === "slides" ? "slides" : kind === "expand" ? "annotated-expanded" : "annotated-openboard-fit";
       downloadBlob(blob, `${safeFileStem(currentProject.title)}-${suffix}.pdf`);
@@ -3676,7 +3716,31 @@ export default function App() {
         setBusyMessage(null);
       }
     }
-  }, [commitCurrentLiveScenePersistence]);
+  }, []);
+
+  const runPdfExport = useCallback(async (kind: "slides" | PdfExportMode) => {
+    const currentProject = commitCurrentLiveScenePersistence();
+    if (!currentProject) return;
+    setPendingVisualPdfFallback(null);
+    const exportPdfBytes = clonePdfBytes(pdfBytesRef.current);
+    await executePdfExport(currentProject, exportPdfBytes, kind);
+  }, [commitCurrentLiveScenePersistence, executePdfExport]);
+
+  const cancelVisualPdfFallback = useCallback(() => {
+    setPendingVisualPdfFallback(null);
+  }, []);
+
+  const confirmVisualPdfFallback = useCallback(() => {
+    const pending = pendingVisualPdfFallback;
+    if (!pending) return;
+    setPendingVisualPdfFallback(null);
+    void executePdfExport(
+      pending.project,
+      pending.pdfBytes,
+      pending.mode,
+      "visual",
+    );
+  }, [executePdfExport, pendingVisualPdfFallback]);
 
   const runPptxExport = useCallback(async () => {
     const currentProject = commitCurrentLiveScenePersistence();
@@ -7688,6 +7752,13 @@ export default function App() {
           onCancel={closePdfAnnotationClearDialog}
           onConfirm={confirmPdfAnnotationClear}
           returnFocusRef={pdfPageActionsTriggerRef}
+        />
+      ) : null}
+      {pendingVisualPdfFallback ? (
+        <VisualPdfFallbackDialog
+          onCancel={cancelVisualPdfFallback}
+          onConfirm={confirmVisualPdfFallback}
+          returnFocusRef={exportOptionsTriggerRef}
         />
       ) : null}
       {exportOpen && (

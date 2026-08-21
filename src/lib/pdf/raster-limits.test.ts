@@ -9,6 +9,7 @@ import {
   getPdfImportEncodedByteBudget,
   getPdfImportRasterScale,
   getPdfExportRasterBudget,
+  getPdfExportResourceLimits,
   getPdfRasterBudget,
   getPdfRasterDeviceTier,
   pdfRasterCanvasToPngBytes,
@@ -163,5 +164,24 @@ describe("PDF raster canvas lifecycle", () => {
     const canvas = { width: 8_192, height: 4_096 };
     releasePdfRasterCanvas(canvas);
     expect(canvas).toEqual({ width: 0, height: 0 });
+  });
+});
+
+describe("PDF export resource limits", () => {
+  it("returns immutable defaults and accepts narrow test/device overrides", () => {
+    const defaults = getPdfExportResourceLimits();
+    expect(defaults.maxRasterPixels).toBe(MAX_PDF_RASTER_PIXELS_PER_DOCUMENT);
+    expect(defaults.maxOutputBytes).toBeGreaterThan(defaults.maxRasterBytes);
+    expect(Object.isFrozen(defaults)).toBe(true);
+    expect(getPdfExportResourceLimits({ maxHybridRuns: 7 }).maxHybridRuns).toBe(7);
+  });
+
+  it("rejects zero, fractional, and non-finite export guards", () => {
+    expect(() => getPdfExportResourceLimits({ maxRasterBytes: 0 }))
+      .toThrow(/maxRasterBytes limit is invalid/);
+    expect(() => getPdfExportResourceLimits({ maxVectorElements: 1.5 }))
+      .toThrow(/maxVectorElements limit is invalid/);
+    expect(() => getPdfExportResourceLimits({ maxOutputBytes: Number.POSITIVE_INFINITY }))
+      .toThrow(/maxOutputBytes limit is invalid/);
   });
 });

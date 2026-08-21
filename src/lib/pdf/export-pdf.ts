@@ -28,11 +28,13 @@ import {
 } from "./source-page";
 import {
   DEFAULT_PDF_RASTER_BUDGET,
+  getPdfExportResourceLimits,
   getBrowserPdfRasterBudget,
   getPdfExportRasterBudget,
   MAX_PDF_PAGE_EDGE_POINTS,
   pdfRasterCanvasToPngBytes,
   releasePdfRasterCanvas,
+  type PdfExportResourceLimits,
   type PdfRasterBudget,
 } from "./raster-limits";
 import {
@@ -47,15 +49,73 @@ import {
   getPdfPageDisplayGeometry,
   getPdfPageEffectiveRotation,
 } from "./page-rotation";
+import {
+  drawHybridVectorRun,
+  HybridAnnotationPlanError,
+  planHybridAnnotationRuns,
+  type HybridAnnotationPlan,
+  type HybridAnnotationRun,
+  type HybridRasterReason,
+} from "./hybrid-annotations";
 
 export type PdfExportMode = "expand" | "openboard-fit";
 
 export interface ExportAnnotatedPdfOptions {
   signal?: AbortSignal;
   onProgress?: PdfOperationProgressCallback;
+  /** Hybrid is primary; visual uses the legacy whole-annotation raster. */
+  annotationMode?: PdfAnnotationExportMode;
+  /** Local-only evidence for UI/debug output. Never transmitted or persisted. */
+  onDiagnostics?: (diagnostics: Readonly<PdfExportDiagnostics>) => void;
+  /** Finer progress/cancellation boundary for hybrid vector/raster runs. */
+  onAnnotationRunProgress?: (
+    progress: Readonly<PdfAnnotationRunProgress>,
+  ) => void;
+  /** Test/device override; production callers should use the defaults. */
+  resourceLimits?: Partial<PdfExportResourceLimits>;
 }
 
 export interface ExportSlidesPdfOptions extends ExportAnnotatedPdfOptions {}
+
+export type PdfAnnotationExportMode = "hybrid" | "visual";
+
+export interface PdfAnnotationRunProgress {
+  sceneId: string;
+  pagePosition: number;
+  pageTotal: number;
+  runPosition: number;
+  runTotal: number;
+  runKind: "vector" | "raster";
+}
+
+export interface PdfExportPageDiagnostics {
+  sceneId: string;
+  annotationCount: number;
+  runCount: number;
+  vectorElementCount: number;
+  rasterElementCount: number;
+  rasterizedTypes: readonly string[];
+  rasterReasons: Readonly<Partial<Record<HybridRasterReason, number>>>;
+}
+
+export interface PdfExportDiagnostics {
+  annotationMode: PdfAnnotationExportMode;
+  pageCount: number;
+  sourceDocumentCount: number;
+  vectorElementCount: number;
+  vectorPathOperations: number;
+  rasterElementCount: number;
+  rasterRunCount: number;
+  rasterPixels: number;
+  rasterBytes: number;
+  outputBytes: number;
+  pages: readonly PdfExportPageDiagnostics[];
+}
+
+export interface PdfExportResult {
+  blob: Blob;
+  diagnostics: Readonly<PdfExportDiagnostics>;
+}
 
 export type PdfExportFailureCode = "encrypted-source" | "unsupported-source";
 
@@ -70,8 +130,127 @@ export class PdfExportError extends Error {
   }
 }
 
+export type PdfExportLimitCode =
+  | "raster-geometry"
+  | "raster-pixels"
+  | "raster-bytes"
+  | "vector-elements"
+  | "vector-path-operations"
+  | "output-bytes";
+
+export class PdfExportLimitError extends Error {
+  constructor(
+    message: string,
+    public readonly code: PdfExportLimitCode,
+    public readonly actual: number,
+    public readonly limit: number,
+  ) {
+    super(message);
+    this.name = "PdfExportLimitError";
+  }
+}
+
+export class PdfHybridFallbackRequiredError extends Error {
+  readonly code = "hybrid-visual-fallback-required" as const;
+  readonly fallbackMode = "visual" as const;
+
+  constructor(
+    message: string,
+    public readonly reason:
+      | "too-many-runs"
+      | "dependent-elements-separated",
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "PdfHybridFallbackRequiredError";
+  }
+}
+
 const EXPORT_PADDING = 24;
 const ANNOTATION_SCALE = 2;
+
+class PdfExportResourceTracker {
+  vectorElements = 0;
+  vectorPathOperations = 0;
+  rasterPixels = 0;
+  rasterBytes = 0;
+  outputBytes = 0;
+
+  constructor(readonly limits: Readonly<PdfExportResourceLimits>) {}
+
+  chargeVector(elements: number, pathOperations: number): void {
+    this.vectorElements += elements;
+    this.vectorPathOperations += pathOperations;
+    if (this.vectorElements > this.limits.maxVectorElements) {
+      throw new PdfExportLimitError(
+        "The PDF has too many vector annotations to export safely.",
+        "vector-elements",
+        this.vectorElements,
+        this.limits.maxVectorElements,
+      );
+    }
+    if (this.vectorPathOperations > this.limits.maxVectorPathOperations) {
+      throw new PdfExportLimitError(
+        "The PDF vector annotations are too complex to export safely.",
+        "vector-path-operations",
+        this.vectorPathOperations,
+        this.limits.maxVectorPathOperations,
+      );
+    }
+  }
+
+  chargeRasterPixels(pixels: number): void {
+    if (!Number.isSafeInteger(pixels) || pixels <= 0) {
+      throw new PdfExportLimitError(
+        "A PDF annotation raster has invalid dimensions.",
+        "raster-geometry",
+        pixels,
+        this.limits.maxRasterPixels,
+      );
+    }
+    this.rasterPixels += pixels;
+    if (this.rasterPixels > this.limits.maxRasterPixels) {
+      throw new PdfExportLimitError(
+        "The PDF annotations require too much raster memory to export safely.",
+        "raster-pixels",
+        this.rasterPixels,
+        this.limits.maxRasterPixels,
+      );
+    }
+  }
+
+  chargeRasterBytes(bytes: number): void {
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) {
+      throw new PdfExportLimitError(
+        "A PDF annotation raster produced invalid encoded data.",
+        "raster-bytes",
+        bytes,
+        this.limits.maxRasterBytes,
+      );
+    }
+    this.rasterBytes += bytes;
+    if (this.rasterBytes > this.limits.maxRasterBytes) {
+      throw new PdfExportLimitError(
+        "The PDF annotations produce too much raster data to export safely.",
+        "raster-bytes",
+        this.rasterBytes,
+        this.limits.maxRasterBytes,
+      );
+    }
+  }
+
+  chargeOutputBytes(bytes: number): void {
+    this.outputBytes = bytes;
+    if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > this.limits.maxOutputBytes) {
+      throw new PdfExportLimitError(
+        "The exported PDF is larger than the safe local file limit.",
+        "output-bytes",
+        bytes,
+        this.limits.maxOutputBytes,
+      );
+    }
+  }
+}
 
 function asElements(scene: SerializedScene): ExcalidrawElement[] {
   return scene.elements as unknown as ExcalidrawElement[];
@@ -93,6 +272,20 @@ async function awaitExportCanvas(
     return canvas;
   });
   return awaitPdfOperation<HTMLCanvasElement>(cleanupAfterLateAbort, signal);
+}
+
+async function encodeExportCanvas(
+  canvas: HTMLCanvasElement,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  try {
+    return await awaitPdfOperation(pdfRasterCanvasToPngBytes(canvas), signal);
+  } finally {
+    // The PNG helper releases on normal completion. This additional release is
+    // what drops the bitmap immediately when AbortSignal wins a pending
+    // browser toBlob callback (which cannot itself be cancelled).
+    releasePdfRasterCanvas(canvas);
+  }
 }
 
 export function getPdfPageExportBounds(scene: SerializedScene): ExportBounds {
@@ -169,17 +362,30 @@ export function getSlidePdfExportDimensions(
 
 async function renderAnnotations(
   scene: SerializedScene,
+  elements: readonly NonDeletedExcalidrawElement[],
   pageScale: number,
   rasterBudget: Readonly<PdfRasterBudget>,
+  resources: PdfExportResourceTracker,
   signal?: AbortSignal,
 ): Promise<{
   bytes: Uint8Array;
   bounds: readonly [number, number, number, number];
 } | null> {
   if (!scene.pdfPage) return null;
-  const elements = pdfAnnotationElements(scene);
   if (!elements.length) return null;
   const bounds = getCommonBounds(elements);
+  if (
+    bounds.some((coordinate) => !Number.isFinite(coordinate))
+    || bounds[2] <= bounds[0]
+    || bounds[3] <= bounds[1]
+  ) {
+    throw new PdfExportLimitError(
+      "A PDF annotation raster has invalid scene bounds.",
+      "raster-geometry",
+      Number.NaN,
+      resources.limits.maxRasterPixels,
+    );
+  }
   throwIfPdfOperationAborted(signal);
   const canvasPromise = exportToCanvas({
     elements,
@@ -194,7 +400,15 @@ async function renderAnnotations(
     ),
   }) as Promise<HTMLCanvasElement>;
   const canvas = await awaitExportCanvas(canvasPromise, signal);
-  const bytes = await awaitPdfOperation(pdfRasterCanvasToPngBytes(canvas), signal);
+  const pixels = canvas.width * canvas.height;
+  try {
+    resources.chargeRasterPixels(pixels);
+  } catch (error) {
+    releasePdfRasterCanvas(canvas);
+    throw error;
+  }
+  const bytes = await encodeExportCanvas(canvas, signal);
+  resources.chargeRasterBytes(bytes.byteLength);
   throwIfPdfOperationAborted(signal);
   return { bytes, bounds };
 }
@@ -328,21 +542,130 @@ function drawEmbeddedSourcePage(
   }
 }
 
-export async function exportAnnotatedPdf(
+function emptyHybridPlan(
+  elements: readonly NonDeletedExcalidrawElement[],
+): HybridAnnotationPlan {
+  const rasterReasons = Object.freeze({
+    "unsupported-type": elements.length,
+    "frame-clipping": 0,
+    "visual-style": 0,
+    "invalid-geometry": 0,
+    "vector-budget": 0,
+  });
+  return Object.freeze({
+    runs: elements.length
+      ? Object.freeze([Object.freeze({
+          kind: "raster" as const,
+          elements: Object.freeze(elements.slice()),
+          rasterReasons: Object.freeze(elements.map(() => "unsupported-type" as const)),
+        })])
+      : Object.freeze([]),
+    vectorElementCount: 0,
+    vectorPathOperations: 0,
+    rasterElementCount: elements.length,
+    rasterizedTypes: Object.freeze(Array.from(
+      new Set(elements.map((element) => String(element.type))),
+    ).sort()),
+    rasterReasons,
+  });
+}
+
+function pageDiagnostics(
+  sceneId: string,
+  annotationCount: number,
+  plan: HybridAnnotationPlan,
+): PdfExportPageDiagnostics {
+  return Object.freeze({
+    sceneId,
+    annotationCount,
+    runCount: plan.runs.length,
+    vectorElementCount: plan.vectorElementCount,
+    rasterElementCount: plan.rasterElementCount,
+    rasterizedTypes: plan.rasterizedTypes,
+    rasterReasons: plan.rasterReasons,
+  });
+}
+
+async function drawRasterAnnotationRun(
+  output: PDFDocument,
+  targetPage: ReturnType<PDFDocument["addPage"]>,
+  scene: SerializedScene,
+  run: HybridAnnotationRun,
+  target: {
+    scale: number;
+    originX: number;
+    originFromTop: number;
+    targetHeight: number;
+  },
+  rasterBudget: Readonly<PdfRasterBudget>,
+  resources: PdfExportResourceTracker,
+  signal?: AbortSignal,
+): Promise<void> {
+  const annotations = await renderAnnotations(
+    scene,
+    run.elements,
+    target.scale,
+    rasterBudget,
+    resources,
+    signal,
+  );
+  if (!annotations) return;
+  const [x1, y1, x2, y2] = annotations.bounds;
+  const image = await awaitPdfOperation(output.embedPng(annotations.bytes), signal);
+  const width = (x2 - x1) * target.scale;
+  const height = (y2 - y1) * target.scale;
+  targetPage.drawImage(image, {
+    x: target.originX + x1 * target.scale,
+    y: target.targetHeight - (target.originFromTop + y1 * target.scale + height),
+    width,
+    height,
+  });
+  await awaitPdfOperation(image.embed(), signal);
+}
+
+function reportAnnotationRunProgress(
+  options: ExportAnnotatedPdfOptions,
+  progress: PdfAnnotationRunProgress,
+): void {
+  throwIfPdfOperationAborted(options.signal);
+  options.onAnnotationRunProgress?.(Object.freeze({ ...progress }));
+  throwIfPdfOperationAborted(options.signal);
+}
+
+export async function exportAnnotatedPdfWithDiagnostics(
   project: ClassroomProject,
   pdfBytes: Record<PdfDocumentId, Uint8Array>,
   mode: PdfExportMode = "expand",
   options: ExportAnnotatedPdfOptions = {},
-): Promise<Blob> {
+): Promise<PdfExportResult> {
   throwIfPdfOperationAborted(options.signal);
+  const annotationMode = options.annotationMode ?? "hybrid";
+  if (annotationMode !== "hybrid" && annotationMode !== "visual") {
+    throw new Error("The PDF annotation export mode is invalid.");
+  }
   const scenes = orderedPdfScenes(project)
     .filter((scene): scene is SerializedScene & { pdfPage: NonNullable<SerializedScene["pdfPage"]> } => !!scene.pdfPage);
   if (!scenes.length) throw new Error("This project has no imported PDF pages.");
 
   const output = await awaitPdfOperation(PDFDocument.create(), options.signal);
+  const browserRasterBudget = getBrowserPdfRasterBudget();
+  const requestedResourceLimits = getPdfExportResourceLimits(options.resourceLimits);
+  const resources = new PdfExportResourceTracker(Object.freeze({
+    ...requestedResourceLimits,
+    maxRasterPixels: Math.min(
+      requestedResourceLimits.maxRasterPixels,
+      browserRasterBudget.maxPixelsPerDocument,
+    ),
+  }));
+  const diagnosticPages = new Map<string, PdfExportPageDiagnostics>();
+  const scenePositions = new Map(
+    scenes.map((scene, index) => [scene.id, index + 1] as const),
+  );
+  let rasterRunCount = 0;
+  let hybridRunCount = 0;
   const rasterBudget = getPdfAnnotationRasterBudget(
     scenes,
-    getBrowserPdfRasterBudget(),
+    browserRasterBudget,
   );
   output.setTitle(project.title);
   output.setCreator("PatterDraw");
@@ -557,24 +880,102 @@ export async function exportAnnotatedPdf(
         source.name,
       );
       const { scene, targetPage } = target;
-      const annotations = await renderAnnotations(
-        scene,
-        target.scale,
-        rasterBudget,
-        options.signal,
+      const elements = pdfAnnotationElements(scene);
+      let plan: HybridAnnotationPlan;
+      if (annotationMode === "visual") {
+        plan = emptyHybridPlan(elements);
+      } else if (elements.length) {
+        const remainingRuns = resources.limits.maxHybridRuns - hybridRunCount;
+        if (remainingRuns <= 0) {
+          throw new PdfHybridFallbackRequiredError(
+            "The annotation stack has too many alternating layers for safe hybrid export. Confirm the visual PDF fallback to retry.",
+            "too-many-runs",
+          );
+        }
+        try {
+          plan = planHybridAnnotationRuns(elements, {
+            maxRuns: remainingRuns,
+            maxVectorElements: Math.max(
+              0,
+              resources.limits.maxVectorElements - resources.vectorElements,
+            ),
+            maxVectorPathOperations: Math.max(
+              0,
+              resources.limits.maxVectorPathOperations - resources.vectorPathOperations,
+            ),
+          });
+        } catch (error) {
+          if (error instanceof HybridAnnotationPlanError) {
+            throw new PdfHybridFallbackRequiredError(
+              `${error.message} Confirm the visual PDF fallback to retry.`,
+              error.code,
+              { cause: error },
+            );
+          }
+          // Only an explicit planner incompatibility is eligible for the
+          // user-confirmed visual retry. Unexpected runtime, memory, DOM, and
+          // renderer failures must retain their original identity because the
+          // visual path uses the same (or a larger) raster pipeline.
+          throw error;
+        }
+        hybridRunCount += plan.runs.length;
+      } else {
+        plan = emptyHybridPlan(elements);
+      }
+
+      diagnosticPages.set(
+        scene.id,
+        pageDiagnostics(scene.id, elements.length, plan),
       );
-      if (annotations) {
-        const [x1, y1, x2, y2] = annotations.bounds;
-        const image = await awaitPdfOperation(output.embedPng(annotations.bytes), options.signal);
-        const width = (x2 - x1) * target.scale;
-        const height = (y2 - y1) * target.scale;
-        targetPage.drawImage(image, {
-          x: target.originX + x1 * target.scale,
-          y: target.targetHeight - (target.originFromTop + y1 * target.scale + height),
-          width,
-          height,
+      const pagePosition = scenePositions.get(scene.id) ?? targetIndex + 1;
+      for (let runIndex = 0; runIndex < plan.runs.length; runIndex += 1) {
+        const run = plan.runs[runIndex];
+        // The ordinary operation callback is repeated between runs so existing
+        // UI receives a cancellation boundary without requiring a new display.
+        reportExportProgress(
+          options,
+          "rendering",
+          documentIndex,
+          documentTotal,
+          targetIndex + 1,
+          documentTargets.length,
+          source.name,
+        );
+        reportAnnotationRunProgress(options, {
+          sceneId: scene.id,
+          pagePosition,
+          pageTotal: scenes.length,
+          runPosition: runIndex + 1,
+          runTotal: plan.runs.length,
+          runKind: run.kind,
         });
-        await awaitPdfOperation(image.embed(), options.signal);
+        if (run.kind === "vector") {
+          resources.chargeVector(
+            run.elements.length,
+            run.vectorInstructions?.reduce(
+              (total, vector) => total + vector.pathOperations,
+              0,
+            ) ?? 0,
+          );
+          drawHybridVectorRun(targetPage, run, {
+            originX: target.originX,
+            originFromTop: target.originFromTop,
+            targetHeight: target.targetHeight,
+            scale: target.scale,
+          });
+        } else {
+          rasterRunCount += 1;
+          await drawRasterAnnotationRun(
+            output,
+            targetPage,
+            scene,
+            run,
+            target,
+            rasterBudget,
+            resources,
+            options.signal,
+          );
+        }
       }
     }
   }
@@ -588,8 +989,46 @@ export async function exportAnnotatedPdf(
     scenes.length,
   );
   const savedBytes = await awaitPdfOperation(output.save(), options.signal);
+  resources.chargeOutputBytes(savedBytes.byteLength);
   throwIfPdfOperationAborted(options.signal);
-  return new Blob([bytesForBlob(savedBytes)], { type: "application/pdf" });
+  const diagnostics = Object.freeze({
+    annotationMode,
+    pageCount: scenes.length,
+    sourceDocumentCount: documentTotal,
+    vectorElementCount: resources.vectorElements,
+    vectorPathOperations: resources.vectorPathOperations,
+    rasterElementCount: Array.from(diagnosticPages.values()).reduce(
+      (total, page) => total + page.rasterElementCount,
+      0,
+    ),
+    rasterRunCount,
+    rasterPixels: resources.rasterPixels,
+    rasterBytes: resources.rasterBytes,
+    outputBytes: resources.outputBytes,
+    pages: Object.freeze(scenes.map((scene) => (
+      diagnosticPages.get(scene.id)
+      ?? pageDiagnostics(scene.id, 0, emptyHybridPlan([]))
+    ))),
+  }) satisfies Readonly<PdfExportDiagnostics>;
+  options.onDiagnostics?.(diagnostics);
+  return Object.freeze({
+    blob: new Blob([bytesForBlob(savedBytes)], { type: "application/pdf" }),
+    diagnostics,
+  });
+}
+
+export async function exportAnnotatedPdf(
+  project: ClassroomProject,
+  pdfBytes: Record<PdfDocumentId, Uint8Array>,
+  mode: PdfExportMode = "expand",
+  options: ExportAnnotatedPdfOptions = {},
+): Promise<Blob> {
+  return (await exportAnnotatedPdfWithDiagnostics(
+    project,
+    pdfBytes,
+    mode,
+    options,
+  )).blob;
 }
 
 export async function exportSlidesPdf(
@@ -599,8 +1038,17 @@ export async function exportSlidesPdf(
   throwIfPdfOperationAborted(options.signal);
   if (!project.slideOrder.length) throw new Error("Add at least one frame slide before exporting.");
   const output = await awaitPdfOperation(PDFDocument.create(), options.signal);
+  const browserRasterBudget = getBrowserPdfRasterBudget();
+  const requestedResourceLimits = getPdfExportResourceLimits(options.resourceLimits);
+  const resources = new PdfExportResourceTracker(Object.freeze({
+    ...requestedResourceLimits,
+    maxRasterPixels: Math.min(
+      requestedResourceLimits.maxRasterPixels,
+      browserRasterBudget.maxPixelsPerDocument,
+    ),
+  }));
   const rasterBudget = getPdfExportRasterBudget(
-    getBrowserPdfRasterBudget(),
+    browserRasterBudget,
     project.slideOrder.length,
   );
   output.setTitle(`${project.title} — slides`);
@@ -634,10 +1082,14 @@ export async function exportSlidesPdf(
       exportPadding: 0,
       getDimensions: () => dimensions,
     }) as Promise<HTMLCanvasElement>, options.signal);
-    const imageBytes = await awaitPdfOperation(
-      pdfRasterCanvasToPngBytes(canvas),
-      options.signal,
-    );
+    try {
+      resources.chargeRasterPixels(canvas.width * canvas.height);
+    } catch (error) {
+      releasePdfRasterCanvas(canvas);
+      throw error;
+    }
+    const imageBytes = await encodeExportCanvas(canvas, options.signal);
+    resources.chargeRasterBytes(imageBytes.byteLength);
     const image = await awaitPdfOperation(output.embedPng(imageBytes), options.signal);
     const page = output.addPage([
       Math.max(renderData.frame.width, 1),
@@ -658,6 +1110,7 @@ export async function exportSlidesPdf(
     `${project.title} — slides`,
   );
   const savedBytes = await awaitPdfOperation(output.save(), options.signal);
+  resources.chargeOutputBytes(savedBytes.byteLength);
   throwIfPdfOperationAborted(options.signal);
   return new Blob([bytesForBlob(savedBytes)], { type: "application/pdf" });
 }

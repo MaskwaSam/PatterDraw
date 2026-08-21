@@ -29,12 +29,16 @@ vi.mock("@excalidraw/excalidraw", () => ({
 
 import {
   exportAnnotatedPdf,
+  exportAnnotatedPdfWithDiagnostics,
+  exportSlidesPdf,
   getPdfAnnotationExportDimensions,
   getPdfAnnotationRasterBudget,
   getPdfPageExportBounds,
   getSlidePdfExportDimensions,
   normalizePdfExportError,
   PdfExportError,
+  PdfExportLimitError,
+  PdfHybridFallbackRequiredError,
 } from "./export-pdf";
 import { getPdfRasterBudget } from "./raster-limits";
 import { copySourcePageTransparencyGroup } from "./source-page";
@@ -50,6 +54,80 @@ const baseElement = {
   strokeWidth: 1,
   isDeleted: false,
 };
+
+function fullAnnotation(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "annotation",
+    type: "rectangle",
+    x: 20,
+    y: 20,
+    width: 100,
+    height: 100,
+    angle: 0,
+    strokeColor: "transparent",
+    backgroundColor: "#ff0000",
+    fillStyle: "solid",
+    strokeWidth: 2,
+    strokeStyle: "solid",
+    roundness: null,
+    roughness: 0,
+    opacity: 100,
+    seed: 1,
+    version: 1,
+    versionNonce: 1,
+    index: null,
+    isDeleted: false,
+    groupIds: [],
+    frameId: null,
+    boundElements: null,
+    updated: 1,
+    link: null,
+    locked: false,
+    ...overrides,
+  };
+}
+
+function projectWithAnnotations(
+  sourceByteLength: number,
+  annotations: readonly Record<string, unknown>[],
+): ClassroomProject {
+  const scene = {
+    id: "page",
+    name: "Page 1",
+    elements: [baseElement, ...annotations],
+    appState: {},
+    files: {},
+    pdfPage: {
+      documentId: "pdf",
+      pageIndex: 0,
+      width: 160,
+      height: 160,
+      rotation: 0 as const,
+      backgroundElementId: "background",
+    },
+  } satisfies SerializedScene;
+  return {
+    schemaVersion: 1,
+    id: "hybrid-project",
+    title: "Hybrid annotations",
+    createdAt: "2026-08-21T00:00:00.000Z",
+    updatedAt: "2026-08-21T00:00:00.000Z",
+    activeSceneId: scene.id,
+    scenes: { [scene.id]: scene },
+    slideOrder: [],
+    pdfPageOrder: [scene.id],
+    pdfDocuments: {
+      pdf: {
+        id: "pdf",
+        name: "hybrid-source.pdf",
+        mimeType: "application/pdf",
+        byteLength: sourceByteLength,
+        pageCount: 1,
+        archivePath: "documents/pdf.pdf",
+      },
+    },
+  };
+}
 
 function blankPdfProjectForIntegrity(
   byteLength: number,
@@ -1717,5 +1795,414 @@ describe("PDF export bounds", () => {
       { width: 600, height: 800 },
     ]);
     expect(project.scenes["page-3"].pdfPage?.pageIndex).toBe(2);
+  });
+
+  it("exports fidelity-safe annotation shapes as vectors with local diagnostics", async () => {
+    const source = await PDFDocument.create();
+    source.addPage([160, 160]);
+    const sourceBytes = await source.save();
+    const project = projectWithAnnotations(sourceBytes.byteLength, [
+      fullAnnotation({ id: "red-rectangle" }),
+      fullAnnotation({
+        id: "blue-ellipse",
+        type: "ellipse",
+        x: 50,
+        y: 50,
+        width: 60,
+        height: 40,
+        backgroundColor: "#0000ff",
+      }),
+    ]);
+    const reported: unknown[] = [];
+
+    const result = await exportAnnotatedPdfWithDiagnostics(
+      project,
+      { pdf: sourceBytes },
+      "expand",
+      { onDiagnostics: (diagnostics) => reported.push(diagnostics) },
+    );
+    expect(result.diagnostics).toMatchObject({
+      annotationMode: "hybrid",
+      pageCount: 1,
+      vectorElementCount: 2,
+      rasterElementCount: 0,
+      rasterRunCount: 0,
+      rasterPixels: 0,
+      rasterBytes: 0,
+    });
+    expect(result.diagnostics.pages[0]).toMatchObject({
+      runCount: 1,
+      vectorElementCount: 2,
+      rasterizedTypes: [],
+    });
+    expect(result.diagnostics.outputBytes).toBe(result.blob.size);
+    expect(reported).toEqual([result.diagnostics]);
+    expect(vi.mocked(exportToCanvas)).not.toHaveBeenCalled();
+
+    const rendered = await renderPdfPage(
+      new Uint8Array(await result.blob.arrayBuffer()),
+      1,
+      1,
+    );
+    expect(rendered.operators).toContain(OPS.constructPath);
+    expect(rendered.operators).not.toContain(OPS.paintImageXObject);
+  });
+
+  it("preserves vector/raster/vector scene z-order in the rendered page", async () => {
+    const source = await PDFDocument.create();
+    source.addPage([160, 160]);
+    const sourceBytes = await source.save();
+    const project = projectWithAnnotations(sourceBytes.byteLength, [
+      fullAnnotation({ id: "red-back" }),
+      fullAnnotation({
+        id: "green-middle-text",
+        type: "text",
+        x: 40,
+        y: 40,
+        width: 60,
+        height: 60,
+        text: "middle",
+        originalText: "middle",
+        fontSize: 20,
+        fontFamily: 1,
+        textAlign: "left",
+        verticalAlign: "top",
+        containerId: null,
+        autoResize: true,
+        lineHeight: 1.25,
+      }),
+      fullAnnotation({
+        id: "blue-front",
+        type: "ellipse",
+        x: 50,
+        y: 50,
+        width: 60,
+        height: 60,
+        backgroundColor: "#0000ff",
+      }),
+    ]);
+    const exportToCanvasMock = vi.mocked(exportToCanvas);
+    const previousImplementation = exportToCanvasMock.getMockImplementation();
+    exportToCanvasMock.mockImplementation(async (options: Parameters<typeof exportToCanvas>[0]) => {
+      const dimensions = options.getDimensions?.(60, 60) ?? { width: 60, height: 60 };
+      const canvas = createCanvas(dimensions.width, dimensions.height);
+      const context = canvas.getContext("2d");
+      context.fillStyle = "#00ff00";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      return canvas as unknown as HTMLCanvasElement;
+    });
+    try {
+      const runProgress: Array<{ runPosition: number; runKind: string }> = [];
+      const result = await exportAnnotatedPdfWithDiagnostics(
+        project,
+        { pdf: sourceBytes },
+        "expand",
+        {
+          onAnnotationRunProgress: ({ runPosition, runKind }) => {
+            runProgress.push({ runPosition, runKind });
+          },
+        },
+      );
+      expect(result.diagnostics.pages[0]).toMatchObject({
+        runCount: 3,
+        vectorElementCount: 2,
+        rasterElementCount: 1,
+      });
+      expect(runProgress).toEqual([
+        { runPosition: 1, runKind: "vector" },
+        { runPosition: 2, runKind: "raster" },
+        { runPosition: 3, runKind: "vector" },
+      ]);
+      const rendered = await renderPdfPage(
+        new Uint8Array(await result.blob.arrayBuffer()),
+        1,
+        2,
+      );
+      const pixel = (x: number, y: number) => {
+        const offset = (Math.round(y * 2) * rendered.width + Math.round(x * 2)) * 4;
+        return Array.from(rendered.rgba.slice(offset, offset + 3));
+      };
+      expect(pixel(25, 25)).toEqual([255, 0, 0]);
+      expect(pixel(45, 45)).toEqual([0, 255, 0]);
+      expect(pixel(80, 80)).toEqual([0, 0, 255]);
+    } finally {
+      exportToCanvasMock.mockReset();
+      if (previousImplementation) exportToCanvasMock.mockImplementation(previousImplementation);
+    }
+  });
+
+  it("surfaces a typed hybrid fallback and retries only when visual mode is explicit", async () => {
+    const source = await PDFDocument.create();
+    source.addPage([160, 160]);
+    const sourceBytes = await source.save();
+    const project = projectWithAnnotations(sourceBytes.byteLength, [
+      fullAnnotation({
+        id: "container",
+        boundElements: [{ id: "label", type: "text" }],
+      }),
+      fullAnnotation({ id: "vector" }),
+      fullAnnotation({
+        id: "label",
+        type: "text",
+        width: 40,
+        height: 30,
+        containerId: "container",
+      }),
+    ]);
+    const exportToCanvasMock = vi.mocked(exportToCanvas);
+    const previousImplementation = exportToCanvasMock.getMockImplementation();
+    exportToCanvasMock.mockImplementation(async (options: Parameters<typeof exportToCanvas>[0]) => {
+      const dimensions = options.getDimensions?.(100, 100) ?? { width: 100, height: 100 };
+      return createCanvas(dimensions.width, dimensions.height) as unknown as HTMLCanvasElement;
+    });
+    try {
+      const hybrid = exportAnnotatedPdf(project, { pdf: sourceBytes });
+      await expect(hybrid).rejects.toBeInstanceOf(PdfHybridFallbackRequiredError);
+      await expect(hybrid).rejects.toMatchObject({
+        code: "hybrid-visual-fallback-required",
+        fallbackMode: "visual",
+        reason: "dependent-elements-separated",
+      });
+
+      const result = await exportAnnotatedPdfWithDiagnostics(
+        project,
+        { pdf: sourceBytes },
+        "expand",
+        { annotationMode: "visual" },
+      );
+      expect(result.diagnostics).toMatchObject({
+        annotationMode: "visual",
+        vectorElementCount: 0,
+        rasterElementCount: 3,
+        rasterRunCount: 1,
+      });
+      expect(result.blob.type).toBe("application/pdf");
+    } finally {
+      exportToCanvasMock.mockReset();
+      if (previousImplementation) exportToCanvasMock.mockImplementation(previousImplementation);
+    }
+  });
+
+  it("propagates raster PNG encoder failures instead of offering an unsafe visual retry", async () => {
+    const source = await PDFDocument.create();
+    source.addPage([160, 160]);
+    const sourceBytes = await source.save();
+    const project = projectWithAnnotations(sourceBytes.byteLength, [
+      fullAnnotation({ id: "text", type: "text", width: 40, height: 30 }),
+    ]);
+    const exportToCanvasMock = vi.mocked(exportToCanvas);
+    const previousImplementation = exportToCanvasMock.getMockImplementation();
+    const canvas = createCanvas(80, 60);
+    Object.defineProperty(canvas, "toBlob", {
+      configurable: true,
+      value: (callback: BlobCallback) => callback(null),
+    });
+    exportToCanvasMock.mockResolvedValue(canvas as unknown as HTMLCanvasElement);
+    try {
+      const exporting = exportAnnotatedPdf(project, { pdf: sourceBytes });
+      await expect(exporting).rejects.toThrow("PNG export failed.");
+      await expect(exporting).rejects.not.toBeInstanceOf(PdfHybridFallbackRequiredError);
+    } finally {
+      exportToCanvasMock.mockReset();
+      if (previousImplementation) exportToCanvasMock.mockImplementation(previousImplementation);
+    }
+  });
+
+  it.each([
+    ["RangeError", () => new RangeError("Raster allocation failed.")],
+    ["DOMException", () => new DOMException("Canvas unavailable.", "InvalidStateError")],
+  ])("preserves a raster %s without misclassifying it as visual fallback", async (_label, makeError) => {
+    const source = await PDFDocument.create();
+    source.addPage([160, 160]);
+    const sourceBytes = await source.save();
+    const project = projectWithAnnotations(sourceBytes.byteLength, [
+      fullAnnotation({ id: "text", type: "text", width: 40, height: 30 }),
+    ]);
+    const exportToCanvasMock = vi.mocked(exportToCanvas);
+    const previousImplementation = exportToCanvasMock.getMockImplementation();
+    const expectedError = makeError();
+    exportToCanvasMock.mockRejectedValue(expectedError);
+    try {
+      const exporting = exportAnnotatedPdf(project, { pdf: sourceBytes });
+      await expect(exporting).rejects.toBe(expectedError);
+      await expect(exporting).rejects.not.toBeInstanceOf(PdfHybridFallbackRequiredError);
+    } finally {
+      exportToCanvasMock.mockReset();
+      if (previousImplementation) exportToCanvasMock.mockImplementation(previousImplementation);
+    }
+  });
+
+  it("keeps hybrid run overflow distinct from hard export limits", async () => {
+    const source = await PDFDocument.create();
+    source.addPage([160, 160]);
+    const sourceBytes = await source.save();
+    const project = projectWithAnnotations(sourceBytes.byteLength, [
+      fullAnnotation({ id: "vector-back" }),
+      fullAnnotation({ id: "text", type: "text" }),
+      fullAnnotation({ id: "vector-front" }),
+    ]);
+    await expect(exportAnnotatedPdf(project, { pdf: sourceBytes }, "expand", {
+      resourceLimits: { maxHybridRuns: 2 },
+    })).rejects.toMatchObject({
+      name: "PdfHybridFallbackRequiredError",
+      reason: "too-many-runs",
+    });
+
+    const outputLimit = exportAnnotatedPdf(projectWithAnnotations(sourceBytes.byteLength, []), {
+      pdf: sourceBytes,
+    }, "expand", {
+      resourceLimits: { maxOutputBytes: 1 },
+    });
+    await expect(outputLimit).rejects.toBeInstanceOf(PdfExportLimitError);
+    await expect(outputLimit).rejects.toMatchObject({ code: "output-bytes" });
+  });
+
+  it("does not misclassify a cumulative raster safety rejection as visual fallback", async () => {
+    const source = await PDFDocument.create();
+    source.addPage([160, 160]);
+    const sourceBytes = await source.save();
+    const project = projectWithAnnotations(sourceBytes.byteLength, [
+      fullAnnotation({ id: "text", type: "text", width: 40, height: 30 }),
+    ]);
+    const exportToCanvasMock = vi.mocked(exportToCanvas);
+    const previousImplementation = exportToCanvasMock.getMockImplementation();
+    exportToCanvasMock.mockResolvedValue(
+      createCanvas(80, 60) as unknown as HTMLCanvasElement,
+    );
+    try {
+      const exporting = exportAnnotatedPdf(project, { pdf: sourceBytes }, "expand", {
+        resourceLimits: { maxRasterPixels: 1 },
+      });
+      await expect(exporting).rejects.toBeInstanceOf(PdfExportLimitError);
+      await expect(exporting).rejects.toMatchObject({ code: "raster-pixels" });
+    } finally {
+      exportToCanvasMock.mockReset();
+      if (previousImplementation) exportToCanvasMock.mockImplementation(previousImplementation);
+    }
+  });
+
+  it("rasterizes later pages after the exact vector budget is exhausted", async () => {
+    const source = await PDFDocument.create();
+    source.addPage([160, 160]);
+    source.addPage([160, 160]);
+    const sourceBytes = await source.save();
+    const scenes = Object.fromEntries([0, 1].map((pageIndex) => {
+      const id = `page-${pageIndex}`;
+      return [id, {
+        id,
+        name: id,
+        elements: [
+          { ...baseElement, id: `${id}-background`, width: 160, height: 160 },
+          fullAnnotation({ id: `${id}-vector` }),
+        ],
+        appState: {},
+        files: {},
+        pdfPage: {
+          documentId: "pdf",
+          pageIndex,
+          width: 160,
+          height: 160,
+          rotation: 0 as const,
+          backgroundElementId: `${id}-background`,
+        },
+      } satisfies SerializedScene];
+    }));
+    const project: ClassroomProject = {
+      ...projectWithAnnotations(sourceBytes.byteLength, []),
+      activeSceneId: "page-0",
+      scenes,
+      pdfPageOrder: ["page-0", "page-1"],
+      pdfDocuments: {
+        pdf: {
+          ...projectWithAnnotations(sourceBytes.byteLength, []).pdfDocuments.pdf,
+          pageCount: 2,
+        },
+      },
+    };
+    const exportToCanvasMock = vi.mocked(exportToCanvas);
+    const previousImplementation = exportToCanvasMock.getMockImplementation();
+    exportToCanvasMock.mockImplementation(async (options: Parameters<typeof exportToCanvas>[0]) => {
+      const dimensions = options.getDimensions?.(100, 100) ?? { width: 100, height: 100 };
+      return createCanvas(dimensions.width, dimensions.height) as unknown as HTMLCanvasElement;
+    });
+    try {
+      const result = await exportAnnotatedPdfWithDiagnostics(
+        project,
+        { pdf: sourceBytes },
+        "expand",
+        { resourceLimits: { maxVectorElements: 1 } },
+      );
+      expect(result.diagnostics.vectorElementCount).toBe(1);
+      expect(result.diagnostics.rasterElementCount).toBe(1);
+      expect(result.diagnostics.pages.map((page) => page.rasterReasons["vector-budget"]))
+        .toEqual([0, 1]);
+    } finally {
+      exportToCanvasMock.mockReset();
+      if (previousImplementation) exportToCanvasMock.mockImplementation(previousImplementation);
+    }
+  });
+
+  it("releases a slide canvas immediately when export aborts during PNG encoding", async () => {
+    const frame = fullAnnotation({
+      id: "slide-frame",
+      type: "frame",
+      x: 0,
+      y: 0,
+      width: 160,
+      height: 90,
+      name: "Slide 1",
+      customData: { classroomSlide: { kind: "slide", version: 1 } },
+    });
+    const scene = {
+      id: "board",
+      name: "Board",
+      elements: [frame],
+      appState: {},
+      files: {},
+    } satisfies SerializedScene;
+    const project: ClassroomProject = {
+      schemaVersion: 1,
+      id: "slides-project",
+      title: "Slides",
+      createdAt: "2026-08-21T00:00:00.000Z",
+      updatedAt: "2026-08-21T00:00:00.000Z",
+      activeSceneId: scene.id,
+      scenes: { [scene.id]: scene },
+      slideOrder: [{
+        id: "slide",
+        sceneId: scene.id,
+        frameId: "slide-frame",
+        title: "Slide 1",
+      }],
+      pdfDocuments: {},
+    };
+    const exportToCanvasMock = vi.mocked(exportToCanvas);
+    const previousImplementation = exportToCanvasMock.getMockImplementation();
+    let pngCallback: BlobCallback | undefined;
+    let markEncodingStarted: (() => void) | undefined;
+    const encodingStarted = new Promise<void>((resolve) => {
+      markEncodingStarted = resolve;
+    });
+    const canvas = {
+      width: 320,
+      height: 180,
+      toBlob: (callback: BlobCallback) => {
+        pngCallback = callback;
+        markEncodingStarted?.();
+      },
+    } as unknown as HTMLCanvasElement;
+    exportToCanvasMock.mockResolvedValue(canvas);
+    const controller = new AbortController();
+    try {
+      const exporting = exportSlidesPdf(project, { signal: controller.signal });
+      await encodingStarted;
+      controller.abort();
+      await expect(exporting).rejects.toMatchObject({ name: "AbortError" });
+      expect({ width: canvas.width, height: canvas.height }).toEqual({ width: 0, height: 0 });
+      pngCallback?.(new Blob([new Uint8Array([1])]));
+    } finally {
+      exportToCanvasMock.mockReset();
+      if (previousImplementation) exportToCanvasMock.mockImplementation(previousImplementation);
+    }
   });
 });

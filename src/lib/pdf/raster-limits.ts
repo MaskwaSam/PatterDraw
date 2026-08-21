@@ -7,6 +7,48 @@ export const MAX_PDF_ENCODED_PNG_BYTES_PER_PAGE = 64 * 1024 * 1024;
 /** Keep source PDF bytes plus generated page rasters inside MAX_PROJECT_BYTES. */
 export const MAX_PDF_ENCODED_PNG_BYTES_PER_DOCUMENT = 75 * 1024 * 1024;
 
+/**
+ * Export-only limits. These cap resources retained while composing a PDF and
+ * the final file handed to the browser. They are deliberately independent of
+ * the import limits: an export can contain several deduplicated source PDFs,
+ * but it must still fit inside the same bounded, offline browser workflow.
+ */
+export const MAX_PDF_EXPORT_RASTER_BYTES = 96 * 1024 * 1024;
+export const MAX_PDF_EXPORT_OUTPUT_BYTES = 150 * 1024 * 1024;
+export const MAX_PDF_HYBRID_RUNS = 2_048;
+export const MAX_PDF_VECTOR_ELEMENTS = 100_000;
+export const MAX_PDF_VECTOR_PATH_OPERATIONS = 1_000_000;
+
+export interface PdfExportResourceLimits {
+  maxRasterPixels: number;
+  maxRasterBytes: number;
+  maxOutputBytes: number;
+  maxHybridRuns: number;
+  maxVectorElements: number;
+  maxVectorPathOperations: number;
+}
+
+export const DEFAULT_PDF_EXPORT_RESOURCE_LIMITS: Readonly<PdfExportResourceLimits> = Object.freeze({
+  maxRasterPixels: MAX_PDF_RASTER_PIXELS_PER_DOCUMENT,
+  maxRasterBytes: MAX_PDF_EXPORT_RASTER_BYTES,
+  maxOutputBytes: MAX_PDF_EXPORT_OUTPUT_BYTES,
+  maxHybridRuns: MAX_PDF_HYBRID_RUNS,
+  maxVectorElements: MAX_PDF_VECTOR_ELEMENTS,
+  maxVectorPathOperations: MAX_PDF_VECTOR_PATH_OPERATIONS,
+});
+
+export function getPdfExportResourceLimits(
+  overrides: Partial<PdfExportResourceLimits> = {},
+): Readonly<PdfExportResourceLimits> {
+  const limits = { ...DEFAULT_PDF_EXPORT_RESOURCE_LIMITS, ...overrides };
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(`The PDF export ${name} limit is invalid.`);
+    }
+  }
+  return Object.freeze(limits);
+}
+
 export interface PdfRasterBudget {
   maxEdge: number;
   maxPixelsPerPage: number;

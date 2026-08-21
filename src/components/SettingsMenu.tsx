@@ -86,6 +86,11 @@ const PDF_TOGGLES: ReadonlyArray<{
     label: "Sharper active PDF page",
     description: "Refine only the open page using device-adaptive source quality",
   },
+  {
+    key: "offerVisualPdfFallback",
+    label: "Offer visual PDF fallback",
+    description: "When vector export is unavailable, offer a visual PDF; confirmation is required every time",
+  },
 ];
 
 function SettingsToggle({ checked, description, label, onChange }: SettingsToggleProps) {
