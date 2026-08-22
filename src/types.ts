@@ -1,5 +1,6 @@
 import { createLocalId } from "./lib/id";
 import { DEFAULT_SLIDE_MORPH_DURATION_MS } from "./lib/slide-transition";
+import type { ClassroomProjectCalendarStoreV1 } from "./lib/classroom-time/calendar";
 
 export const CLASSROOM_PROJECT_VERSION = 1 as const;
 export const DEFAULT_PROJECT_TITLE = "Untitled PatterDraw canvas";
@@ -86,6 +87,12 @@ export interface ClassroomProject {
   /** Ordered PDF page scene IDs. Optional only for legacy v1 project files. */
   pdfPageOrder?: SceneId[];
   pdfDocuments: Record<PdfDocumentId, PdfDocumentSource>;
+  /**
+   * Project-owned classroom events. Optional only for projects created before
+   * Classroom Time was introduced; sanitization supplies an empty v1 store.
+   * Device events deliberately remain outside project content.
+   */
+  projectCalendar?: ClassroomProjectCalendarStoreV1;
 }
 
 export interface LoadedClassroomProject {
@@ -129,5 +136,10 @@ export function createBlankProject(now = new Date()): ClassroomProject {
     slideMorphDurationMs: DEFAULT_SLIDE_MORPH_DURATION_MS,
     pdfPageOrder: [],
     pdfDocuments: {},
+    projectCalendar: {
+      schemaVersion: 1,
+      layer: "project",
+      events: [],
+    },
   };
 }

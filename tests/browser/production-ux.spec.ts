@@ -74,6 +74,34 @@ function liveElements(project: StoredProject | undefined): Array<Pick<StoredElem
     .map(({ id, type, text }) => ({ id, type, text }));
 }
 
+type ProductionClassroomTimeMetadata = {
+  kind: "timer";
+  ownerId: string;
+  label: string;
+  runtime: {
+    status: "completed" | "idle" | "paused" | "running";
+    remainingMs: number;
+    deadlineMs: number | null;
+  };
+};
+
+function classroomTimeAnchors(project: StoredProject | undefined): ProductionClassroomTimeMetadata[] {
+  const scene = project?.scenes[project.activeSceneId];
+  return (scene?.elements || []).flatMap((element) => {
+    if (element.isDeleted) return [];
+    const customData = element.customData as {
+      classroomTimeWidget?: Partial<ProductionClassroomTimeMetadata>;
+    } | undefined;
+    const metadata = customData?.classroomTimeWidget;
+    return metadata?.kind === "timer"
+      && typeof metadata.ownerId === "string"
+      && typeof metadata.label === "string"
+      && !!metadata.runtime
+      ? [metadata as ProductionClassroomTimeMetadata]
+      : [];
+  });
+}
+
 async function addText(page: import("@playwright/test").Page, text: string): Promise<void> {
   const textTool = page.getByTestId("toolbar-text");
   await textTool.click({ force: true });
@@ -521,4 +549,76 @@ test("confirms a visual PDF fallback without bypassing the hybrid default", asyn
   await expect(page.getByRole("dialog", { name: "Settings", exact: true })
     .getByRole("switch", { name: "Offer visual PDF fallback", exact: true }))
     .toBeChecked();
+});
+
+test("starts and persists a Classroom Timer across packaged engines and a 320px viewport", async ({ page }) => {
+  const openClassroomTools = async () => {
+    await page.locator(".App-toolbar__extra-tools-trigger").click();
+    await page.getByTestId("toolbar-math-tools").click();
+    const tools = page.getByRole("dialog", { name: "Math tools", exact: true });
+    await expect(tools).toBeVisible();
+    const experimental = tools.getByRole("switch", { name: "Experimental features", exact: true });
+    if (!await experimental.isChecked()) await experimental.check();
+    await tools.getByTestId("math-tool-classroom-tab").click();
+    await expect(tools.getByTestId("math-tool-classroom-tab")).toHaveAttribute("aria-selected", "true");
+    return tools;
+  };
+
+  const tools = await openClassroomTools();
+  for (const id of ["clock", "timer", "pomodoro", "calendar", "dashboard"]) {
+    await expect(tools.getByTestId(`math-tool-classroom-${id}`)).toBeVisible();
+  }
+  await tools.getByTestId("math-tool-classroom-timer").click();
+  const dialog = page.getByRole("dialog", { name: "Add Timer", exact: true });
+  await expect(dialog).toBeVisible();
+  const dialogBounds = await dialog.boundingBox();
+  expect(dialogBounds).not.toBeNull();
+  expect(dialogBounds?.x || 0).toBeGreaterThanOrEqual(-1);
+  expect(dialogBounds?.y || 0).toBeGreaterThanOrEqual(-1);
+  expect((dialogBounds?.x || 0) + (dialogBounds?.width || 0)).toBeLessThanOrEqual(
+    await page.evaluate(() => window.innerWidth + 1),
+  );
+  expect((dialogBounds?.y || 0) + (dialogBounds?.height || 0)).toBeLessThanOrEqual(
+    await page.evaluate(() => window.innerHeight + 1),
+  );
+  await dialog.getByLabel("Widget label", { exact: true }).fill("Production Timer");
+  await dialog.getByRole("button", { name: "Add Timer", exact: true }).click();
+
+  const overlay = page.getByTestId("classroom-time-overlay");
+  await expect(overlay).toBeVisible();
+  const overlayBounds = await overlay.boundingBox();
+  expect(overlayBounds).not.toBeNull();
+  expect(overlayBounds?.x || 0).toBeGreaterThanOrEqual(-1);
+  expect((overlayBounds?.x || 0) + (overlayBounds?.width || 0)).toBeLessThanOrEqual(
+    await page.evaluate(() => window.innerWidth + 1),
+  );
+  await overlay.getByRole("button", { name: "Start", exact: true }).click();
+  await expect.poll(async () => classroomTimeAnchors(await autosavedProject(page)))
+    .toMatchObject([{ label: "Production Timer", runtime: { status: "running" } }]);
+  await expect.poll(() => page.evaluate(() => {
+    const stored = JSON.parse(localStorage.getItem("patterdraw:classroom-alarm-registry:v1") || "null") as {
+      jobs?: unknown[];
+    } | null;
+    return stored?.jobs?.length ?? 0;
+  })).toBe(1);
+  await page.waitForTimeout(1_100);
+  await expect(page.getByText("Classroom alarm job is invalid", { exact: false })).toHaveCount(0);
+  await expect(page.locator(".error-toast")).toHaveCount(0);
+
+  await overlay.getByRole("button", { name: "Pause", exact: true }).click();
+  await expect.poll(async () => classroomTimeAnchors(await autosavedProject(page))[0]?.runtime.status)
+    .toBe("paused");
+  await page.getByRole("button", { name: "More classroom time actions", exact: true }).click();
+  const actions = page.getByRole("menu", { name: "Classroom time widget actions", exact: true });
+  await expect(actions).toBeVisible();
+  await actions.getByRole("menuitem", { name: "Duplicate", exact: true }).click();
+  await expect.poll(async () => classroomTimeAnchors(await autosavedProject(page)).length).toBe(2);
+  const duplicated = classroomTimeAnchors(await autosavedProject(page));
+  expect(new Set(duplicated.map((metadata) => metadata.ownerId)).size).toBe(2);
+  expect(duplicated.every((metadata) => metadata.runtime.status === "paused")).toBe(true);
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
+  await expect.poll(async () => classroomTimeAnchors(await autosavedProject(page)).length).toBe(2);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

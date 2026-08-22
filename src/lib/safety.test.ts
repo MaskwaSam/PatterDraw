@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createBlankProject, type ClassroomProject, type SerializedScene } from "../types";
 import {
   assertSafeProject,
+  countProjectClassroomTimeWidgets,
   isPersistedWrapperTool,
   isSafeLocalImageSource,
   sanitizeProject,
@@ -9,6 +10,12 @@ import {
 } from "./safety";
 import { MAX_STRUCTURAL_DEPTH } from "./structural-limits";
 import { MATH_TOOL_CATALOGUE } from "./math-tools/catalogue";
+import {
+  createClassroomCalendarStoreV1,
+  createProjectCalendarTransferCache,
+  type ClassroomCalendarEventV1,
+} from "./classroom-time/calendar";
+import { createDefaultClassroomTimeWidgetMetadata } from "./classroom-time/types";
 
 const scene = (elements: readonly Record<string, unknown>[]): SerializedScene => ({
   id: "scene-1",
@@ -59,6 +66,17 @@ const pdfScene = (id: string, pageIndex: number): SerializedScene => ({
     rotation: 0,
     backgroundElementId: `${id}-background`,
   },
+});
+
+const classroomEvent = (): ClassroomCalendarEventV1 => ({
+  schemaVersion: 1,
+  id: "lesson-review",
+  date: "2026-08-21",
+  title: "Unit review",
+  color: "#2563EB",
+  allDay: true,
+  createdAt: "2026-08-20T12:00:00.000Z",
+  updatedAt: "2026-08-20T12:00:00.000Z",
 });
 
 describe("student safety", () => {
@@ -718,5 +736,126 @@ describe("student safety", () => {
       pdfDocuments: {},
     } satisfies ClassroomProject;
     expect(() => assertSafeProject(project)).toThrow(/math tool/);
+  });
+
+  it("strictly validates Classroom Time markers while sanitizing native scene imports", () => {
+    const metadata = createDefaultClassroomTimeWidgetMetadata("timer", "timer-owner");
+    const imported = scene([
+      {
+        id: "anchor",
+        type: "image",
+        fileId: "anchor-file",
+        customData: { classroomTimeWidget: metadata },
+      },
+      {
+        id: "child",
+        type: "text",
+        customData: {
+          classroomTimeWidget: { version: 1, ownerId: "timer-owner", role: "primary-value" },
+        },
+      },
+      {
+        id: "invalid",
+        type: "text",
+        customData: {
+          classroomTimeWidget: { version: 1, ownerId: "timer-owner", role: "unbounded-role" },
+          note: "keep",
+        },
+      },
+    ]);
+    imported.files = {
+      "anchor-file": {
+        id: "anchor-file",
+        mimeType: "image/svg+xml",
+        dataURL: "data:image/svg+xml;base64,PHN2Zy8+",
+      },
+    };
+
+    const safe = sanitizeScene(imported);
+    expect((safe.elements[0].customData as Record<string, unknown>)?.classroomTimeWidget).toEqual(metadata);
+    expect((safe.elements[1].customData as Record<string, unknown>)?.classroomTimeWidget).toEqual({
+      version: 1,
+      ownerId: "timer-owner",
+      role: "primary-value",
+    });
+    expect(safe.elements[2].customData).toEqual({ note: "keep" });
+
+    const project = createBlankProject();
+    project.scenes[project.activeSceneId] = { ...imported, id: project.activeSceneId };
+    project.scenes[project.activeSceneId].elements = [imported.elements[2]];
+    expect(() => assertSafeProject(project)).toThrow(/classroom time widget has invalid metadata/i);
+  });
+
+  it("enforces the 64-widget limit across all project scenes", () => {
+    const project = createBlankProject();
+    project.scenes[project.activeSceneId].elements = Array.from({ length: 65 }, (_, index) => ({
+      id: `anchor-${index}`,
+      type: "image",
+      customData: {
+        classroomTimeWidget: createDefaultClassroomTimeWidgetMetadata("clock", `clock-${index}`),
+      },
+    }));
+    expect(() => assertSafeProject(project)).toThrow(/at most 64 classroom time widgets/i);
+
+    project.scenes[project.activeSceneId].elements = project.scenes[project.activeSceneId].elements.slice(0, 32);
+    project.scenes.second = {
+      ...scene(Array.from({ length: 33 }, (_, index) => ({
+        id: `second-anchor-${index}`,
+        type: "image",
+        customData: {
+          classroomTimeWidget: createDefaultClassroomTimeWidgetMetadata("clock", `second-clock-${index}`),
+        },
+      }))),
+      id: "second",
+    };
+    expect(countProjectClassroomTimeWidgets(project)).toBe(65);
+    expect(() => assertSafeProject(project)).toThrow(/at most 64 classroom time widgets/i);
+  });
+
+  it("canonicalizes legacy project calendars and strips transport-only event caches", () => {
+    const legacy = createBlankProject();
+    delete legacy.projectCalendar;
+    expect(sanitizeProject(legacy).projectCalendar).toEqual({
+      schemaVersion: 1,
+      layer: "project",
+      events: [],
+    });
+
+    const project = createBlankProject();
+    const event = classroomEvent();
+    project.projectCalendar = createClassroomCalendarStoreV1("project", [event]);
+    const metadata = createDefaultClassroomTimeWidgetMetadata("calendar", "calendar-owner");
+    if (metadata.kind !== "calendar") throw new Error("Expected calendar metadata.");
+    metadata.calendar.transferCache = createProjectCalendarTransferCache(
+      project.id,
+      project.projectCalendar,
+    );
+    project.scenes[project.activeSceneId].elements = [{
+      id: "calendar-anchor",
+      type: "image",
+      fileId: "calendar-file",
+      customData: { classroomTimeWidget: metadata },
+    }];
+    project.scenes[project.activeSceneId].files = {
+      "calendar-file": {
+        id: "calendar-file",
+        mimeType: "image/svg+xml",
+        dataURL: "data:image/svg+xml;base64,PHN2Zy8+",
+      },
+    };
+
+    expect(() => assertSafeProject(project)).toThrow(/non-canonical calendar transfer cache/i);
+    const safe = sanitizeProject(project);
+    expect(safe.projectCalendar?.events).toEqual([event]);
+    const safeMetadata = (safe.scenes[safe.activeSceneId].elements[0].customData as Record<string, unknown>)
+      ?.classroomTimeWidget;
+    expect(safeMetadata).toMatchObject({
+      kind: "calendar",
+      calendar: { transferCache: null },
+    });
+    expect(() => assertSafeProject({
+      ...safe,
+      projectCalendar: { schemaVersion: 1, layer: "device", events: [] },
+    } as unknown as ClassroomProject)).toThrow(/project classroom calendar metadata/i);
   });
 });

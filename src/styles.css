@@ -2128,13 +2128,19 @@ button { color: inherit; }
 .error-toast { position: fixed; z-index: 310; right: 18px; bottom: 58px; max-width: 440px; display: flex; align-items: center; gap: 16px; padding: 12px 13px; border: 1px solid #e8b6b6; border-radius: 8px; background: #fff7f7; color: #7d2525; box-shadow: 0 8px 30px rgb(80 20 20 / 16%); font-size: 13px; }
 .error-toast span { min-width: 0; overflow-wrap: anywhere; }
 .error-toast button { flex: 0 0 auto; border: 0; background: transparent; color: #8d3030; font-size: 12px; font-weight: 700; cursor: pointer; }
-.pdf-annotation-clear-toast {
+.app-toast-stack {
   position: fixed;
-  /* Keep Undo behind modal/busy backdrops so it cannot race an in-flight
-     destructive or atomic operation that owns the current project snapshot. */
+  /* Keep reversible actions behind modal/busy backdrops so they cannot race
+     an in-flight destructive or atomic operation that owns the snapshot. */
   z-index: 190;
   left: 18px;
   bottom: 58px;
+  width: min(520px, calc(100vw - 36px));
+  display: grid;
+  gap: 8px;
+}
+.pdf-annotation-clear-toast {
+  position: relative;
   max-width: min(520px, calc(100vw - 36px));
   display: flex;
   align-items: center;
@@ -2161,10 +2167,17 @@ button { color: inherit; }
 }
 .pdf-annotation-clear-toast button:hover { background: #e4ecff; }
 .pdf-annotation-clear-toast button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.app-toast--classroom-alarm {
+  border-color: #d5b46c;
+  background: #fff9ea;
+  color: #5b4214;
+}
+.app-toast--classroom-alarm button { color: #6f4b00; }
+.app-toast--classroom-alarm button:hover { background: #f7e8c0; }
 /* An error can appear while the reversible toast is still alive. Keep the
    alert at its established bottom-right position and move the status above
    the app chrome instead of letting two fixed surfaces cover each other. */
-.error-toast + .pdf-annotation-clear-toast {
+.error-toast + .app-toast-stack {
   top: calc(70px + var(--safe-area-top));
   bottom: auto;
 }
@@ -2774,6 +2787,9 @@ button { color: inherit; }
 .app-shell[data-theme="dark"] .pdf-annotation-clear-toast { border-color: #506a9c; background: #1c3158; color: #dbe7ff; }
 .app-shell[data-theme="dark"] .pdf-annotation-clear-toast button { color: #a9c2ff; }
 .app-shell[data-theme="dark"] .pdf-annotation-clear-toast button:hover { background: #29446f; }
+.app-shell[data-theme="dark"] .app-toast--classroom-alarm { border-color: #8f733b; background: #3b2d13; color: #ffe5a6; }
+.app-shell[data-theme="dark"] .app-toast--classroom-alarm button { color: #ffd477; }
+.app-shell[data-theme="dark"] .app-toast--classroom-alarm button:hover { background: #55401b; }
 .app-shell[data-theme="dark"] .project-find-panel { color: #e7edf7; }
 .app-shell[data-theme="dark"] .project-find-title { color: #e7edf7; }
 .app-shell[data-theme="dark"] :is(.project-find-canvas-search, .project-find-query, .project-find-result) {
@@ -3027,13 +3043,14 @@ button { color: inherit; }
    the first row between the document title and icon-only mode tabs. This
    avoids both the old 142px header and title/action overlap at 360–430px. */
 @media (max-width: 439px) {
-  .pdf-annotation-clear-toast {
+  .app-toast-stack {
     right: calc(8px + var(--safe-area-right));
     left: calc(8px + var(--safe-area-left));
-    max-width: none;
+    width: auto;
   }
+  .pdf-annotation-clear-toast { max-width: none; }
   .pdf-annotation-clear-toast > span[aria-hidden="true"] { display: none; }
-  .error-toast + .pdf-annotation-clear-toast { top: calc(104px + var(--safe-area-top)); }
+  .error-toast + .app-toast-stack { top: calc(104px + var(--safe-area-top)); }
   .app-shell,
   .app-shell.is-slide-mode,
   .app-shell.is-pdf-mode { grid-template-rows: calc(96px + var(--safe-area-top)) minmax(0, 1fr); }
@@ -3183,6 +3200,7 @@ button { color: inherit; }
   .autosave-recovery-banner,
   .busy-overlay,
   .error-toast,
+  .app-toast-stack,
   .pdf-annotation-clear-toast
 ) { display: none !important; }
 .app-shell:fullscreen.is-obs-capture-enabled .editor-region,
@@ -3201,4 +3219,285 @@ body:has(.app-shell:fullscreen.is-obs-capture-enabled) :is(.Modal, .context-menu
 @media (max-width: 640px) {
   .obs-capture-guide { inset: 70px 6px 6px; }
   .obs-capture-guide-frame > span { top: -21px; font-size: 9px; }
+}
+
+/* Classroom time widgets -------------------------------------------------- */
+.classroom-time-tool-card { grid-template-rows: auto 100px auto; }
+.classroom-time-tool-preview {
+  height: 100px;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 5px;
+  overflow: hidden;
+  border: 1px solid #d8e1f1;
+  border-radius: 9px;
+  background: linear-gradient(145deg, #fff 0 52%, #f2f6ff 100%);
+  color: #17233d;
+}
+.classroom-time-tool-preview > strong { font-size: 27px; line-height: 1; letter-spacing: -.04em; }
+.classroom-time-tool-preview small { color: #657493; font-size: 8px; font-style: normal; font-weight: 800; letter-spacing: .11em; }
+.classroom-time-tool-preview i { width: 74%; height: 7px; overflow: hidden; border-radius: 999px; background: #dce5f7; }
+.classroom-time-tool-preview i b { width: 62%; height: 100%; display: block; border-radius: inherit; background: linear-gradient(90deg, #2859c5, #7547c8); }
+.classroom-time-tool-preview.is-pomodoro > strong { color: #6840ac; }
+.classroom-time-tool-preview.is-calendar { align-content: stretch; padding: 9px 12px; }
+.classroom-time-tool-preview.is-calendar > span { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+.classroom-time-tool-preview.is-calendar b { display: grid; place-items: center; min-width: 20px; height: 20px; border-radius: 5px; color: #39465f; font-size: 8px; }
+.classroom-time-tool-preview.is-calendar b:nth-child(8) { background: #e1eafe; color: #204aa5; }
+.classroom-time-tool-preview.is-dashboard > span { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.classroom-time-tool-preview.is-dashboard b { padding: 10px 9px; border-radius: 7px; background: #eaf0fc; color: #23478f; font-size: 18px; }
+
+.classroom-time-dialog-backdrop {
+  position: fixed;
+  z-index: 220;
+  inset: 0;
+  display: flex;
+  justify-content: flex-end;
+  padding: 16px 0 16px 16px;
+  background: rgb(15 23 42 / 32%);
+  backdrop-filter: blur(2px);
+}
+.classroom-time-dialog {
+  width: min(540px, 100%);
+  min-width: 0;
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid #c8d3e6;
+  border-right: 0;
+  border-radius: 18px 0 0 18px;
+  background: #fff;
+  color: #172033;
+  box-shadow: -18px 0 55px rgb(15 23 42 / 23%);
+}
+.classroom-time-dialog-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 20px 22px 12px; }
+.classroom-time-dialog-heading > div { min-width: 0; }
+.classroom-time-dialog-heading span { color: #2859c5; font-size: 9px; font-weight: 850; text-transform: uppercase; letter-spacing: .09em; }
+.classroom-time-dialog-heading h2 { margin: 4px 0 3px; color: #15213a; font-size: 22px; letter-spacing: -.025em; }
+.classroom-time-dialog-heading p { margin: 0; color: #647089; font-size: 11px; line-height: 1.45; }
+.classroom-time-dialog-heading > button {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #5d6980;
+  font-size: 23px;
+  line-height: 1;
+  cursor: pointer;
+}
+.classroom-time-dialog-heading > button:hover { border-color: #d2dae7; background: #f5f7fb; }
+.classroom-time-dialog-preview {
+  min-height: 82px;
+  display: grid;
+  align-content: center;
+  gap: 3px;
+  margin: 0 22px 13px;
+  padding: 14px 18px;
+  border: 2px solid;
+  border-radius: 13px;
+  box-shadow: 0 8px 24px rgb(31 42 68 / 10%);
+}
+.classroom-time-dialog-preview span { font-size: 9px; font-weight: 850; text-transform: uppercase; letter-spacing: .11em; }
+.classroom-time-dialog-preview strong { font-size: 18px; }
+.classroom-time-dialog-preview small { color: #71809a; font-size: 9px; }
+.classroom-time-dialog-tabs { display: flex; gap: 4px; padding: 0 22px 12px; overflow-x: auto; scrollbar-width: thin; }
+.classroom-time-dialog-tabs button {
+  min-height: 32px;
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: #eef2f8;
+  color: #526078;
+  font-size: 10px;
+  font-weight: 750;
+  cursor: pointer;
+}
+.classroom-time-dialog-tabs button[aria-current="page"] { border-color: #9eb5e7; background: #e1eafe; color: #204aa5; }
+.classroom-time-dialog-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 22px 22px; }
+.classroom-time-settings-section { display: grid; gap: 13px; padding: 16px; border: 1px solid #d8dee9; border-radius: 12px; background: #fbfcff; }
+.classroom-time-settings-section h3 { margin: 0 0 1px; color: #1d2a44; font-size: 15px; }
+.classroom-time-settings-section > label:not(.classroom-time-switch-field),
+.classroom-time-number-grid label,
+.classroom-time-duration-fields label,
+.classroom-time-event-form > label {
+  display: grid;
+  gap: 5px;
+  color: #45516a;
+  font-size: 10px;
+  font-weight: 750;
+}
+.classroom-time-settings-section :is(input[type="text"], input[type="number"], input[type="date"], input[type="time"], select, textarea) {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid #bcc7d8;
+  border-radius: 8px;
+  background: #fff;
+  color: #172033;
+  font: 12px inherit;
+}
+.classroom-time-settings-section textarea { min-height: 70px; resize: vertical; }
+.classroom-time-settings-section :is(input, select, textarea, button):focus-visible,
+.classroom-time-dialog :is(button, input, select, textarea):focus-visible,
+.classroom-time-overlay button:focus-visible { outline: 3px solid #bed1ff; outline-offset: 2px; }
+.classroom-time-settings-section input[type="range"] { width: 100%; accent-color: #2859c5; }
+.classroom-time-settings-section output { float: right; color: #2859c5; font-weight: 800; }
+.classroom-time-switch-field { display: flex; align-items: center; justify-content: space-between; gap: 16px; color: #34415a; font-size: 11px; font-weight: 700; cursor: pointer; }
+.classroom-time-switch-field input {
+  width: 40px;
+  height: 23px;
+  flex: 0 0 auto;
+  appearance: none;
+  margin: 0;
+  border: 1px solid #9ca9bc;
+  border-radius: 999px;
+  background: #d9dfe8;
+  cursor: pointer;
+}
+.classroom-time-switch-field input::before { content: ""; display: block; width: 17px; height: 17px; margin: 2px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgb(15 23 42 / 28%); transition: transform .15s ease; }
+.classroom-time-switch-field input:checked { border-color: #2859c5; background: #2859c5; }
+.classroom-time-switch-field input:checked::before { transform: translateX(17px); }
+.classroom-time-colour-grid,
+.classroom-time-number-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.classroom-time-color-field { display: grid; gap: 5px; color: #45516a; font-size: 10px; font-weight: 750; }
+.classroom-time-color-field > span:last-child { min-height: 38px; display: flex; align-items: center; gap: 8px; padding: 5px 8px; border: 1px solid #c5cedc; border-radius: 8px; background: #fff; }
+.classroom-time-color-field input { width: 28px; height: 28px; padding: 0; overflow: hidden; border: 0; border-radius: 6px; background: transparent; cursor: pointer; }
+.classroom-time-color-field code { color: #56637a; font-size: 9px; }
+.classroom-time-segmented { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border-radius: 9px; background: #e9eef6; }
+.classroom-time-segmented button { min-height: 34px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: #4d5b73; font-size: 11px; font-weight: 750; cursor: pointer; }
+.classroom-time-segmented button[aria-pressed="true"] { border-color: #bac9e5; background: #fff; color: #204aa5; box-shadow: 0 1px 3px rgb(15 23 42 / 8%); }
+.classroom-time-duration-fields,
+.classroom-time-event-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 0; padding: 13px; border: 1px solid #d5dce8; border-radius: 10px; background: #f4f7fb; }
+.classroom-time-duration-fields legend,
+.classroom-time-event-form legend { padding: 0 5px; color: #31415f; font-size: 11px; font-weight: 800; }
+.classroom-time-event-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.classroom-time-event-form > label:nth-of-type(3),
+.classroom-time-event-form > label:nth-of-type(4),
+.classroom-time-event-form > .classroom-time-color-field,
+.classroom-time-event-form > .classroom-time-switch-field,
+.classroom-time-event-form > .classroom-time-number-grid,
+.classroom-time-event-form > .classroom-time-field-error,
+.classroom-time-event-form > .classroom-time-event-status,
+.classroom-time-event-form > button { grid-column: 1 / -1; }
+.classroom-time-field-error { margin: -4px 0 0; color: #a52f3d; font-size: 10px; font-weight: 700; line-height: 1.4; }
+.classroom-time-event-status { margin: -4px 0 0; color: #2e6b46; font-size: 10px; font-weight: 700; line-height: 1.4; }
+.classroom-time-quiet-help { margin: 0; color: #6b7790; font-size: 10px; line-height: 1.45; }
+.classroom-time-secondary-button,
+.classroom-time-dialog-actions button {
+  min-height: 38px;
+  padding: 8px 11px;
+  border: 1px solid #c0cad8;
+  border-radius: 8px;
+  background: #fff;
+  color: #34415a;
+  font-size: 10px;
+  font-weight: 750;
+  cursor: pointer;
+}
+.classroom-time-secondary-button:hover:not(:disabled),
+.classroom-time-dialog-actions button:hover:not(:disabled) { border-color: #839fdc; background: #f1f5ff; color: #204aa5; }
+.classroom-time-secondary-button:disabled,
+.classroom-time-dialog-actions button:disabled { opacity: .45; cursor: default; }
+.classroom-time-dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; padding: 13px 22px calc(13px + env(safe-area-inset-bottom)); border-top: 1px solid #d9e0eb; background: #f8faff; }
+.classroom-time-dialog-actions > span { min-width: 0; flex: 1; color: #2e6b46; font-size: 9px; line-height: 1.35; }
+.classroom-time-dialog-actions button.is-primary { border-color: #204aa5; background: #2859c5; color: #fff; }
+.classroom-time-dialog-actions button.is-primary:hover:not(:disabled) { background: #204aa5; color: #fff; }
+
+.classroom-time-overlay {
+  position: absolute;
+  z-index: 35;
+  top: 14px;
+  left: 50%;
+  max-width: calc(100% - 28px);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px;
+  border: 1px solid #b9c9e6;
+  border-radius: 12px;
+  background: rgb(255 255 255 / 97%);
+  color: #263249;
+  box-shadow: 0 9px 28px rgb(15 23 42 / 19%);
+  transform: translateX(-50%);
+  pointer-events: auto;
+}
+.classroom-time-overlay-summary { min-width: 94px; display: grid; gap: 1px; padding: 0 5px; }
+.classroom-time-overlay-summary strong { max-width: 150px; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.classroom-time-overlay-summary span { color: #69758c; font-size: 8px; font-weight: 750; text-transform: capitalize; }
+.classroom-time-overlay-summary output { color: #204aa5; font-size: 15px; font-weight: 850; font-variant-numeric: tabular-nums; }
+.classroom-time-overlay-controls,
+.classroom-time-overlay-secondary { display: flex; align-items: center; gap: 5px; }
+.classroom-time-overlay-secondary { padding-left: 5px; border-left: 1px solid #d8dee8; }
+.classroom-time-overlay-menu-shell { position: relative; display: inline-flex; }
+.classroom-time-overlay button { min-height: 34px; padding: 7px 9px; border: 1px solid #c5cedb; border-radius: 7px; background: #fff; color: #34415a; font-size: 9px; font-weight: 800; white-space: nowrap; cursor: pointer; }
+.classroom-time-overlay button:hover { border-color: #819bd5; background: #f1f5ff; color: #204aa5; }
+.classroom-time-overlay button.is-primary { border-color: #204aa5; background: #2859c5; color: #fff; }
+.classroom-time-overlay-menu {
+  position: absolute;
+  z-index: 2;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 205px;
+  display: grid;
+  gap: 3px;
+  padding: 6px;
+  border: 1px solid #c7d1df;
+  border-radius: 9px;
+  background: #fff;
+  box-shadow: 0 9px 28px rgb(15 23 42 / 20%);
+}
+.classroom-time-overlay-menu button { width: 100%; justify-content: flex-start; border-color: transparent; text-align: left; }
+.classroom-time-overlay-menu button.is-danger { color: #a42f3b; }
+.classroom-time-overlay-menu button.is-danger:hover,
+.classroom-time-overlay-menu button.is-danger:focus-visible { border-color: #e0a4aa; background: #fff1f2; color: #922633; }
+.classroom-time-overlay-alert { position: absolute; top: calc(100% + 8px); left: 50%; min-width: 240px; display: grid; gap: 2px; padding: 11px 13px; border: 1px solid #d7b36b; border-radius: 9px; background: #fff8e6; color: #674913; box-shadow: 0 7px 24px rgb(73 49 7 / 18%); transform: translateX(-50%); }
+.classroom-time-overlay-alert strong { font-size: 12px; }
+.classroom-time-overlay-alert span { font-size: 10px; }
+.classroom-time-overlay-alert-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+.classroom-time-overlay-alert-actions button { border-color: #d4b677; background: #fffdf7; color: #674913; }
+
+.app-shell[data-theme="dark"] :is(.classroom-time-dialog, .classroom-time-overlay) { border-color: #3c4a61; background: #1d2737; color: #e6edf8; }
+.app-shell[data-theme="dark"] .classroom-time-dialog-heading h2,
+.app-shell[data-theme="dark"] .classroom-time-settings-section h3 { color: #f0f4fb; }
+.app-shell[data-theme="dark"] :is(.classroom-time-dialog-heading p, .classroom-time-quiet-help, .classroom-time-overlay-summary span) { color: #b9c5d7; }
+.app-shell[data-theme="dark"] .classroom-time-settings-section { border-color: #3a4860; background: #222e40; }
+.app-shell[data-theme="dark"] .classroom-time-dialog-tabs button { background: #2a374b; color: #c4cede; }
+.app-shell[data-theme="dark"] .classroom-time-dialog-tabs button[aria-current="page"] { border-color: #6f8fd8; background: #294578; color: #fff; }
+.app-shell[data-theme="dark"] .classroom-time-settings-section :is(input[type="text"], input[type="number"], input[type="date"], input[type="time"], select, textarea),
+.app-shell[data-theme="dark"] :is(.classroom-time-color-field > span:last-child, .classroom-time-segmented button[aria-pressed="true"], .classroom-time-secondary-button, .classroom-time-dialog-actions button, .classroom-time-overlay button) { border-color: #526178; background: #162132; color: #e5edf9; }
+.app-shell[data-theme="dark"] .classroom-time-overlay-menu { border-color: #526178; background: #162132; }
+.app-shell[data-theme="dark"] :is(.classroom-time-duration-fields, .classroom-time-event-form, .classroom-time-segmented) { border-color: #3d4b61; background: #182436; }
+.app-shell[data-theme="dark"] .classroom-time-dialog-actions { border-color: #3b4960; background: #182334; }
+.app-shell[data-theme="dark"] .classroom-time-overlay button.is-primary,
+.app-shell[data-theme="dark"] .classroom-time-dialog-actions button.is-primary { border-color: #7597e7; background: #4169c8; color: #fff; }
+
+@media (max-width: 760px) {
+  .classroom-time-dialog-backdrop { align-items: flex-end; padding: 18px 0 0; }
+  .classroom-time-dialog { width: 100%; height: min(86dvh, 760px); border-right: 0; border-bottom: 0; border-left: 0; border-radius: 18px 18px 0 0; }
+  .classroom-time-dialog-heading { padding: 16px 16px 10px; }
+  .classroom-time-dialog-heading h2 { font-size: 19px; }
+  .classroom-time-dialog-preview { min-height: 68px; margin: 0 16px 10px; padding: 10px 14px; }
+  .classroom-time-dialog-tabs { padding: 0 16px 10px; }
+  .classroom-time-dialog-body { padding: 0 16px 16px; }
+  .classroom-time-settings-section { padding: 13px; }
+  .classroom-time-dialog-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); }
+  .classroom-time-dialog-actions > span { grid-column: 1 / -1; }
+  .classroom-time-dialog-actions button { min-height: 44px; }
+  .classroom-time-overlay { top: auto; bottom: 12px; width: calc(100% - 20px); max-width: 520px; flex-wrap: wrap; justify-content: center; }
+  .classroom-time-overlay-summary { min-width: 0; flex: 1; }
+  .classroom-time-overlay-menu { top: auto; bottom: calc(100% + 8px); }
+  .classroom-time-overlay-alert { top: auto; bottom: calc(100% + 8px); }
+}
+
+@media (max-width: 440px) {
+  .classroom-time-colour-grid,
+  .classroom-time-number-grid,
+  .classroom-time-event-form { grid-template-columns: 1fr; }
+  .classroom-time-duration-fields { gap: 6px; }
+  .classroom-time-event-form > * { grid-column: 1 !important; }
+  .classroom-time-overlay-secondary { border-left: 0; }
 }

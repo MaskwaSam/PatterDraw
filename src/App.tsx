@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import {
   CaptureUpdateAction,
   convertToExcalidrawElements,
@@ -43,6 +43,16 @@ import { PresentationOverlay } from "./components/PresentationOverlay";
 import { StrokeWidthExtensions } from "./components/StrokeWidthExtensions";
 import { MathToolsMenuExtension } from "./components/MathToolsMenuExtension";
 import { MathToolsDialog } from "./components/MathToolsDialog";
+import {
+  ClassroomTimeDialog,
+  type ClassroomCalendarEventDraft,
+  type ClassroomCalendarEventCreateResult,
+} from "./components/ClassroomTimeDialog";
+import {
+  ClassroomTimeOverlay,
+  type ClassroomTimeOverlayCommand,
+  type ClassroomTimeOverlayTarget,
+} from "./components/ClassroomTimeOverlay";
 import { GeoGonDialog } from "./components/GeoGonDialog";
 import { MathInteractionOverlay, type CapturedMathPoint } from "./components/MathInteractionOverlay";
 import { ProbabilityRandomizer } from "./components/ProbabilityRandomizer";
@@ -211,6 +221,7 @@ import {
 import {
   assertLoadedProjectRasterSafety,
   canonicalizePersistedWrapperTool,
+  countProjectClassroomTimeWidgets,
   isPersistedWrapperTool,
   MAX_PROJECT_BYTES,
   sanitizeProject,
@@ -305,6 +316,81 @@ import {
   summarizeSelectedProbabilityPieces,
   type ProbabilitySelectionSummary,
 } from "./lib/math-tools/probability-randomizer";
+import {
+  DEFAULT_CLASSROOM_TIME_PREFERENCES,
+  CLASSROOM_ALARM_REGISTRY_STORAGE_KEY,
+  acknowledgeBlockedClassroomAlarmJobs,
+  activateClassroomAlarmTransaction,
+  activeClassroomTimeAlarmDescriptors,
+  advanceExpiredClassroomTimeWidget,
+  applyClassroomAlarmCancellationAuthority,
+  applyClassroomTimeControl,
+  cancelClassroomAlarmIdentitiesWithReceipt,
+  classroomTimePreferencePatchForMetadata,
+  classroomTimeRenderContext,
+  claimAndMarkDueClassroomAlarmJobs,
+  createClassroomAlarmJob,
+  createClassroomCalendarStoreV1,
+  createClassroomTimeMetadataFromPreferences,
+  createProjectCalendarTransferCache,
+  hasClassroomAlarmDeliveredGeneration,
+  importProjectCalendarTransferCache,
+  isClassroomAlarmJobCancelled,
+  listStagedClassroomAlarmTransactions,
+  matchStagedClassroomAlarmTransaction,
+  mutateDeviceClassroomCalendar,
+  nextClassroomAlarmGenerationStartMs,
+  playClassroomAlarmTone,
+  prepareClassroomAlarmAudio,
+  pruneClassroomAlarmCancellationTombstones,
+  pruneClassroomAlarmDeliveryTombstones,
+  persistClassroomTimePreferencePatch,
+  readClassroomAlarmRegistry,
+  readClassroomTimePreferences,
+  readDeviceClassroomCalendar,
+  recoverClassroomAlarmJob,
+  replayBlockedClassroomAlarmJobs,
+  rollbackClassroomAlarmTransaction,
+  selectedClassroomTimeWidget,
+  subscribeToClassroomTimePreferences,
+  subscribeToDeviceClassroomCalendar,
+  stageCancelledClassroomAlarmReceipt,
+  stageRecoveredClassroomAlarmJobs,
+  stageSchedulerClassroomAlarmJobs,
+  stageTrustedClassroomAlarmJobs,
+  testClassroomAlarmTone,
+  upsertClassroomCalendarEvent,
+  type ClassroomAlarmJobV1,
+  type ClassroomAlarmIdentity,
+  type ClassroomAlarmCancellationReceiptV1,
+  type ClassroomAlarmStorage,
+  type ClassroomAlarmTone,
+  type ClassroomAlarmTransactionReceiptV1,
+  type ClassroomAlarmRegistryStateV1,
+  type ClassroomAlarmRegistryV1,
+  type ClassroomCalendarEventV1,
+  type ClassroomDeviceCalendarStoreV1,
+  type ClassroomProjectCalendarStoreV1,
+  type ClassroomTimePreferencesV1,
+  type ClassroomTimeAlarmDescriptor,
+  type ClassroomTimeWidgetKind,
+  type ClassroomTimeWidgetMetadataV1,
+  type SelectedClassroomTimeWidget,
+} from "./lib/classroom-time";
+import {
+  MAX_CLASSROOM_TIME_WIDGETS,
+  canonicalizeClassroomTimeWidgetsForPersistence,
+  classroomTimeWidgetMetadata,
+  classroomTimeWidgetOwnerId,
+  createClassroomTimeWidgetScene,
+  forkDuplicatedClassroomTimeWidgets,
+  forkClassroomTimeWidgets,
+  materializeClassroomTimeWidgetsForExport,
+  reconcileClassroomTimeWidgets,
+  tickClassroomTimeWidgets,
+  ungroupClassroomTimeWidget,
+  type ClassroomTimeRenderContext,
+} from "./lib/classroom-time/scene";
 import { createUnitCircleMathJaxAsset } from "./lib/math-tools/unit-circle-latex";
 import {
   activatePresentationInk,
@@ -358,7 +444,55 @@ type PendingProjectSearchTarget = Pick<ProjectSearchResult, "elementId" | "scene
 type PendingVisualPdfFallback = {
   project: ClassroomProject;
   pdfBytes: Record<PdfDocumentId, Uint8Array>;
+  deviceCalendarSnapshot: ClassroomDeviceCalendarStoreV1;
   mode: PdfExportMode;
+  capturedAt: number;
+  boardTheme: "light" | "dark";
+};
+export type ClassroomTimeLibraryTransferIntent = {
+  baselineItemIds: ReadonlySet<string>;
+  cacheByAnchorId: ReadonlyMap<string, {
+    ownerId: string;
+    kind: "calendar" | "dashboard";
+    transferCache: NonNullable<
+      Extract<ClassroomTimeWidgetMetadataV1, { kind: "calendar" | "dashboard" }>["calendar"]["transferCache"]
+    >;
+  }>;
+  expiresAt: number;
+};
+type ClassroomTimeSchedulerSceneIndex = {
+  sceneId: string;
+  ownerIds: readonly string[];
+  nextTransitionAtMs: number | null;
+};
+export type ClassroomTimeSchedulerIndex = {
+  projectId: string | null;
+  widgetCount: number;
+  scenes: ReadonlyMap<string, ClassroomTimeSchedulerSceneIndex>;
+};
+type ClassroomTimeDialogState = {
+  mode: "insert" | "update";
+  metadata: ClassroomTimeWidgetMetadataV1;
+  anchorId?: string;
+};
+export type ClassroomTimeAlarmNotice = {
+  jobs: readonly ClassroomAlarmJobV1[];
+  jobIds: readonly string[];
+  message: string;
+  blocked: boolean;
+  deliveryPending: boolean;
+};
+export type ClassroomTimeTickFence = {
+  sceneId: string;
+  elementFingerprint: string;
+  fileFingerprint: string;
+  /**
+   * Ordinary clock/timer redraws are display-only. Excalidraw may normalize
+   * revision bookkeeping while applying updateScene(), so retain the exact
+   * expected content and accept revision-only drift without weakening the
+   * user-edit fence.
+   */
+  expectedDisplayContentFingerprint?: string;
 };
 export type PendingScenePersistence = {
   sceneId: string;
@@ -426,11 +560,15 @@ type PendingPdfUndo =
       kind: "clear-annotations";
       token: number;
       transaction: PdfAnnotationClearTransaction;
+      cancelledAlarmIdentities: readonly ClassroomAlarmIdentity[];
+      cancellationReceipt: ClassroomAlarmCancellationReceiptV1 | null;
     }
   | {
       kind: "delete-page";
       token: number;
       transaction: PdfPageDeleteTransaction;
+      cancelledAlarmIdentities: readonly ClassroomAlarmIdentity[];
+      cancellationReceipt: ClassroomAlarmCancellationReceiptV1 | null;
     };
 type PdfUndoToast =
   | {
@@ -620,6 +758,8 @@ function hasVisibleModalSurface(): boolean {
       '.settings-popover[role="dialog"]',
       '.slide-settings-popover[role="dialog"]',
       '.math-interaction-panel[role="dialog"]',
+      '.classroom-time-dialog[role="dialog"]',
+      '.classroom-time-overlay-menu[role="menu"]',
       '.topbar-menu-popover[role="menu"]',
       '.slide-thumbnail-menu[role="menu"]',
       '.editor-host .excalidraw .dropdown-menu',
@@ -728,6 +868,7 @@ const MAX_EXCALIDRAW_CLIPBOARD_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_EXCALIDRAW_CLIPBOARD_IMAGE_FILES = 32;
 const PERSONAL_LIBRARY_SIDEBAR_TAB = "library";
 const PROJECT_FIND_SIDEBAR_TAB = "project-find";
+const EXCALIDRAW_LIBRARY_MIME = "application/vnd.excalidrawlib+json";
 type LibrarySidebarTab = typeof PERSONAL_LIBRARY_SIDEBAR_TAB | typeof SCREENSHOT_SIDEBAR_TAB;
 type ScreenshotItemsUpdate =
   | readonly StoredScreenshot[]
@@ -1084,7 +1225,7 @@ function normalizedHydrationChange(
   files: BinaryFiles,
   transientFileIds: ReadonlySet<string>,
 ): PendingScenePersistence {
-  const backgroundSafeElements = canonicalizePdfBackground(
+  const backgroundSafeElements = canonicalizePdfBackgroundForPersistence(
     scene,
     elements as unknown as readonly Record<string, unknown>[],
   ) as unknown as readonly ExcalidrawElement[];
@@ -1186,24 +1327,1342 @@ function serializedValuesEqual(left: unknown, right: unknown): boolean {
   ));
 }
 
-function projectWithPendingScene(
+function classroomTimeElementFingerprint(elements: readonly ExcalidrawElement[]): string {
+  return elements.map((element) => (
+    `${element.id}:${element.version}:${element.versionNonce}:${element.updated}:${element.isDeleted ? 1 : 0}`
+  )).join("|");
+}
+
+const CLASSROOM_TIME_TRANSIENT_ELEMENT_REVISION_KEYS = new Set([
+  "version",
+  "versionNonce",
+  "updated",
+]);
+
+/**
+ * Returns true only when Excalidraw changed its element revision bookkeeping.
+ * Every persisted/user-editable field, including fractional z-order index,
+ * remains part of the signature, so a draw, move, delete, style edit,
+ * widget-state transition, or layer-order change cannot be mistaken for a
+ * wrapper-owned display tick.
+ */
+export function classroomTimeDisplayTickContentFingerprint(
+  elements: readonly ExcalidrawElement[],
+): string {
+  return JSON.stringify(elements.map((element) => Object.fromEntries(
+    Object.entries(element as unknown as Record<string, unknown>).filter(
+      ([key]) => !CLASSROOM_TIME_TRANSIENT_ELEMENT_REVISION_KEYS.has(key),
+    ),
+  )));
+}
+
+export function classroomTimeDisplayTickElementsMatch(
+  expected: readonly ExcalidrawElement[],
+  actual: readonly ExcalidrawElement[],
+): boolean {
+  return classroomTimeDisplayTickContentFingerprint(expected)
+    === classroomTimeDisplayTickContentFingerprint(actual);
+}
+
+function classroomTimeFileFingerprint(files: BinaryFiles): string {
+  return Object.values(files)
+    .map((file) => `${file.id}:${file.created}:${file.dataURL.length}`)
+    .sort()
+    .join("|");
+}
+
+/**
+ * A dark/sharp PDF preview is a device-only replacement for the immutable
+ * source background. Persistence must retain the scene's stable canonical
+ * background record while preserving every live annotation in exact order.
+ * Canonicalizing the live preview itself would continually bump the locked
+ * background revision and turn display refinement into project edits.
+ */
+export function canonicalizePdfBackgroundForPersistence(
+  scene: SerializedScene,
+  liveElements: readonly Record<string, unknown>[],
+): readonly Record<string, unknown>[] {
+  const backgroundId = scene.pdfPage?.backgroundElementId;
+  if (!backgroundId) return liveElements;
+  const canonicalSceneElements = canonicalizePdfBackground(
+    scene,
+    scene.elements as unknown as readonly Record<string, unknown>[],
+  );
+  const background = canonicalSceneElements.find((element) => element.id === backgroundId);
+  if (!background) return liveElements;
+  return [
+    background,
+    ...liveElements.filter((element) => element.id !== backgroundId),
+  ];
+}
+
+export function classroomTimeOperationSceneSignature(
+  scene: SerializedScene | null | undefined,
+  elements: readonly ExcalidrawElement[],
+  files: BinaryFiles,
+  transientFileIds: ReadonlySet<string>,
+): Pick<ClassroomTimeSchedulerPublicationFence, "elementFingerprint" | "fileFingerprint"> {
+  const persistentElements = scene
+    ? canonicalizePdfBackgroundForPersistence(
+      scene,
+      elements as unknown as readonly Record<string, unknown>[],
+    ) as unknown as readonly ExcalidrawElement[]
+    : elements;
+  const persistentFiles = scene
+    ? persistentFilesForScene(scene, files, transientFileIds)
+    : files;
+  return {
+    elementFingerprint: classroomTimeElementFingerprint(persistentElements),
+    fileFingerprint: classroomTimeFileFingerprint(persistentFiles),
+  };
+}
+
+export function classroomTimeTickFenceMatches(
+  fence: ClassroomTimeTickFence,
+  sceneId: string | null,
+  elements: readonly ExcalidrawElement[],
+  files: BinaryFiles,
+): boolean {
+  if (fence.sceneId !== sceneId || fence.fileFingerprint !== classroomTimeFileFingerprint(files)) {
+    return false;
+  }
+  return fence.elementFingerprint === classroomTimeElementFingerprint(elements)
+    || (
+      !!fence.expectedDisplayContentFingerprint
+      && fence.expectedDisplayContentFingerprint
+        === classroomTimeDisplayTickContentFingerprint(elements)
+    );
+}
+
+export type ClassroomTimeConfirmationToast = {
+  token: number;
+  message: string;
+};
+
+export const CLASSROOM_TIME_CONFIRMATION_TOAST_DURATION_MS = 2_500;
+
+/**
+ * Wrapper-owned confirmations use a hard deadline: Excalidraw's native toast
+ * timer restarts during live widget redraws and pauses while hovered. Keeping
+ * the current token in a ref prevents an older deadline from clearing a newer
+ * confirmation while remaining independent of React/Excalidraw rerenders.
+ */
+export function scheduleClassroomTimeConfirmationToast(
+  toast: ClassroomTimeConfirmationToast,
+  currentToastRef: { current: ClassroomTimeConfirmationToast | null },
+  publish: (toast: ClassroomTimeConfirmationToast | null) => void,
+  durationMs = CLASSROOM_TIME_CONFIRMATION_TOAST_DURATION_MS,
+): () => void {
+  currentToastRef.current = toast;
+  publish(toast);
+  const timeoutId = window.setTimeout(() => {
+    if (currentToastRef.current?.token !== toast.token) return;
+    currentToastRef.current = null;
+    publish(null);
+  }, durationMs);
+  return () => window.clearTimeout(timeoutId);
+}
+
+function classroomTimeGestureInProgress(appState: AppState): boolean {
+  const extended = appState as AppState & {
+    draggingElement?: unknown;
+    selectedElementsAreBeingDragged?: boolean;
+  };
+  return Boolean(
+    appState.newElement
+    || appState.resizingElement
+    || appState.isResizing
+    || appState.isRotating
+    || appState.multiElement
+    || extended.draggingElement
+    || extended.selectedElementsAreBeingDragged,
+  );
+}
+
+function replaceClassroomTimeMetadata(
+  element: ExcalidrawElement,
+  metadata: ClassroomTimeWidgetMetadataV1,
+): ExcalidrawElement {
+  return newElementWith(element, {
+    customData: {
+      ...(element.customData || {}),
+      classroomTimeWidget: metadata,
+    },
+  });
+}
+
+export function attachProjectCalendarTransferCache(
+  elements: readonly ExcalidrawElement[],
+  project: ClassroomProject,
+  ownerIds?: ReadonlySet<string>,
+): readonly ExcalidrawElement[] {
+  const projectCalendar = project.projectCalendar
+    ?? createClassroomCalendarStoreV1("project");
+  let changed = false;
+  const updated = elements.map((element) => {
+    const metadata = classroomTimeWidgetMetadata(element);
+    if (!metadata || (metadata.kind !== "calendar" && metadata.kind !== "dashboard")) return element;
+    if (ownerIds && !ownerIds.has(metadata.ownerId)) return element;
+    const existingCache = metadata.calendar.transferCache;
+    if (existingCache && existingCache.sourceProjectId !== project.id) return element;
+    const referenced = new Set(metadata.calendar.projectEventIds);
+    const events = referenced.size
+      ? projectCalendar.events.filter((event) => referenced.has(event.id))
+      : projectCalendar.events;
+    const transferCache = createProjectCalendarTransferCache(
+      project.id,
+      createClassroomCalendarStoreV1("project", events),
+    );
+    if (serializedValuesEqual(metadata.calendar.transferCache, transferCache)) return element;
+    changed = true;
+    return replaceClassroomTimeMetadata(element, {
+      ...metadata,
+      calendar: { ...metadata.calendar, transferCache },
+    });
+  });
+  return changed ? updated : elements;
+}
+
+export type PreparedClassroomTimeLibraryItem = {
+  item: LibraryItems[number];
+  ownerIds: readonly string[];
+};
+
+export function shouldAllowNativePersonalLibraryCanvasDrop(
+  nativeLibraryCardDragStarted: boolean,
+  dataTransferTypes: readonly string[],
+  hasFile: boolean,
+): boolean {
+  return nativeLibraryCardDragStarted
+    && !hasFile
+    && dataTransferTypes.includes(EXCALIDRAW_LIBRARY_MIME);
+}
+
+/**
+ * Builds the one library item that Excalidraw's native image guard cannot.
+ * The selection must consist exclusively of complete Classroom Time owner
+ * groups. Device-calendar display rows are canonicalized away first, while a
+ * bounded project-event transfer cache is attached to each Calendar or
+ * Dashboard anchor. Native library v2 has no file table, so its image anchor
+ * remains a local logical reference; insertion regenerates the deterministic
+ * SVG shell from sanitized metadata before the scene is published.
+ */
+export function prepareClassroomTimeLibraryItemForSelection(
+  elements: readonly ExcalidrawElement[],
+  files: BinaryFiles,
+  project: ClassroomProject,
+  selectedElementIds: Readonly<Record<string, boolean>>,
+  now = Date.now(),
+  createId: () => string = createLocalId,
+): PreparedClassroomTimeLibraryItem | null {
+  const liveElements = elements.filter((element) => !element.isDeleted);
+  const selectedElements = liveElements.filter((element) => selectedElementIds[element.id]);
+  if (!selectedElements.length) return null;
+  const hasSelectedClassroomTimeElement = selectedElements.some((element) => (
+    classroomTimeWidgetOwnerId(element) !== null
+  ));
+  if (!hasSelectedClassroomTimeElement) return null;
+  const selectedWidget = selectedClassroomTimeWidget(elements, selectedElementIds);
+  if (!selectedWidget) {
+    throw new Error("Select one complete Classroom Time widget before adding it to Personal Library.");
+  }
+  if (selectedElements.some((element) => (
+    classroomTimeWidgetOwnerId(element) !== selectedWidget.ownerId
+  ))) {
+    throw new Error("Add the Classroom Time widget by itself so its complete local content stays together.");
+  }
+  const ownerIds = new Set([selectedWidget.ownerId]);
+
+  const canonical = canonicalizeClassroomTimeWidgetsForPersistence(
+    elements,
+    files,
+    project.projectCalendar,
+    now,
+    createId,
+  );
+  const portable = attachProjectCalendarTransferCache(
+    canonical.elements,
+    project,
+    ownerIds,
+  );
+  const itemElements = portable.filter((element) => (
+    !element.isDeleted
+    && ownerIds.has(classroomTimeWidgetOwnerId(element) ?? "")
+  ));
+  for (const ownerId of ownerIds) {
+    const anchor = itemElements.find((element) => (
+      classroomTimeWidgetMetadata(element)?.ownerId === ownerId
+    ));
+    const file = anchor?.type === "image" && anchor.fileId
+      ? canonical.files[anchor.fileId]
+      : undefined;
+    if (
+      !anchor
+      || !file
+      || file.mimeType !== "image/svg+xml"
+      || !String(file.dataURL).startsWith("data:image/svg+xml")
+      || String(file.dataURL).length > MAX_EXCALIDRAW_CLIPBOARD_IMAGE_BYTES
+    ) {
+      throw new Error("The selected Classroom Time widget does not have a safe local SVG shell.");
+    }
+  }
+
+  const firstMetadata = itemElements
+    .map((element) => classroomTimeWidgetMetadata(element))
+    .find((metadata): metadata is ClassroomTimeWidgetMetadataV1 => metadata !== null);
+  const item = {
+    id: createId(),
+    status: "unpublished" as const,
+    elements: itemElements.map((element) => ({ ...element, frameId: null })),
+    created: now,
+    name: ownerIds.size === 1
+      ? firstMetadata?.label || "Classroom Time"
+      : `${ownerIds.size} Classroom Time widgets`,
+  } as LibraryItems[number];
+  const safe = sanitizeLibraryItems([item]);
+  if (safe.length !== 1) {
+    throw new Error("The selected Classroom Time widget could not be prepared safely.");
+  }
+  return { item: safe[0], ownerIds: [...ownerIds] };
+}
+
+/**
+ * Applies a one-shot Add-to-library transfer snapshot to at most one new,
+ * source-matching item. Existing portable caches are authoritative and are
+ * never rewritten from the project that merely happens to be open now.
+ */
+export function applyClassroomTimeLibraryTransferIntent(
+  items: LibraryItems,
+  intent: ClassroomTimeLibraryTransferIntent | null,
+): { items: LibraryItems; matchedItemId: string | null } {
+  if (!intent?.cacheByAnchorId.size) return { items, matchedItemId: null };
+  let matchedItemId: string | null = null;
+  let changed = false;
+  const prepared = items.map((item) => {
+    if (matchedItemId || intent.baselineItemIds.has(item.id)) return item;
+    let itemMatched = false;
+    let itemChanged = false;
+    const elements = (item.elements as unknown as readonly ExcalidrawElement[]).map((element) => {
+      const source = intent.cacheByAnchorId.get(element.id);
+      if (!source) return element;
+      const metadata = classroomTimeWidgetMetadata(element);
+      if (
+        !metadata
+        || (metadata.kind !== "calendar" && metadata.kind !== "dashboard")
+        || metadata.ownerId !== source.ownerId
+        || metadata.kind !== source.kind
+      ) return element;
+      itemMatched = true;
+      if (metadata.calendar.transferCache !== null) return element;
+      itemChanged = true;
+      return replaceClassroomTimeMetadata(element, {
+        ...metadata,
+        calendar: {
+          ...metadata.calendar,
+          transferCache: source.transferCache,
+        },
+      });
+    });
+    if (!itemMatched) return item;
+    matchedItemId = item.id;
+    if (!itemChanged) return item;
+    changed = true;
+    return { ...item, elements };
+  }) as LibraryItems;
+  return { items: changed ? prepared : items, matchedItemId };
+}
+
+export function importClassroomTimeCalendarTransfer(
+  metadata: ClassroomTimeWidgetMetadataV1,
+  currentProjectId: string,
+  projectCalendar: ClassroomProjectCalendarStoreV1,
+): {
+  metadata: ClassroomTimeWidgetMetadataV1;
+  projectCalendar: ClassroomProjectCalendarStoreV1;
+  calendarChanged: boolean;
+} {
+  if (
+    (metadata.kind !== "calendar" && metadata.kind !== "dashboard")
+    || metadata.calendar.transferCache === null
+  ) return { metadata, projectCalendar, calendarChanged: false };
+  const transfer = metadata.calendar.transferCache;
+  if (transfer.sourceProjectId === currentProjectId) {
+    return {
+      metadata: {
+        ...metadata,
+        calendar: { ...metadata.calendar, transferCache: null },
+      },
+      projectCalendar,
+      calendarChanged: false,
+    };
+  }
+  const imported = importProjectCalendarTransferCache(projectCalendar, transfer);
+  const sourceIds = metadata.calendar.projectEventIds.length
+    ? metadata.calendar.projectEventIds
+    : transfer.events.map((event) => event.id);
+  const projectEventIds = [...new Set(sourceIds.flatMap((eventId) => {
+    const destinationId = imported.idMap[eventId];
+    return destinationId ? [destinationId] : [];
+  }))];
+  return {
+    metadata: {
+      ...metadata,
+      calendar: {
+        ...metadata.calendar,
+        showProjectEvents: sourceIds.length > 0
+          ? metadata.calendar.showProjectEvents
+          : false,
+        projectEventIds,
+        transferCache: null,
+      },
+    },
+    projectCalendar: imported.store,
+    calendarChanged: imported.importedEventIds.length > 0,
+  };
+}
+
+function classroomTimeNextTransitionAtMs(
+  metadata: ClassroomTimeWidgetMetadataV1,
+): number | null {
+  const deadlines: number[] = [];
+  const collect = (runtime: { status: string; deadlineMs: number | null }) => {
+    if (runtime.status === "running" && runtime.deadlineMs !== null) {
+      deadlines.push(runtime.deadlineMs);
+    }
+  };
+  if (metadata.kind === "timer" || metadata.kind === "pomodoro") {
+    collect(metadata.runtime);
+  } else if (metadata.kind === "dashboard") {
+    if (metadata.panels.timer) collect(metadata.timerRuntime);
+    if (metadata.panels.pomodoro) collect(metadata.pomodoroRuntime);
+  }
+  return deadlines.length ? Math.min(...deadlines) : null;
+}
+
+function classroomTimeSchedulerSceneIndex(
+  sceneId: string,
+  elements: readonly ExcalidrawElement[],
+  capacity: number,
+): ClassroomTimeSchedulerSceneIndex | null {
+  const ownerIds: string[] = [];
+  const seenOwners = new Set<string>();
+  let nextTransitionAtMs: number | null = null;
+  for (const element of elements) {
+    if (ownerIds.length >= capacity) break;
+    if (element.isDeleted) continue;
+    const metadata = classroomTimeWidgetMetadata(element);
+    if (!metadata || seenOwners.has(metadata.ownerId)) continue;
+    seenOwners.add(metadata.ownerId);
+    ownerIds.push(metadata.ownerId);
+    const deadline = classroomTimeNextTransitionAtMs(metadata);
+    if (deadline !== null && (nextTransitionAtMs === null || deadline < nextTransitionAtMs)) {
+      nextTransitionAtMs = deadline;
+    }
+  }
+  return ownerIds.length ? { sceneId, ownerIds, nextTransitionAtMs } : null;
+}
+
+export function createClassroomTimeSchedulerIndex(
+  project: ClassroomProject | null,
+): ClassroomTimeSchedulerIndex {
+  if (!project) return { projectId: null, widgetCount: 0, scenes: new Map() };
+  const scenes = new Map<string, ClassroomTimeSchedulerSceneIndex>();
+  let widgetCount = 0;
+  for (const scene of Object.values(project.scenes)) {
+    if (widgetCount >= MAX_CLASSROOM_TIME_WIDGETS) break;
+    const entry = classroomTimeSchedulerSceneIndex(
+      scene.id,
+      scene.elements as unknown as readonly ExcalidrawElement[],
+      MAX_CLASSROOM_TIME_WIDGETS - widgetCount,
+    );
+    if (!entry) continue;
+    scenes.set(scene.id, entry);
+    widgetCount += entry.ownerIds.length;
+  }
+  return { projectId: project.id, widgetCount, scenes };
+}
+
+export function updateClassroomTimeSchedulerSceneIndex(
+  current: ClassroomTimeSchedulerIndex,
+  projectId: string,
+  sceneId: string,
+  elements: readonly ExcalidrawElement[],
+): ClassroomTimeSchedulerIndex {
+  const scenes = new Map(
+    current.projectId === projectId ? current.scenes : [],
+  );
+  scenes.delete(sceneId);
+  let widgetCount = [...scenes.values()].reduce(
+    (count, entry) => count + entry.ownerIds.length,
+    0,
+  );
+  const entry = classroomTimeSchedulerSceneIndex(
+    sceneId,
+    elements,
+    Math.max(0, MAX_CLASSROOM_TIME_WIDGETS - widgetCount),
+  );
+  if (entry) {
+    scenes.set(sceneId, entry);
+    widgetCount += entry.ownerIds.length;
+  }
+  return { projectId, widgetCount, scenes };
+}
+
+function classroomTimeOwnerIds(project: ClassroomProject): ReadonlySet<string> {
+  const ownerIds = new Set<string>();
+  for (const scene of Object.values(project.scenes)) {
+    for (const element of scene.elements as unknown as readonly ExcalidrawElement[]) {
+      if (element.isDeleted) continue;
+      const metadata = classroomTimeWidgetMetadata(element);
+      if (metadata) ownerIds.add(metadata.ownerId);
+    }
+  }
+  return ownerIds;
+}
+
+export function removedClassroomTimeAlarmIdentities(
+  previous: ClassroomProject,
+  next: ClassroomProject,
+): readonly ClassroomAlarmIdentity[] {
+  if (previous.id !== next.id) return [];
+  const retainedOwners = classroomTimeOwnerIds(next);
+  return [...classroomTimeOwnerIds(previous)]
+    .filter((ownerId) => !retainedOwners.has(ownerId))
+    .flatMap((ownerId) => ([
+      { sourceProjectId: previous.id, ownerId, target: "timer" as const },
+      { sourceProjectId: previous.id, ownerId, target: "pomodoro" as const },
+    ]));
+}
+
+export function replacedClassroomTimeAlarmIdentities(
+  outgoing: ClassroomProject | null,
+  incoming: ClassroomProject,
+): readonly ClassroomAlarmIdentity[] {
+  if (!outgoing || outgoing.id !== incoming.id) return [];
+  const incomingByIdentity = new Map(
+    projectClassroomTimeAlarmDescriptors(incoming).map((descriptor) => [
+      classroomAlarmIdentityKey(descriptor),
+      descriptor,
+    ]),
+  );
+  return [...new Map(projectClassroomTimeAlarmDescriptors(outgoing).flatMap((descriptor) => {
+    const retained = incomingByIdentity.get(classroomAlarmIdentityKey(descriptor));
+    if (
+      retained
+      && classroomAlarmJobMatchesDescriptor(classroomAlarmJobFromDescriptor(descriptor), retained)
+    ) return [];
+    const identity = {
+      sourceProjectId: descriptor.sourceProjectId,
+      ownerId: descriptor.ownerId,
+      target: descriptor.target,
+    } as const;
+    return [[classroomAlarmIdentityKey(identity), identity] as const];
+  })).values()];
+}
+
+export function pauseClassroomAlarmIdentitiesInProject(
+  project: ClassroomProject,
+  identities: readonly ClassroomAlarmIdentity[],
+  now = Date.now(),
+): ClassroomProject {
+  const targetsByOwner = new Map<string, Set<"timer" | "pomodoro">>();
+  for (const identity of identities) {
+    if (identity.sourceProjectId !== project.id) continue;
+    const targets = targetsByOwner.get(identity.ownerId) ?? new Set();
+    targets.add(identity.target);
+    targetsByOwner.set(identity.ownerId, targets);
+  }
+  if (!targetsByOwner.size) return project;
+  let changed = false;
+  const scenes = Object.fromEntries(Object.entries(project.scenes).map(([sceneId, scene]) => {
+    let sceneChanged = false;
+    const elements = (scene.elements as unknown as readonly ExcalidrawElement[]).map((element) => {
+      if (element.isDeleted) return element;
+      const metadata = classroomTimeWidgetMetadata(element);
+      const targets = metadata ? targetsByOwner.get(metadata.ownerId) : undefined;
+      if (!metadata || !targets) return element;
+      let paused = metadata;
+      for (const target of targets) {
+        paused = applyClassroomTimeControl(paused, target, "pause", now);
+      }
+      if (paused === metadata || serializedValuesEqual(paused, metadata)) return element;
+      sceneChanged = true;
+      return replaceClassroomTimeMetadata(element, paused);
+    });
+    if (!sceneChanged) return [sceneId, scene];
+    const canonical = canonicalizeClassroomTimeWidgetsForPersistence(
+      elements,
+      scene.files as unknown as BinaryFiles,
+      project.projectCalendar,
+      now,
+      createLocalId,
+    );
+    changed = true;
+    return [sceneId, {
+      ...scene,
+      elements: canonical.elements as unknown as SerializedScene["elements"],
+      files: canonical.files as unknown as SerializedScene["files"],
+    }];
+  }));
+  return changed ? { ...project, scenes, updatedAt: nowIso() } : project;
+}
+
+function projectClassroomTimeAlarmDescriptors(
+  project: ClassroomProject,
+): readonly ClassroomTimeAlarmDescriptor[] {
+  return Object.values(project.scenes).flatMap((scene) => (
+    activeClassroomTimeAlarmDescriptors(
+      project.id,
+      scene.elements as unknown as readonly ExcalidrawElement[],
+    )
+  ));
+}
+
+function classroomAlarmIdentityKey(identity: ClassroomAlarmIdentity): string {
+  return `${identity.sourceProjectId}:${identity.ownerId}:${identity.target}`;
+}
+
+export function prepareSameProjectClassroomAlarmReplacement(
+  outgoing: ClassroomProject | null,
+  incoming: ClassroomProject,
+  registry: ClassroomAlarmRegistryV1,
+  now = Date.now(),
+): {
+  project: ClassroomProject;
+  state: ClassroomAlarmRegistryStateV1;
+  cancelledIdentities: readonly ClassroomAlarmIdentity[];
+  cancelledJobs: readonly ClassroomAlarmJobV1[];
+  recoveredJobs: readonly ClassroomAlarmJobV1[];
+  pausedIdentities: readonly ClassroomAlarmIdentity[];
+} {
+  const replacesSameProject = outgoing?.id === incoming.id;
+  const outgoingDescriptors = replacesSameProject && outgoing
+    ? projectClassroomTimeAlarmDescriptors(outgoing)
+    : [];
+  const incomingDescriptors = projectClassroomTimeAlarmDescriptors(incoming);
+  const incomingById = new Map(incomingDescriptors.map((descriptor) => [descriptor.id, descriptor]));
+  const cancellationAdditions = new Map<string, {
+    identity: ClassroomAlarmIdentity;
+    tombstone: ClassroomAlarmRegistryV1["cancellationTombstones"][number];
+    cancelledJob: ClassroomAlarmJobV1 | null;
+  }>();
+  for (const descriptor of outgoingDescriptors) {
+    const incomingDescriptor = incomingById.get(descriptor.id);
+    if (incomingDescriptor && classroomAlarmJobMatchesDescriptor(
+      classroomAlarmJobFromDescriptor(descriptor),
+      incomingDescriptor,
+    )) continue;
+    const currentJob = registry.jobs.find((job) => (
+      classroomAlarmJobMatchesDescriptor(job, descriptor)
+    ));
+    // A different/newer job can belong to another tab using the same project.
+    // Only cancel the exact outgoing generation this tab is replacing.
+    if (!currentJob) continue;
+    const identity = {
+      sourceProjectId: descriptor.sourceProjectId,
+      ownerId: descriptor.ownerId,
+      target: descriptor.target,
+    } as const;
+    cancellationAdditions.set(classroomAlarmIdentityKey(identity), {
+      identity,
+      tombstone: {
+        version: 1,
+        ...identity,
+        cancelledAtMs: Math.max(now, currentJob.createdAtMs),
+        cancelledGeneration: currentJob.deliveryState === "pending" ? {
+          jobId: currentJob.id,
+          createdAtMs: currentJob.createdAtMs,
+          deadlineMs: currentJob.deadlineMs,
+        } : null,
+        restoredAtMs: null,
+      },
+      cancelledJob: currentJob.deliveryState === "pending" ? currentJob : null,
+    });
+  }
+  const cancellationTombstones = pruneClassroomAlarmCancellationTombstones([
+    ...registry.cancellationTombstones,
+    ...[...cancellationAdditions.values()].map((addition) => addition.tombstone),
+  ], now);
+  const deliveredTombstones = pruneClassroomAlarmDeliveryTombstones(
+    registry.deliveredTombstones,
+    now,
+  );
+  let jobs = applyClassroomAlarmCancellationAuthority(
+    registry.jobs,
+    cancellationTombstones,
+    now,
+  );
+  for (const descriptor of incomingDescriptors) {
+    const requested = classroomAlarmJobFromDescriptor(descriptor);
+    const crossIdentityIdCollision = jobs.some((job) => (
+      job.id === requested.id
+      && classroomAlarmIdentityKey(job) !== classroomAlarmIdentityKey(requested)
+    ));
+    // Alarm IDs are intentionally compact (`owner:target`). A project copied
+    // on another device can therefore collide with an unrelated project's
+    // owner ID; recovery must never replace that unrelated durable job.
+    if (crossIdentityIdCollision) continue;
+    jobs = recoverClassroomAlarmJob({
+      version: 1,
+      revision: registry.revision,
+      jobs,
+      deliveredTombstones,
+      cancellationTombstones,
+    }, requested, now);
+  }
+  const pausedByKey = new Map<string, ClassroomAlarmIdentity>();
+  for (const descriptor of incomingDescriptors) {
+    const authorized = jobs.some((job) => (
+      job.deliveryState === "pending"
+      && classroomAlarmJobMatchesDescriptor(job, descriptor)
+    ));
+    if (authorized) continue;
+    const identity = {
+      sourceProjectId: descriptor.sourceProjectId,
+      ownerId: descriptor.ownerId,
+      target: descriptor.target,
+    } as const;
+    pausedByKey.set(classroomAlarmIdentityKey(identity), identity);
+  }
+  const pausedIdentities = [...pausedByKey.values()];
+  const recoveredJobs = incomingDescriptors.flatMap((descriptor) => {
+    const recovered = jobs.find((job) => (
+      job.deliveryState === "pending"
+      && classroomAlarmJobMatchesDescriptor(job, descriptor)
+    ));
+    if (!recovered || registry.jobs.some((job) => serializedValuesEqual(job, recovered))) return [];
+    return [recovered];
+  });
+  return {
+    project: pauseClassroomAlarmIdentitiesInProject(incoming, pausedIdentities, now),
+    state: { jobs, deliveredTombstones, cancellationTombstones },
+    cancelledIdentities: [...cancellationAdditions.values()].map((addition) => addition.identity),
+    cancelledJobs: [...cancellationAdditions.values()].flatMap((addition) => (
+      addition.cancelledJob ? [addition.cancelledJob] : []
+    )),
+    recoveredJobs,
+    pausedIdentities,
+  };
+}
+
+/**
+ * Adapts Excalidraw's already-duplicated scene to Classroom Time ownership
+ * without invalidating Excalidraw's selected IDs, binding repair, or frames.
+ */
+export function forkNativeClassroomTimeWidgetDuplicates(
+  nextElements: readonly ExcalidrawElement[],
+  previousElements: readonly ExcalidrawElement[],
+  now = Date.now(),
+  createId: () => string = createLocalId,
+): ReturnType<typeof forkDuplicatedClassroomTimeWidgets> {
+  const previousIds = new Set(previousElements.map((element) => element.id));
+  const duplicatedElements = nextElements.filter((element) => !previousIds.has(element.id));
+  if (!duplicatedElements.length) {
+    return { elements: nextElements, ownerIdMap: {}, elementIdMap: {} };
+  }
+  const sourceAnchors = new Map<string, ExcalidrawElement>();
+  for (const element of previousElements) {
+    if (element.isDeleted) continue;
+    const metadata = classroomTimeWidgetMetadata(element);
+    if (metadata) sourceAnchors.set(metadata.ownerId, element);
+  }
+  const sourceToDuplicateGroupIds = new Map<string, string>();
+  for (const element of duplicatedElements) {
+    if (element.isDeleted) continue;
+    const metadata = classroomTimeWidgetMetadata(element);
+    if (!metadata) continue;
+    const source = sourceAnchors.get(metadata.ownerId);
+    const ownerGroupIndex = source?.groupIds.indexOf(metadata.ownerId) ?? -1;
+    const duplicateGroupId = ownerGroupIndex >= 0
+      ? element.groupIds[ownerGroupIndex]
+      : element.groupIds[0];
+    if (!duplicateGroupId) {
+      throw new Error(`Duplicated classroom widget ${metadata.ownerId} has no owner group.`);
+    }
+    const existing = sourceToDuplicateGroupIds.get(metadata.ownerId);
+    if (existing && existing !== duplicateGroupId) {
+      throw new Error(`Duplicated classroom widget ${metadata.ownerId} has inconsistent owner groups.`);
+    }
+    sourceToDuplicateGroupIds.set(metadata.ownerId, duplicateGroupId);
+  }
+  if (!sourceToDuplicateGroupIds.size) {
+    return { elements: nextElements, ownerIdMap: {}, elementIdMap: {} };
+  }
+  const forked = forkDuplicatedClassroomTimeWidgets(duplicatedElements, {
+    sourceToDuplicateGroupIds,
+    now,
+    createId,
+  });
+  const byId = new Map(forked.elements.map((element) => [element.id, element]));
+  return {
+    ...forked,
+    elements: nextElements.map((element) => byId.get(element.id) ?? element),
+  };
+}
+
+function mergeClassroomTimeFiles(
+  files: BinaryFiles,
+  addedFiles: readonly BinaryFileData[],
+  orphanedFileIds: readonly FileId[],
+): BinaryFiles {
+  const merged = { ...files } as BinaryFiles;
+  for (const file of addedFiles) merged[file.id] = file;
+  for (const fileId of orphanedFileIds) delete merged[fileId];
+  return merged;
+}
+
+const EMPTY_DEVICE_CLASSROOM_CALENDAR = createClassroomCalendarStoreV1("device");
+
+/** Device-calendar labels exist only in the live editor or an explicit export. */
+export function materializeClassroomTimeSceneForDisplay(
+  elements: readonly ExcalidrawElement[],
+  files: BinaryFiles,
+  projectCalendar: ClassroomProjectCalendarStoreV1 | null | undefined,
+  deviceCalendar: ClassroomDeviceCalendarStoreV1,
+  now = Date.now(),
+  createId: () => string = createLocalId,
+  boardTheme: "light" | "dark" = "light",
+): {
+  elements: readonly ExcalidrawElement[];
+  files: BinaryFiles;
+  addedFiles: readonly BinaryFileData[];
+  orphanedFileIds: readonly FileId[];
+} {
+  const renderContext = classroomTimeRenderContext(
+    elements,
+    projectCalendar,
+    deviceCalendar,
+    now,
+    boardTheme,
+  );
+  const reconciled = reconcileClassroomTimeWidgets(elements, {
+    now,
+    files,
+    createId,
+    renderContext,
+  });
+  return {
+    elements: reconciled.elements,
+    files: mergeClassroomTimeFiles(files, reconciled.addedFiles, reconciled.orphanedFileIds),
+    addedFiles: reconciled.addedFiles,
+    orphanedFileIds: reconciled.orphanedFileIds,
+  };
+}
+
+export function materializeProjectClassroomTimeWidgets(
+  project: ClassroomProject,
+  capturedAt: number,
+  deviceCalendar: ClassroomDeviceCalendarStoreV1,
+  boardTheme: "light" | "dark",
+  createId: () => string = createLocalId,
+): ClassroomProject {
+  let changed = false;
+  const scenes = Object.fromEntries(Object.entries(project.scenes).map(([sceneId, scene]) => {
+    const source = scene.elements as unknown as readonly ExcalidrawElement[];
+    if (!source.some((element) => classroomTimeWidgetMetadata(element))) {
+      return [sceneId, scene];
+    }
+    const materialized = materializeClassroomTimeSceneForDisplay(
+      source,
+      scene.files as unknown as BinaryFiles,
+      project.projectCalendar,
+      deviceCalendar,
+      capturedAt,
+      createId,
+      boardTheme,
+    );
+    changed = true;
+    return [sceneId, {
+      ...scene,
+      elements: materialized.elements as unknown as SerializedScene["elements"],
+      files: materialized.files as unknown as SerializedScene["files"],
+    }];
+  }));
+  return changed ? { ...project, scenes } : project;
+}
+
+function classroomAlarmNoticeMessage(jobs: readonly ClassroomAlarmJobV1[]): string {
+  const labels = [...new Set(jobs.map((job) => job.label.trim()).filter(Boolean))];
+  if (!labels.length) return "A classroom timer has finished.";
+  if (labels.length === 1) return `${labels[0]} has finished.`;
+  if (labels.length === 2) return `${labels[0]} and ${labels[1]} have finished.`;
+  return `${labels[0]}, ${labels[1]}, and ${labels.length - 2} more timers have finished.`;
+}
+
+export function classroomTimeAlarmNoticeAfterSupersedingJob(
+  notice: ClassroomTimeAlarmNotice | null,
+  jobId: string,
+): ClassroomTimeAlarmNotice | null {
+  if (!notice?.jobIds.includes(jobId)) return notice;
+  const jobs = notice.jobs.filter((job) => job.id !== jobId);
+  if (!jobs.length) return null;
+  return {
+    jobs,
+    jobIds: jobs.map((job) => job.id),
+    message: classroomAlarmNoticeMessage(jobs),
+    blocked: notice.blocked || jobs.some((job) => job.deliveryState === "blocked"),
+    deliveryPending: notice.deliveryPending,
+  };
+}
+
+export function classroomTimeAlarmNoticeCanDismiss(
+  notice: ClassroomTimeAlarmNotice | null,
+): notice is ClassroomTimeAlarmNotice {
+  return !!notice && !notice.deliveryPending;
+}
+
+function classroomAlarmJobMatchesDescriptor(
+  job: ClassroomAlarmJobV1,
+  descriptor: ClassroomTimeAlarmDescriptor,
+): boolean {
+  return job.id === descriptor.id
+    && job.sourceProjectId === descriptor.sourceProjectId
+    && job.ownerId === descriptor.ownerId
+    && job.widgetKind === descriptor.widgetKind
+    && job.target === descriptor.target
+    && job.label === descriptor.label
+    && job.deadlineMs === descriptor.deadlineMs
+    && job.tone === descriptor.tone
+    && job.repeat === descriptor.repeat
+    && job.createdAtMs === descriptor.createdAtMs;
+}
+
+export function classroomAlarmJobFromDescriptor(
+  descriptor: ClassroomTimeAlarmDescriptor,
+): ClassroomAlarmJobV1 {
+  return createClassroomAlarmJob({
+    id: descriptor.id,
+    sourceProjectId: descriptor.sourceProjectId,
+    ownerId: descriptor.ownerId,
+    widgetKind: descriptor.widgetKind,
+    target: descriptor.target,
+    label: descriptor.label,
+    deadlineMs: descriptor.deadlineMs,
+    tone: descriptor.tone,
+    repeat: descriptor.repeat,
+    createdAtMs: descriptor.createdAtMs,
+  });
+}
+
+function pendingClassroomAlarmJob(
+  job: ClassroomAlarmJobV1,
+): ClassroomAlarmJobV1 {
+  return {
+    ...job,
+    deliveryState: "pending",
+    deliveryStateAtMs: null,
+  };
+}
+
+export function classroomAlarmTransactionReceiptMatchesProject(
+  receipt: ClassroomAlarmTransactionReceiptV1,
+  project: ClassroomProject,
+): boolean {
+  const descriptors = projectClassroomTimeAlarmDescriptors(project);
+  return receipt.stagedJobs.length > 0 && receipt.stagedJobs.every((job) => (
+    descriptors.some((descriptor) => classroomAlarmJobMatchesDescriptor(job, descriptor))
+  ));
+}
+
+export function classroomAlarmIdentitiesForTransactionReceipts(
+  receipts: readonly ClassroomAlarmTransactionReceiptV1[],
+): readonly ClassroomAlarmIdentity[] {
+  return [...new Map(receipts.flatMap((receipt) => receipt.stagedJobs).map((job) => {
+    const identity = {
+      sourceProjectId: job.sourceProjectId,
+      ownerId: job.ownerId,
+      target: job.target,
+    } as const;
+    return [classroomAlarmIdentityKey(identity), identity];
+  })).values()];
+}
+
+export interface PreparedClassroomAlarmPublication {
+  project: ClassroomProject;
+  receipts: readonly ClassroomAlarmTransactionReceiptV1[];
+  pausedIdentities: readonly ClassroomAlarmIdentity[];
+}
+
+/**
+ * Project reconciliation is an authority repair, not a generic project-change
+ * notification. Avoid advancing the shared async-operation generation when an
+ * idle project (for example, the result of native Undo) has no alarm work, or
+ * when every running descriptor already has its exact pending authority.
+ */
+export function classroomTimeAlarmReconciliationNeeded(
+  project: ClassroomProject,
+  registry: ClassroomAlarmRegistryV1,
+): boolean {
+  const descriptors = projectClassroomTimeAlarmDescriptors(project);
+  if (!descriptors.length) return false;
+  const byIdentity = new Map<string, ClassroomTimeAlarmDescriptor>();
+  for (const descriptor of descriptors) {
+    const key = classroomAlarmIdentityKey(descriptor);
+    const prior = byIdentity.get(key);
+    if (
+      prior
+      && !classroomAlarmJobMatchesDescriptor(classroomAlarmJobFromDescriptor(prior), descriptor)
+    ) return true;
+    byIdentity.set(key, descriptor);
+  }
+  return [...byIdentity.values()].some((descriptor) => !registry.jobs.some((job) => (
+    job.deliveryState === "pending"
+    && classroomAlarmJobMatchesDescriptor(job, descriptor)
+  )));
+}
+
+/**
+ * Prepares alarm authority without making any newly requested job deliverable.
+ * Callers must recheck their UI/file fence, synchronously publish `project`,
+ * and only then activate every returned receipt. A stale caller must roll the
+ * receipts back exactly.
+ */
+export async function prepareClassroomAlarmPublication(
+  incomingProject: ClassroomProject,
+  nowMs: number,
+  options: {
+    resolvePersistedTransactions?: boolean;
+    storage?: ClassroomAlarmStorage | null;
+  } = {},
+): Promise<PreparedClassroomAlarmPublication> {
+  const storage = options.storage;
+  const receipts: ClassroomAlarmTransactionReceiptV1[] = [];
+  const pausedByIdentity = new Map<string, ClassroomAlarmIdentity>();
+  const pauseJobs = (jobs: readonly ClassroomAlarmJobV1[]) => {
+    for (const job of jobs) {
+      const identity = {
+        sourceProjectId: job.sourceProjectId,
+        ownerId: job.ownerId,
+        target: job.target,
+      } as const;
+      pausedByIdentity.set(classroomAlarmIdentityKey(identity), identity);
+    }
+  };
+
+  if (options.resolvePersistedTransactions) {
+    const persistedReceipts = listStagedClassroomAlarmTransactions(
+      readClassroomAlarmRegistry(storage),
+    );
+    for (const persistedReceipt of persistedReceipts) {
+      const currentRegistry = readClassroomAlarmRegistry(storage);
+      const exactMatch = matchStagedClassroomAlarmTransaction(
+        currentRegistry,
+        persistedReceipt.stagedJobs.map(pendingClassroomAlarmJob),
+        nowMs,
+      );
+      if (
+        exactMatch?.transactionId === persistedReceipt.transactionId
+        && classroomAlarmTransactionReceiptMatchesProject(persistedReceipt, incomingProject)
+      ) {
+        receipts.push(persistedReceipt);
+        continue;
+      }
+      try {
+        const rolledBack = await rollbackClassroomAlarmTransaction(
+          persistedReceipt,
+          nowMs,
+          storage,
+        );
+        if (rolledBack.status !== "persisted") pauseJobs(persistedReceipt.stagedJobs);
+      } catch {
+        pauseJobs(persistedReceipt.stagedJobs);
+      }
+    }
+  }
+
+  const descriptorsByIdentity = new Map<string, ClassroomTimeAlarmDescriptor>();
+  for (const descriptor of projectClassroomTimeAlarmDescriptors(incomingProject)) {
+    const key = classroomAlarmIdentityKey(descriptor);
+    const existing = descriptorsByIdentity.get(key);
+    if (
+      existing
+      && !classroomAlarmJobMatchesDescriptor(classroomAlarmJobFromDescriptor(existing), descriptor)
+    ) {
+      pausedByIdentity.set(key, {
+        sourceProjectId: descriptor.sourceProjectId,
+        ownerId: descriptor.ownerId,
+        target: descriptor.target,
+      });
+      descriptorsByIdentity.delete(key);
+      continue;
+    }
+    if (!pausedByIdentity.has(key)) descriptorsByIdentity.set(key, descriptor);
+  }
+
+  for (const descriptor of descriptorsByIdentity.values()) {
+    const requestedJob = classroomAlarmJobFromDescriptor(descriptor);
+    const registry = readClassroomAlarmRegistry(storage);
+    const alreadyPending = registry.jobs.some((job) => (
+      job.deliveryState === "pending"
+      && classroomAlarmJobMatchesDescriptor(job, descriptor)
+    ));
+    const alreadyStaged = receipts.some((receipt) => receipt.stagedJobs.some((job) => (
+      classroomAlarmJobMatchesDescriptor(job, descriptor)
+    )));
+    if (alreadyPending || alreadyStaged) continue;
+
+    const identity = {
+      sourceProjectId: descriptor.sourceProjectId,
+      ownerId: descriptor.ownerId,
+      target: descriptor.target,
+    } as const;
+    const key = classroomAlarmIdentityKey(identity);
+    const compactIdCollision = registry.jobs.some((job) => (
+      job.id === requestedJob.id
+      && classroomAlarmIdentityKey(job) !== key
+    ));
+    if (
+      compactIdCollision
+      || isClassroomAlarmJobCancelled(registry, requestedJob, nowMs)
+      || hasClassroomAlarmDeliveredGeneration(registry, requestedJob, nowMs)
+    ) {
+      pausedByIdentity.set(key, identity);
+      continue;
+    }
+    try {
+      const staged = await stageRecoveredClassroomAlarmJobs(
+        [requestedJob],
+        nowMs,
+        storage,
+      );
+      if (staged.status !== "persisted" || !staged.receipt) {
+        pausedByIdentity.set(key, identity);
+        continue;
+      }
+      receipts.push(staged.receipt);
+    } catch {
+      pausedByIdentity.set(key, identity);
+    }
+  }
+
+  const stagedAsPending = receipts.flatMap((receipt) => (
+    receipt.stagedJobs.map(pendingClassroomAlarmJob)
+  ));
+  const registry = readClassroomAlarmRegistry(storage);
+  let project = pauseUnauthorizedClassroomTimeWidgetsInProject(
+    incomingProject,
+    { ...registry, jobs: [...registry.jobs, ...stagedAsPending] },
+    nowMs,
+  );
+  if (pausedByIdentity.size) {
+    project = pauseClassroomAlarmIdentitiesInProject(
+      project,
+      [...pausedByIdentity.values()],
+      nowMs,
+    );
+  }
+  return {
+    project,
+    receipts,
+    pausedIdentities: [...pausedByIdentity.values()],
+  };
+}
+
+export async function rollbackClassroomAlarmPublicationReceipts(
+  receipts: readonly ClassroomAlarmTransactionReceiptV1[],
+  nowMs: number,
+  storage?: ClassroomAlarmStorage | null,
+  onRefreshedCancellationReceipt?: (
+    transactionReceipt: ClassroomAlarmTransactionReceiptV1,
+    cancellationReceipt: ClassroomAlarmCancellationReceiptV1,
+  ) => void,
+): Promise<boolean> {
+  let durable = true;
+  for (const receipt of [...receipts].reverse()) {
+    try {
+      const result = await rollbackClassroomAlarmTransaction(receipt, nowMs, storage);
+      if (result.status !== "persisted") durable = false;
+      if (result.cancellationReceipt) {
+        onRefreshedCancellationReceipt?.(receipt, result.cancellationReceipt);
+      }
+    } catch {
+      durable = false;
+    }
+  }
+  return durable;
+}
+
+export function classroomTimeAlarmDescriptorsNeedingTrustedStart(
+  previous: readonly ClassroomTimeAlarmDescriptor[],
+  next: readonly ClassroomTimeAlarmDescriptor[],
+): readonly ClassroomTimeAlarmDescriptor[] {
+  const previousByIdentity = new Map(previous.map((descriptor) => [
+    classroomAlarmIdentityKey(descriptor),
+    descriptor,
+  ]));
+  return next.filter((descriptor) => {
+    const prior = previousByIdentity.get(classroomAlarmIdentityKey(descriptor));
+    return !prior || !classroomAlarmJobMatchesDescriptor(
+      classroomAlarmJobFromDescriptor(prior),
+      descriptor,
+    );
+  });
+}
+
+export function finalizeClassroomTimeSchedulerAlarmReservation(
+  project: ClassroomProject,
+  descriptors: readonly ClassroomTimeAlarmDescriptor[],
+  registry: ClassroomAlarmRegistryV1 | null,
+  now = Date.now(),
+): { project: ClassroomProject; authorized: boolean } {
+  if (!descriptors.length) return { project, authorized: true };
+  const authorized = registry !== null && descriptors.every((descriptor) => (
+    registry.jobs.some((job) => (
+      job.deliveryState === "pending"
+      && classroomAlarmJobMatchesDescriptor(job, descriptor)
+    ))
+  ));
+  if (authorized) return { project, authorized: true };
+  const identities = [...new Map(descriptors.map((descriptor) => {
+    const identity = {
+      sourceProjectId: descriptor.sourceProjectId,
+      ownerId: descriptor.ownerId,
+      target: descriptor.target,
+    } as const;
+    return [classroomAlarmIdentityKey(identity), identity];
+  })).values()];
+  return {
+    project: pauseClassroomAlarmIdentitiesInProject(project, identities, now),
+    authorized: false,
+  };
+}
+
+export interface ClassroomTimeSchedulerPublicationFence {
+  project: ClassroomProject | null;
+  activeSceneId: string | null;
+  hydrationGeneration: number;
+  operationGeneration: number;
+  elementFingerprint: string | null;
+  fileFingerprint: string | null;
+}
+
+export function classroomTimeSchedulerPublicationFenceMatches(
+  expected: ClassroomTimeSchedulerPublicationFence,
+  current: ClassroomTimeSchedulerPublicationFence,
+  interactionBlocked = false,
+): boolean {
+  return !interactionBlocked
+    && expected.project === current.project
+    && expected.activeSceneId === current.activeSceneId
+    && expected.hydrationGeneration === current.hydrationGeneration
+    && expected.operationGeneration === current.operationGeneration
+    && expected.elementFingerprint === current.elementFingerprint
+    && expected.fileFingerprint === current.fileFingerprint;
+}
+
+/**
+ * Direct widget controls merge into the latest live anchor/project rather
+ * than publishing a captured whole-project snapshot. They may therefore
+ * tolerate React/autosave replacing the immutable project object, but only
+ * while the stable project ID and every scene/content fence still match.
+ */
+export function classroomTimeControlPublicationFenceMatches(
+  expected: ClassroomTimeSchedulerPublicationFence,
+  current: ClassroomTimeSchedulerPublicationFence,
+  interactionBlocked = false,
+): boolean {
+  return !interactionBlocked
+    && expected.project?.id === current.project?.id
+    && expected.activeSceneId === current.activeSceneId
+    && expected.hydrationGeneration === current.hydrationGeneration
+    && expected.operationGeneration === current.operationGeneration
+    && expected.elementFingerprint === current.elementFingerprint
+    && expected.fileFingerprint === current.fileFingerprint;
+}
+
+export function pauseClassroomTimeElementsWithoutMatchingAlarmJob(
+  elements: readonly ExcalidrawElement[],
+  projectId: string,
+  registry: ReturnType<typeof readClassroomAlarmRegistry>,
+  now = Date.now(),
+): readonly ExcalidrawElement[] {
+  let changed = false;
+  const paused = elements.map((element) => {
+    if (element.isDeleted) return element;
+    const metadata = classroomTimeWidgetMetadata(element);
+    if (!metadata) return element;
+    let safeMetadata = metadata;
+    for (const descriptor of activeClassroomTimeAlarmDescriptors(projectId, [element])) {
+      const scheduled = registry.jobs.find((job) => (
+        job.deliveryState === "pending"
+        && job.id === descriptor.id
+        && classroomAlarmJobMatchesDescriptor(job, descriptor)
+      ));
+      if (!scheduled) {
+        safeMetadata = applyClassroomTimeControl(
+          safeMetadata,
+          descriptor.target,
+          "pause",
+          now,
+        );
+      }
+    }
+    if (safeMetadata === metadata || serializedValuesEqual(safeMetadata, metadata)) return element;
+    changed = true;
+    return replaceClassroomTimeMetadata(element, safeMetadata);
+  });
+  return changed ? paused : elements;
+}
+
+export function pauseUnauthorizedClassroomTimeWidgetsInProject(
+  project: ClassroomProject,
+  registry: ClassroomAlarmRegistryV1,
+  now = Date.now(),
+): ClassroomProject {
+  let changed = false;
+  const scenes = Object.fromEntries(Object.entries(project.scenes).map(([sceneId, scene]) => {
+    const sourceElements = scene.elements as unknown as readonly ExcalidrawElement[];
+    const pausedElements = pauseClassroomTimeElementsWithoutMatchingAlarmJob(
+      sourceElements,
+      project.id,
+      registry,
+      now,
+    );
+    if (pausedElements === sourceElements) return [sceneId, scene];
+    const canonical = canonicalizeClassroomTimeWidgetsForPersistence(
+      pausedElements,
+      scene.files as unknown as BinaryFiles,
+      project.projectCalendar,
+      now,
+      createLocalId,
+    );
+    changed = true;
+    return [sceneId, {
+      ...scene,
+      elements: canonical.elements as unknown as SerializedScene["elements"],
+      files: canonical.files as unknown as SerializedScene["files"],
+    }];
+  }));
+  return changed ? { ...project, scenes, updatedAt: nowIso() } : project;
+}
+
+export function projectWithPendingScene(
   current: ClassroomProject | null,
   pending: PendingScenePersistence,
 ): ClassroomProject | null {
   const previousScene = current?.scenes[pending.sceneId];
   if (!current || !previousScene) return null;
-  const backgroundSafeElements = canonicalizePdfBackground(
+  const backgroundSafeElements = canonicalizePdfBackgroundForPersistence(
     previousScene,
     pending.elements as unknown as readonly Record<string, unknown>[],
   ) as unknown as readonly ExcalidrawElement[];
   const detachedElements = detachElementsFromSlideFrames(backgroundSafeElements);
-  const slideOrder = reconcileSlides(pending.sceneId, detachedElements, current.slideOrder);
-  const namedElements = syncSlideFrameNames(detachedElements, slideOrder);
+  const classroomSafeScene = canonicalizeClassroomTimeWidgetsForPersistence(
+    detachedElements,
+    pending.files,
+    current.projectCalendar,
+  );
+  const slideOrder = reconcileSlides(
+    pending.sceneId,
+    classroomSafeScene.elements,
+    current.slideOrder,
+  );
+  const namedElements = syncSlideFrameNames(classroomSafeScene.elements, slideOrder);
   const scene = serializedSceneFromChange(
     previousScene,
     namedElements,
     pending.appState,
-    pending.files,
+    classroomSafeScene.files,
     pending.preserveDeleted === true,
   );
   if (
@@ -1262,12 +2721,20 @@ export default function App() {
   const pdfInsertOperationGenerationRef = useRef<number | null>(null);
   const [pendingPdfAnnotationClear, setPendingPdfAnnotationClear] = useState<PendingPdfAnnotationClear | null>(null);
   const [pdfUndoToast, setPdfUndoToast] = useState<PdfUndoToast | null>(null);
+  const [classroomTimeConfirmationToast, setClassroomTimeConfirmationToast] = useState<ClassroomTimeConfirmationToast | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [autosaveRecoveryDetail, setAutosaveRecoveryDetail] = useState<string | null>(null);
   const [autosaveRecoveryKind, setAutosaveRecoveryKind] = useState<AutosaveRecoveryKind | null>(null);
+  const libraryItemIdsRef = useRef(new Set<string>());
+  const pendingClassroomTimeLibraryTransferRef = useRef<ClassroomTimeLibraryTransferIntent | null>(null);
+  const libraryPersistencePromiseRef = useRef<Promise<void>>(Promise.resolve());
+  const nativePersonalLibraryDragRef = useRef(false);
   const [initialExcalidrawData] = useState<Promise<{ libraryItems: LibraryItems } | null>>(() => (
     loadLibraryItems()
-      .then((libraryItems) => ({ libraryItems }))
+      .then((libraryItems) => {
+        libraryItemIdsRef.current = new Set(libraryItems.map((item) => item.id));
+        return { libraryItems };
+      })
       .catch((error) => {
         setErrorMessage(`Personal library could not be opened: ${error instanceof Error ? error.message : String(error)}`);
         return null;
@@ -1296,6 +2763,8 @@ export default function App() {
   const [isNavigationVisible, setIsNavigationVisible] = useState(true);
   const [featurePreferences, setFeaturePreferences] = useState(readFeaturePreferences);
   const [pdfPreferences, setPdfPreferences] = useState(readPdfPreferences);
+  const [classroomTimePreferences, setClassroomTimePreferences] = useState(readClassroomTimePreferences);
+  const [deviceClassroomCalendar, setDeviceClassroomCalendar] = useState(readDeviceClassroomCalendar);
   const [themePreference, setThemePreferenceState] = useState(readThemePreference);
   const [prefersDarkTheme, setPrefersDarkTheme] = useState(systemPrefersDark);
   const [darkPdfPreviewUrls, setDarkPdfPreviewUrls] = useState<Record<string, string>>({});
@@ -1308,6 +2777,10 @@ export default function App() {
   featurePreferencesRef.current = featurePreferences;
   const pdfPreferencesRef = useRef(pdfPreferences);
   pdfPreferencesRef.current = pdfPreferences;
+  const classroomTimePreferencesRef = useRef(classroomTimePreferences);
+  classroomTimePreferencesRef.current = classroomTimePreferences;
+  const deviceClassroomCalendarRef = useRef(deviceClassroomCalendar);
+  deviceClassroomCalendarRef.current = deviceClassroomCalendar;
   const applyingEditorPreferencesRef = useRef<Pick<
     FeaturePreferences,
     "penOnly" | "showGrid" | "snapToObjects"
@@ -1318,6 +2791,13 @@ export default function App() {
   const [equationEditor, setEquationEditor] = useState<EquationEditorState | null>(null);
   const [mermaidEditor, setMermaidEditor] = useState<MermaidEditorState | null>(null);
   const [isMathToolsOpen, setIsMathToolsOpen] = useState(false);
+  const [classroomTimeDialog, setClassroomTimeDialog] = useState<ClassroomTimeDialogState | null>(null);
+  const [selectedClassroomTime, setSelectedClassroomTime] = useState<SelectedClassroomTimeWidget | null>(null);
+  const [classroomTimeActiveTarget, setClassroomTimeActiveTarget] = useState<ClassroomTimeOverlayTarget>("timer");
+  const [classroomTimeNowMs, setClassroomTimeNowMs] = useState(Date.now);
+  const [classroomTimeAlarmNotice, setClassroomTimeAlarmNotice] = useState<ClassroomTimeAlarmNotice | null>(null);
+  const classroomTimeAlarmNoticeRef = useRef(classroomTimeAlarmNotice);
+  classroomTimeAlarmNoticeRef.current = classroomTimeAlarmNotice;
   const [isGeoGonOpen, setIsGeoGonOpen] = useState(false);
   const [mathToolEdit, setMathToolEdit] = useState<MathToolEditState | null>(null);
   const [mathInteraction, setMathInteraction] = useState<MathInteractionState | null>(null);
@@ -1396,8 +2876,19 @@ export default function App() {
     pdfPreferencesRef.current = nextPreferences;
     setPdfPreferences(nextPreferences);
   }), []);
+  useEffect(() => subscribeToClassroomTimePreferences((nextPreferences) => {
+    classroomTimePreferencesRef.current = nextPreferences;
+    setClassroomTimePreferences(nextPreferences);
+  }), []);
+  useEffect(() => subscribeToDeviceClassroomCalendar((nextCalendar) => {
+    deviceClassroomCalendarRef.current = nextCalendar;
+    setDeviceClassroomCalendar(nextCalendar);
+  }), []);
   useEffect(() => subscribeToThemePreference(setThemePreferenceState), []);
   useEffect(() => subscribeToSystemTheme(setPrefersDarkTheme), []);
+  useEffect(() => {
+    if (presentation || featurePreferences.obsCaptureArea) setClassroomTimeDialog(null);
+  }, [featurePreferences.obsCaptureArea, presentation]);
   useEffect(() => {
     if (!api) return;
     const appState = api.getAppState();
@@ -1446,6 +2937,38 @@ export default function App() {
   const shellRef = useRef<HTMLDivElement>(null);
   const editorHostRef = useRef<HTMLDivElement>(null);
   const safeClipboardReadGuardRef = useRef(false);
+  const classroomTimeTickFenceRef = useRef<ClassroomTimeTickFence[]>([]);
+  const classroomTimeAlarmAuthorityFenceRef = useRef<ClassroomTimeTickFence[]>([]);
+  const classroomTimePointerActiveRef = useRef(false);
+  const classroomTimeSchedulerRunningRef = useRef(false);
+  const classroomTimeAsyncOperationGenerationRef = useRef(0);
+  const classroomTimeStagedTransactionIdsRef = useRef(new Set<string>());
+  const classroomTimeSchedulerIndexRef = useRef<ClassroomTimeSchedulerIndex>(
+    createClassroomTimeSchedulerIndex(null),
+  );
+  const classroomTimeOverlayNeedsTicksRef = useRef(false);
+  const classroomTimeClaimantIdRef = useRef(`classroom-time-${createLocalId()}`);
+  const classroomTimeClipboardRestoreTimerRef = useRef<number | null>(null);
+  const classroomTimeConfirmationToastTokenRef = useRef(0);
+  const classroomTimeConfirmationToastRef = useRef<ClassroomTimeConfirmationToast | null>(null);
+  const classroomTimeConfirmationToastCleanupRef = useRef<(() => void) | null>(null);
+  const showClassroomTimeConfirmationToast = useCallback((message: string) => {
+    classroomTimeConfirmationToastCleanupRef.current?.();
+    const toast = {
+      token: ++classroomTimeConfirmationToastTokenRef.current,
+      message,
+    };
+    classroomTimeConfirmationToastCleanupRef.current = scheduleClassroomTimeConfirmationToast(
+      toast,
+      classroomTimeConfirmationToastRef,
+      setClassroomTimeConfirmationToast,
+    );
+  }, []);
+  useEffect(() => () => {
+    classroomTimeConfirmationToastCleanupRef.current?.();
+    classroomTimeConfirmationToastCleanupRef.current = null;
+    classroomTimeConfirmationToastRef.current = null;
+  }, []);
   const finalizePendingPdfUndo = useCallback(() => {
     const pending = pendingPdfUndoRef.current;
     pendingPdfUndoRef.current = null;
@@ -1756,6 +3279,13 @@ export default function App() {
   const scenePersistenceTimerRef = useRef<number | null>(null);
   projectRef.current = project;
   pdfBytesRef.current = pdfBytes;
+  const renderedClassroomTimeSchedulerIndex = useMemo(
+    () => createClassroomTimeSchedulerIndex(project),
+    [project],
+  );
+  useLayoutEffect(() => {
+    classroomTimeSchedulerIndexRef.current = renderedClassroomTimeSchedulerIndex;
+  }, [renderedClassroomTimeSchedulerIndex]);
   const abortSceneOperations = useCallback((clearBusy = false) => {
     for (const controller of sceneOperationControllersRef.current) controller.abort();
     sceneOperationControllersRef.current.clear();
@@ -1806,6 +3336,61 @@ export default function App() {
       sceneId: hydratedSceneIdRef.current || "",
     });
   }, []);
+  const beginClassroomTimeAsyncOperation = useCallback((): ClassroomTimeSchedulerPublicationFence | null => {
+    const operationGeneration = ++classroomTimeAsyncOperationGenerationRef.current;
+    const currentProject = projectRef.current;
+    const activeSceneId = hydratedSceneIdRef.current;
+    if (
+      !api
+      || !currentProject
+      || !activeSceneId
+      || switchingSceneRef.current
+      || currentProject.activeSceneId !== activeSceneId
+    ) return null;
+    const signature = classroomTimeOperationSceneSignature(
+      currentProject.scenes[activeSceneId],
+      api.getSceneElementsIncludingDeleted(),
+      api.getFiles(),
+      transientDarkPdfFileIdsRef.current,
+    );
+    return {
+      project: currentProject,
+      activeSceneId,
+      hydrationGeneration: sceneHydrationGenerationRef.current,
+      operationGeneration,
+      ...signature,
+    };
+  }, [api]);
+  const isCurrentClassroomTimeAsyncOperation = useCallback((
+    expected: ClassroomTimeSchedulerPublicationFence | null,
+    allowEquivalentProjectForDirectControl = false,
+  ): expected is ClassroomTimeSchedulerPublicationFence => {
+    if (!api || !expected || !sceneOperationMountedRef.current) return false;
+    const activeSceneId = hydratedSceneIdRef.current;
+    const currentProject = projectRef.current;
+    const signature = activeSceneId
+      ? classroomTimeOperationSceneSignature(
+        currentProject?.scenes[activeSceneId],
+        api.getSceneElementsIncludingDeleted(),
+        api.getFiles(),
+        transientDarkPdfFileIdsRef.current,
+      )
+      : { elementFingerprint: null, fileFingerprint: null };
+    const currentFence: ClassroomTimeSchedulerPublicationFence = {
+      project: currentProject,
+      activeSceneId,
+      hydrationGeneration: sceneHydrationGenerationRef.current,
+      operationGeneration: classroomTimeAsyncOperationGenerationRef.current,
+      ...signature,
+    };
+    return (allowEquivalentProjectForDirectControl
+      ? classroomTimeControlPublicationFenceMatches
+      : classroomTimeSchedulerPublicationFenceMatches)(
+      expected,
+      currentFence,
+      switchingSceneRef.current,
+    );
+  }, [api]);
   const finishSceneOperation = useCallback((operation: SceneOperation | null) => {
     if (!operation) return;
     sceneOperationControllersRef.current.delete(operation.controller);
@@ -1821,6 +3406,7 @@ export default function App() {
     }
   }, []);
   const cancelFileOpenOperations = useCallback((clearUi = false) => {
+    classroomTimeAsyncOperationGenerationRef.current += 1;
     fileOpenGenerationRef.current += 1;
     fileOpenAbortControllerRef.current?.abort();
     fileOpenAbortControllerRef.current = null;
@@ -1837,6 +3423,7 @@ export default function App() {
     setPdfInsertProgress(null);
   }, []);
   const beginFileOpenOperation = useCallback((): FileOpenOperation => {
+    classroomTimeAsyncOperationGenerationRef.current += 1;
     abortSceneOperations(true);
     startupAutosaveAbortControllerRef.current?.abort();
     startupAutosaveAbortControllerRef.current = null;
@@ -1863,10 +3450,15 @@ export default function App() {
     && !operation.signal.aborted
   ), []);
   const beginSceneHydration = useCallback(() => {
+    classroomTimeAsyncOperationGenerationRef.current += 1;
     // Wrapper pointer overlays belong to the currently hydrated editor scene.
     // Unmount them before replacing Excalidraw state so their visible controls
     // and any armed pointer gesture cannot leak into the incoming scene/page.
     resetTransientPointerTools();
+    setSelectedClassroomTime(null);
+    setClassroomTimeDialog(null);
+    classroomTimePointerActiveRef.current = false;
+    classroomTimeTickFenceRef.current = [];
     abortSceneOperations(true);
     // A new scene supersedes any buffered edit from the outgoing hydration
     // window. Preserve it as ordinary pending scene work so navigation cannot
@@ -2018,6 +3610,31 @@ export default function App() {
       }
       return mergedProject;
     });
+    return nextProject;
+  }, []);
+  const stageProjectMutationForAutosave = useCallback((nextProject: ClassroomProject) => {
+    projectRef.current = nextProject;
+    const nextSchedulerIndex = createClassroomTimeSchedulerIndex(nextProject);
+    classroomTimeSchedulerIndexRef.current = nextSchedulerIndex;
+    const nextSnapshot = {
+      project: nextProject,
+      pdfBytes: pdfBytesRef.current,
+    };
+    autosaveSnapshotRef.current = nextSnapshot;
+    const sameQueuedExitSnapshot = autosaveSnapshotsMatch(
+      autosaveExitFlushSnapshotRef.current,
+      nextSnapshot.project,
+      nextSnapshot.pdfBytes,
+    );
+    if (!sameQueuedExitSnapshot) {
+      autosaveCoveredSnapshotRef.current = null;
+      autosaveExitFlushSnapshotRef.current = null;
+      autosaveExitFlushQueuedRef.current = false;
+      autosaveDirtyRef.current = true;
+      if (autosaveSavingRef.current) autosaveUrgentRef.current = true;
+    }
+    if (!autosaveSuspendedRef.current) setSaveStatus("saving");
+    setProject(nextProject);
     return nextProject;
   }, []);
   const commitLiveScenePersistence = useCallback((sceneId: string, preserveDeleted = false) => {
@@ -2201,6 +3818,257 @@ export default function App() {
     );
   }, []);
 
+  const pausePublishedClassroomAlarmIdentities = useCallback((
+    identities: readonly ClassroomAlarmIdentity[],
+    now = Date.now(),
+  ) => {
+    if (!identities.length) return;
+    const baseProject = commitCurrentLiveScenePersistence() ?? projectRef.current;
+    if (!baseProject) return;
+    const pausedProject = pauseClassroomAlarmIdentitiesInProject(baseProject, identities, now);
+    if (pausedProject === baseProject) return;
+    stageProjectMutationForAutosave(pausedProject);
+    const sceneId = hydratedSceneIdRef.current;
+    const scene = sceneId && pausedProject.activeSceneId === sceneId
+      ? pausedProject.scenes[sceneId]
+      : null;
+    if (api && switchingSceneRef.current) {
+      // A publication such as project-open or PDF Undo may already have
+      // scheduled hydration of the running snapshot. Force one more hydration
+      // from the fail-safe paused project after that in-flight paint settles.
+      setProjectHydrationRevision((revision) => revision + 1);
+    } else if (api && scene) {
+      const display = materializeClassroomTimeSceneForDisplay(
+        scene.elements as unknown as readonly ExcalidrawElement[],
+        scene.files as unknown as BinaryFiles,
+        pausedProject.projectCalendar,
+        deviceClassroomCalendarRef.current,
+        now,
+        createLocalId,
+        editorThemeRef.current,
+      );
+      if (display.addedFiles.length) api.addFiles([...display.addedFiles]);
+      for (const fileId of display.orphanedFileIds) delete api.getFiles()[fileId];
+      classroomTimeAlarmAuthorityFenceRef.current.push({
+        sceneId: scene.id,
+        elementFingerprint: classroomTimeElementFingerprint(display.elements),
+        fileFingerprint: classroomTimeFileFingerprint(api.getFiles()),
+      });
+      if (classroomTimeAlarmAuthorityFenceRef.current.length > 8) {
+        classroomTimeAlarmAuthorityFenceRef.current.shift();
+      }
+      api.updateScene({
+        elements: display.elements,
+        captureUpdate: CaptureUpdateAction.NEVER,
+      });
+    }
+    window.requestAnimationFrame(() => flushAutosave(true));
+  }, [api, commitCurrentLiveScenePersistence, flushAutosave, stageProjectMutationForAutosave]);
+
+  const rollbackPreparedClassroomAlarmReceipts = useCallback(async (
+    receipts: readonly ClassroomAlarmTransactionReceiptV1[],
+    onRefreshedCancellationReceipt?: (
+      transactionReceipt: ClassroomAlarmTransactionReceiptV1,
+      cancellationReceipt: ClassroomAlarmCancellationReceiptV1,
+    ) => void,
+  ): Promise<boolean> => {
+    if (!receipts.length) return true;
+    try {
+      let durable = false;
+      try {
+        durable = await rollbackClassroomAlarmPublicationReceipts(
+          receipts,
+          Date.now(),
+          undefined,
+          onRefreshedCancellationReceipt,
+        );
+      } catch {
+        // The exact rollback may fail before or after its storage attempt.
+        // Re-cancel the same identities below so no staged generation can be
+        // treated as usable authority by the caller.
+      }
+      if (durable) return true;
+      const identities = classroomAlarmIdentitiesForTransactionReceipts(receipts);
+      try {
+        const cancelled = await cancelClassroomAlarmIdentitiesWithReceipt(
+          identities,
+          Date.now(),
+        );
+        if (cancelled.status !== "persisted") return false;
+        if (
+          receipts.length === 1
+          && receipts[0].mode === "cancelled-restore"
+          && cancelled.receipt
+        ) {
+          onRefreshedCancellationReceipt?.(receipts[0], cancelled.receipt);
+        }
+      } catch {
+        return false;
+      }
+      return true;
+    } finally {
+      for (const receipt of receipts) {
+        classroomTimeStagedTransactionIdsRef.current.delete(receipt.transactionId);
+      }
+    }
+  }, []);
+
+  const activatePublishedClassroomAlarmReceipts = useCallback(async (
+    receipts: readonly ClassroomAlarmTransactionReceiptV1[],
+  ): Promise<boolean> => {
+    if (!receipts.length) return true;
+    try {
+      for (const receipt of receipts) {
+        const activated = await activateClassroomAlarmTransaction(
+          receipt,
+          Date.now(),
+        );
+        if (activated.status !== "persisted") {
+          throw new Error(`alarm storage returned ${activated.status}`);
+        }
+      }
+      return true;
+    } catch {
+      const identities = classroomAlarmIdentitiesForTransactionReceipts(receipts);
+      try {
+        await cancelClassroomAlarmIdentitiesWithReceipt(identities, Date.now());
+      } catch {
+        // The matching project is paused below even when storage itself is
+        // unavailable, so a partially activated generation never looks safe.
+      }
+      pausePublishedClassroomAlarmIdentities(identities);
+      return false;
+    } finally {
+      for (const receipt of receipts) {
+        classroomTimeStagedTransactionIdsRef.current.delete(receipt.transactionId);
+      }
+    }
+  }, [pausePublishedClassroomAlarmIdentities]);
+
+  const trackPreparedClassroomAlarmReceipts = useCallback((
+    receipts: readonly ClassroomAlarmTransactionReceiptV1[],
+  ) => {
+    for (const receipt of receipts) {
+      classroomTimeStagedTransactionIdsRef.current.add(receipt.transactionId);
+    }
+  }, []);
+
+  const restoreAbandonedOpenClassroomAlarms = useCallback(async (
+    cancellationReceipt: ClassroomAlarmCancellationReceiptV1 | null,
+    outgoingProject: ClassroomProject | null,
+  ): Promise<boolean> => {
+    if (!cancellationReceipt || !outgoingProject) return true;
+    const visibleProject = projectRef.current;
+    const visibleSceneId = hydratedSceneIdRef.current;
+    if (!visibleProject) {
+      pausePublishedClassroomAlarmIdentities(cancellationReceipt.identities);
+      return false;
+    }
+    const sourceProjectIsVisible = visibleProject.id === outgoingProject.id;
+    const sourceProject = sourceProjectIsVisible ? visibleProject : outgoingProject;
+    if (
+      !cancellationReceipt.cancelledJobs.length
+      || !cancellationReceipt.cancelledJobs.every((job) => (
+        projectClassroomTimeAlarmDescriptors(sourceProject).some((descriptor) => (
+          classroomAlarmJobMatchesDescriptor(job, descriptor)
+        ))
+      ))
+    ) {
+      // The exact pre-open generation is no longer represented by the board,
+      // or there was no durable job to restore. Keep the visible metadata from
+      // advertising alarm authority that the registry does not have.
+      pausePublishedClassroomAlarmIdentities(cancellationReceipt.identities);
+      return false;
+    }
+    const fence: ClassroomTimeSchedulerPublicationFence = {
+      project: visibleProject,
+      activeSceneId: visibleSceneId,
+      hydrationGeneration: sceneHydrationGenerationRef.current,
+      operationGeneration: classroomTimeAsyncOperationGenerationRef.current,
+      elementFingerprint: api && visibleSceneId
+        ? classroomTimeElementFingerprint(api.getSceneElementsIncludingDeleted())
+        : null,
+      fileFingerprint: api && visibleSceneId
+        ? classroomTimeFileFingerprint(api.getFiles())
+        : null,
+    };
+    let stagedReceipt: ClassroomAlarmTransactionReceiptV1 | null = null;
+    try {
+      const staged = await stageCancelledClassroomAlarmReceipt(
+        cancellationReceipt,
+        Date.now(),
+      );
+      if (staged.status !== "persisted" || !staged.receipt) {
+        pausePublishedClassroomAlarmIdentities(cancellationReceipt.identities);
+        return false;
+      }
+      stagedReceipt = staged.receipt;
+      trackPreparedClassroomAlarmReceipts([stagedReceipt]);
+      const currentSceneId = hydratedSceneIdRef.current;
+      const currentFence: ClassroomTimeSchedulerPublicationFence = {
+        project: projectRef.current,
+        activeSceneId: currentSceneId,
+        hydrationGeneration: sceneHydrationGenerationRef.current,
+        operationGeneration: classroomTimeAsyncOperationGenerationRef.current,
+        elementFingerprint: api && currentSceneId
+          ? classroomTimeElementFingerprint(api.getSceneElementsIncludingDeleted())
+          : null,
+        fileFingerprint: api && currentSceneId
+          ? classroomTimeFileFingerprint(api.getFiles())
+          : null,
+      };
+      if (
+        !classroomTimeSchedulerPublicationFenceMatches(
+          fence,
+          currentFence,
+          switchingSceneRef.current,
+        )
+        || !projectRef.current
+        || !classroomAlarmTransactionReceiptMatchesProject(
+          stagedReceipt,
+          sourceProject,
+        )
+      ) {
+        if (!await rollbackPreparedClassroomAlarmReceipts([stagedReceipt])) {
+          pausePublishedClassroomAlarmIdentities(cancellationReceipt.identities);
+          return false;
+        }
+        // Rolling back the restore keeps the original cancellation active.
+        // A draw/navigation change invalidates publication even if the timer
+        // descriptor itself looks unchanged, so fail safe in the live board.
+        pausePublishedClassroomAlarmIdentities(cancellationReceipt.identities);
+        return false;
+      }
+      if (!sourceProjectIsVisible) {
+        // A later different-project open deliberately preserves background
+        // alarms from the prior project. `outgoingProject` was committed and
+        // its autosave queue settled before cancellation; the one-use receipt
+        // binds the exact generation to that durable source snapshot. Fence
+        // the currently published project as well so another open/navigation
+        // cannot cross this background restoration.
+      }
+      // Reaffirm the exact currently published ref immediately before making
+      // either its foreground alarm or the preserved background alarm live.
+      projectRef.current = visibleProject;
+      return activatePublishedClassroomAlarmReceipts([stagedReceipt]);
+    } catch {
+      if (
+        stagedReceipt
+        && classroomTimeStagedTransactionIdsRef.current.has(stagedReceipt.transactionId)
+      ) {
+        await rollbackPreparedClassroomAlarmReceipts([stagedReceipt]);
+      }
+      pausePublishedClassroomAlarmIdentities(cancellationReceipt.identities);
+      return false;
+    }
+  }, [
+    activatePublishedClassroomAlarmReceipts,
+    api,
+    pausePublishedClassroomAlarmIdentities,
+    rollbackPreparedClassroomAlarmReceipts,
+    trackPreparedClassroomAlarmReceipts,
+  ]);
+
   const hideConstrainedFramePreview = useCallback(() => {
     if (frameDragPreviewRef.current) frameDragPreviewRef.current.hidden = true;
   }, []);
@@ -2243,11 +4111,24 @@ export default function App() {
       )
     );
     loadAutosave({ signal: controller.signal })
-      .then((loaded) => {
+      .then(async (loaded) => {
         if (!isCurrentStartupLoad()) return;
         if (loaded) {
           const framesVisible = loaded.project.slideFramesVisible !== false;
-          const startupProject = projectForBoardStartup(loaded.project);
+          const loadedStartupProject = projectForBoardStartup(loaded.project);
+          const preparedAlarms = await prepareClassroomAlarmPublication(
+            loadedStartupProject,
+            Date.now(),
+            { resolvePersistedTransactions: true },
+          );
+          trackPreparedClassroomAlarmReceipts(preparedAlarms.receipts);
+          if (!isCurrentStartupLoad()) {
+            if (!await rollbackPreparedClassroomAlarmReceipts(preparedAlarms.receipts)) {
+              setErrorMessage("A superseded saved-board alarm preparation could not be rolled back durably.");
+            }
+            return;
+          }
+          const startupProject = preparedAlarms.project;
           slideFramesVisibleRef.current = framesVisible;
           projectRef.current = startupProject;
           activeSceneIdRef.current = startupProject.activeSceneId;
@@ -2259,15 +4140,34 @@ export default function App() {
           autosaveExitFlushSnapshotRef.current = null;
           autosaveCoveredSnapshotRef.current = null;
           autosaveDirtyRef.current = false;
-          skipNextAutosaveEffectRef.current = true;
+          // A cancellation fence can safely pause stale running metadata from
+          // an interrupted prior edit. Persist that correction so the next
+          // startup does not have to rediscover the same unsafe generation.
+          skipNextAutosaveEffectRef.current = startupProject === loadedStartupProject;
           setAreSlideFramesVisible(framesVisible);
           setProject(startupProject);
           setPdfBytes(loaded.pdfBytes);
+          if (!await activatePublishedClassroomAlarmReceipts(preparedAlarms.receipts)) {
+            setErrorMessage("Saved classroom timers were paused because their alarm schedule could not be activated durably.");
+          } else if (preparedAlarms.pausedIdentities.length) {
+            setErrorMessage("Some saved classroom timers were paused because their prior alarm authority was no longer safe to resume.");
+          }
         } else {
           const blankProject = createBlankProject();
+          const preparedAlarms = await prepareClassroomAlarmPublication(
+            blankProject,
+            Date.now(),
+            { resolvePersistedTransactions: true },
+          );
+          trackPreparedClassroomAlarmReceipts(preparedAlarms.receipts);
+          if (!isCurrentStartupLoad()) {
+            await rollbackPreparedClassroomAlarmReceipts(preparedAlarms.receipts);
+            return;
+          }
           projectRef.current = blankProject;
           activeSceneIdRef.current = blankProject.activeSceneId;
           setProject(blankProject);
+          await activatePublishedClassroomAlarmReceipts(preparedAlarms.receipts);
         }
       })
       .catch((error) => {
@@ -2306,7 +4206,11 @@ export default function App() {
         startupAutosaveAbortControllerRef.current = null;
       }
     };
-  }, []);
+  }, [
+    activatePublishedClassroomAlarmReceipts,
+    rollbackPreparedClassroomAlarmReceipts,
+    trackPreparedClassroomAlarmReceipts,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2640,7 +4544,17 @@ export default function App() {
     // Snapshot first: a stored scene can intentionally share the same live
     // BinaryFiles object returned by Excalidraw after persistence. Clearing
     // that map below must not also erase the source files we are about to add.
-    const files = { ...scene.files } as unknown as BinaryFiles;
+    const canonicalFiles = { ...scene.files } as unknown as BinaryFiles;
+    const canonicalElements = scene.elements as unknown as readonly ExcalidrawElement[];
+    const displayScene = materializeClassroomTimeSceneForDisplay(
+      canonicalElements,
+      canonicalFiles,
+      projectRef.current?.projectCalendar,
+      deviceClassroomCalendarRef.current,
+      Date.now(),
+      createLocalId,
+      editorThemeRef.current,
+    );
     const liveAppState = api.getAppState();
     const editorPreferences = featurePreferencesRef.current;
     // Legacy projects may contain a wrapper-owned custom tool marker, but the
@@ -2662,8 +4576,14 @@ export default function App() {
     // elements that reference those IDs.
     const liveFiles = api.getFiles();
     for (const fileId of Object.keys(liveFiles)) delete liveFiles[fileId as FileId];
+    classroomTimeTickFenceRef.current.push({
+      sceneId,
+      elementFingerprint: classroomTimeElementFingerprint(displayScene.elements),
+      fileFingerprint: classroomTimeFileFingerprint(displayScene.files),
+    });
+    if (classroomTimeTickFenceRef.current.length > 8) classroomTimeTickFenceRef.current.shift();
     api.updateScene({
-      elements: scene.elements as unknown as readonly ExcalidrawElement[],
+      elements: displayScene.elements,
       appState: {
         ...(hydratedAppState as unknown as AppState),
         penMode: editorPreferences.penOnly,
@@ -2677,16 +4597,16 @@ export default function App() {
       captureUpdate: CaptureUpdateAction.NEVER,
     });
     hydratedSceneIdRef.current = scene.id;
-    api.addFiles(Object.values(files));
+    api.addFiles(Object.values(displayScene.files));
     api.updateFrameRendering({ enabled: slideFramesVisibleRef.current, clip: false });
     api.history.clear();
     sceneHydrationBaselineRef.current = {
       generation: hydrationGeneration,
       pending: normalizedHydrationChange(
         scene,
-        api.getSceneElements(),
+        canonicalElements,
         api.getAppState(),
-        api.getFiles(),
+        canonicalFiles,
         transientDarkPdfFileIdsRef.current,
       ),
     };
@@ -2778,6 +4698,49 @@ export default function App() {
   }, [api, project?.id, project?.activeSceneId, projectHydrationRevision, loadSceneIntoEditor]);
 
   useEffect(() => {
+    if (!api || !project || switchingSceneRef.current) return;
+    const sceneId = hydratedSceneIdRef.current;
+    if (!sceneId || classroomTimeSchedulerIndexRef.current.widgetCount === 0) return;
+    const scene = project.scenes[sceneId];
+    if (!scene) return;
+    const liveElements = api.getSceneElementsIncludingDeleted();
+    const liveFiles = api.getFiles();
+    const canonical = canonicalizeClassroomTimeWidgetsForPersistence(
+      liveElements,
+      persistentFilesForScene(scene, liveFiles, transientDarkPdfFileIdsRef.current),
+      project.projectCalendar,
+      Date.now(),
+      createLocalId,
+    );
+    const display = materializeClassroomTimeSceneForDisplay(
+      canonical.elements,
+      canonical.files,
+      project.projectCalendar,
+      deviceClassroomCalendarRef.current,
+      Date.now(),
+      createLocalId,
+      editorThemeRef.current,
+    );
+    const filesToAdd = Object.values(display.files).filter((file) => (
+      liveFiles[file.id]?.dataURL !== file.dataURL
+    ));
+    if (filesToAdd.length) api.addFiles(filesToAdd);
+    for (const fileId of display.orphanedFileIds) delete liveFiles[fileId];
+    if (classroomTimeElementFingerprint(display.elements)
+      === classroomTimeElementFingerprint(liveElements)) return;
+    classroomTimeTickFenceRef.current.push({
+      sceneId,
+      elementFingerprint: classroomTimeElementFingerprint(display.elements),
+      fileFingerprint: classroomTimeFileFingerprint(api.getFiles()),
+    });
+    if (classroomTimeTickFenceRef.current.length > 8) classroomTimeTickFenceRef.current.shift();
+    api.updateScene({
+      elements: display.elements,
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
+  }, [api, deviceClassroomCalendar, project?.id, project?.projectCalendar]);
+
+  useEffect(() => {
     const frameId = pendingCreatedFrameIdRef.current;
     if (!frameId || !project) return;
     const slide = project.slideOrder.find((candidate) => candidate.frameId === frameId);
@@ -2847,6 +4810,24 @@ export default function App() {
       if (current?.coins === nextProbabilitySelection?.coins && current?.dice === nextProbabilitySelection?.dice && current?.spinners === nextProbabilitySelection?.spinners) return current;
       return nextProbabilitySelection;
     });
+    const nextClassroomTimeSelection = selectedClassroomTimeWidget(elements, appState.selectedElementIds);
+    setSelectedClassroomTime((current) => {
+      if (!current && !nextClassroomTimeSelection) return current;
+      if (
+        current
+        && nextClassroomTimeSelection
+        && current.anchorId === nextClassroomTimeSelection.anchorId
+        && current.ownerId === nextClassroomTimeSelection.ownerId
+        && serializedValuesEqual(current.elementIds, nextClassroomTimeSelection.elementIds)
+        && serializedValuesEqual(current.metadata, nextClassroomTimeSelection.metadata)
+      ) return current;
+      return nextClassroomTimeSelection;
+    });
+    if (nextClassroomTimeSelection?.metadata.kind === "pomodoro") {
+      setClassroomTimeActiveTarget("pomodoro");
+    } else if (nextClassroomTimeSelection?.metadata.kind === "timer") {
+      setClassroomTimeActiveTarget("timer");
+    }
     const containsBlockedContent = elements.some(
       (element) => isBlockedEmbeddedElementType(element.type) || !!element.link,
     );
@@ -2859,6 +4840,36 @@ export default function App() {
       api?.updateScene({ elements: safeElements, captureUpdate: CaptureUpdateAction.NEVER });
       api?.setToast({ message: "External links and web embeds are disabled in PatterDraw." });
       return;
+    }
+    const fencedSceneId = activeSceneIdRef.current;
+    const elementFingerprint = classroomTimeElementFingerprint(elements);
+    const fileFingerprint = classroomTimeFileFingerprint(files);
+    const tickFenceIndex = classroomTimeTickFenceRef.current.findIndex((fence) => (
+      classroomTimeTickFenceMatches(fence, fencedSceneId, elements, files)
+    ));
+    if (tickFenceIndex >= 0) {
+      classroomTimeTickFenceRef.current.splice(tickFenceIndex, 1);
+      return;
+    }
+    if (fencedSceneId && classroomTimeTickFenceRef.current.some((fence) => fence.sceneId === fencedSceneId)) {
+      classroomTimeTickFenceRef.current = classroomTimeTickFenceRef.current.filter(
+        (fence) => fence.sceneId !== fencedSceneId,
+      );
+    }
+    const alarmAuthorityFenceIndex = classroomTimeAlarmAuthorityFenceRef.current.findIndex((fence) => (
+      fence.sceneId === fencedSceneId
+      && fence.elementFingerprint === elementFingerprint
+      && fence.fileFingerprint === fileFingerprint
+    ));
+    const alarmAuthorityPrepared = alarmAuthorityFenceIndex >= 0;
+    if (alarmAuthorityPrepared) {
+      classroomTimeAlarmAuthorityFenceRef.current.splice(alarmAuthorityFenceIndex, 1);
+    } else if (fencedSceneId && classroomTimeAlarmAuthorityFenceRef.current.some(
+      (fence) => fence.sceneId === fencedSceneId,
+    )) {
+      classroomTimeAlarmAuthorityFenceRef.current = classroomTimeAlarmAuthorityFenceRef.current.filter(
+        (fence) => fence.sceneId !== fencedSceneId,
+      );
     }
     if (switchingSceneRef.current) {
       const baseline = sceneHydrationBaselineRef.current;
@@ -2965,16 +4976,215 @@ export default function App() {
     }
     const sceneId = activeSceneIdRef.current;
     if (!sceneId) return;
+    const ungroupedOwnerId = elements.reduce<string | null>((ownerId, element) => {
+      if (ownerId || element.isDeleted) return ownerId;
+      const classroomOwnerId = classroomTimeWidgetOwnerId(element);
+      return classroomOwnerId && !element.groupIds.includes(classroomOwnerId)
+        ? classroomOwnerId
+        : null;
+    }, null);
+    const currentProject = projectRef.current;
+    const persistedAlarmScene = currentProject?.scenes[sceneId];
+    if (api && currentProject && persistedAlarmScene && !alarmAuthorityPrepared) {
+      const now = Date.now();
+      const alarmElements = ungroupedOwnerId
+        ? ungroupClassroomTimeWidget(
+            elements,
+            ungroupedOwnerId,
+            now,
+            classroomTimeRenderContext(
+              elements,
+              currentProject.projectCalendar,
+              EMPTY_DEVICE_CLASSROOM_CALENDAR,
+              now,
+              editorThemeRef.current,
+            ),
+          )
+        : elements;
+      const previousElements = persistedAlarmScene.elements as unknown as readonly ExcalidrawElement[];
+      const previousDescriptors = activeClassroomTimeAlarmDescriptors(
+        currentProject.id,
+        previousElements,
+      );
+      const nextDescriptors = activeClassroomTimeAlarmDescriptors(
+        currentProject.id,
+        alarmElements,
+      );
+      const nextById = new Map(nextDescriptors.map((descriptor) => [descriptor.id, descriptor]));
+      const cancellationByKey = new Map<string, ClassroomAlarmIdentity>();
+      for (const descriptor of previousDescriptors) {
+        const next = nextById.get(descriptor.id);
+        if (next && classroomAlarmJobMatchesDescriptor(
+          classroomAlarmJobFromDescriptor(descriptor),
+          next,
+        )) continue;
+        const identity = {
+          sourceProjectId: currentProject.id,
+          ownerId: descriptor.ownerId,
+          target: descriptor.target,
+        } as const;
+        cancellationByKey.set(`${identity.ownerId}:${identity.target}`, identity);
+      }
+      const previousOwners = new Set(previousElements.flatMap((element) => {
+        if (element.isDeleted) return [];
+        const metadata = classroomTimeWidgetMetadata(element);
+        return metadata ? [metadata.ownerId] : [];
+      }));
+      const nextOwners = new Set(alarmElements.flatMap((element) => {
+        if (element.isDeleted) return [];
+        const metadata = classroomTimeWidgetMetadata(element);
+        return metadata ? [metadata.ownerId] : [];
+      }));
+      for (const ownerId of previousOwners) {
+        if (nextOwners.has(ownerId) && ownerId !== ungroupedOwnerId) continue;
+        for (const target of ["timer", "pomodoro"] as const) {
+          cancellationByKey.set(`${ownerId}:${target}`, {
+            sourceProjectId: currentProject.id,
+            ownerId,
+            target,
+          });
+        }
+      }
+      const cancellationIdentities = [...cancellationByKey.values()];
+      if (cancellationIdentities.length) {
+        const cancellationFence: ClassroomTimeSchedulerPublicationFence = {
+          project: currentProject,
+          activeSceneId: sceneId,
+          hydrationGeneration: sceneHydrationGenerationRef.current,
+          operationGeneration: classroomTimeAsyncOperationGenerationRef.current,
+          elementFingerprint,
+          fileFingerprint,
+        };
+        void (async () => {
+          try {
+            const cancellation = await cancelClassroomAlarmIdentitiesWithReceipt(
+              cancellationIdentities,
+              now,
+            );
+            if (cancellation.status !== "persisted") {
+              throw new Error("The canvas change could not be saved because its alarms could not be cancelled durably.");
+            }
+            const currentSceneId = hydratedSceneIdRef.current;
+            const publicationIsCurrent = classroomTimeSchedulerPublicationFenceMatches(
+              cancellationFence,
+              {
+                project: projectRef.current,
+                activeSceneId: currentSceneId,
+                hydrationGeneration: sceneHydrationGenerationRef.current,
+                operationGeneration: classroomTimeAsyncOperationGenerationRef.current,
+                elementFingerprint: currentSceneId
+                  ? classroomTimeElementFingerprint(api.getSceneElementsIncludingDeleted())
+                  : null,
+                fileFingerprint: currentSceneId
+                  ? classroomTimeFileFingerprint(api.getFiles())
+                  : null,
+              },
+              switchingSceneRef.current,
+            );
+            if (!publicationIsCurrent) {
+              const liveSceneId = hydratedSceneIdRef.current;
+              if (
+                projectRef.current?.id === currentProject.id
+                && liveSceneId
+                && liveSceneId === projectRef.current.activeSceneId
+                && !switchingSceneRef.current
+              ) {
+                const liveElements = api.getSceneElementsIncludingDeleted();
+                const safeLiveElements = pauseClassroomTimeElementsWithoutMatchingAlarmJob(
+                  liveElements,
+                  currentProject.id,
+                  readClassroomAlarmRegistry(),
+                  Date.now(),
+                );
+                if (safeLiveElements !== liveElements) {
+                  classroomTimeAlarmAuthorityFenceRef.current.push({
+                    sceneId: liveSceneId,
+                    elementFingerprint: classroomTimeElementFingerprint(safeLiveElements),
+                    fileFingerprint: classroomTimeFileFingerprint(api.getFiles()),
+                  });
+                  if (classroomTimeAlarmAuthorityFenceRef.current.length > 8) {
+                    classroomTimeAlarmAuthorityFenceRef.current.shift();
+                  }
+                  api.updateScene({
+                    elements: safeLiveElements,
+                    captureUpdate: CaptureUpdateAction.NEVER,
+                  });
+                }
+              }
+              return;
+            }
+            const safeElements = pauseClassroomTimeElementsWithoutMatchingAlarmJob(
+              alarmElements,
+              currentProject.id,
+              cancellation.registry,
+              Date.now(),
+            );
+            classroomTimeAlarmAuthorityFenceRef.current.push({
+              sceneId,
+              elementFingerprint: classroomTimeElementFingerprint(safeElements),
+              fileFingerprint,
+            });
+            if (classroomTimeAlarmAuthorityFenceRef.current.length > 8) {
+              classroomTimeAlarmAuthorityFenceRef.current.shift();
+            }
+            api.updateScene({
+              elements: safeElements,
+              captureUpdate: CaptureUpdateAction.NEVER,
+            });
+          } catch (error) {
+            setErrorMessage(error instanceof Error ? error.message : String(error));
+          }
+        })();
+        return;
+      }
+      const safeElements = pauseClassroomTimeElementsWithoutMatchingAlarmJob(
+        alarmElements,
+        currentProject.id,
+        readClassroomAlarmRegistry(),
+        now,
+      );
+      if (safeElements !== elements) {
+        api.updateScene({
+          elements: safeElements,
+          captureUpdate: CaptureUpdateAction.NEVER,
+        });
+        return;
+      }
+    }
+    const currentProjectId = projectRef.current?.id;
+    if (currentProjectId) {
+      const nextSchedulerIndex = updateClassroomTimeSchedulerSceneIndex(
+        classroomTimeSchedulerIndexRef.current,
+        currentProjectId,
+        sceneId,
+        elements,
+      );
+      classroomTimeSchedulerIndexRef.current = nextSchedulerIndex;
+    }
     const persistedScene = currentSceneRef.current?.id === sceneId
       ? currentSceneRef.current
       : null;
     const persistentBackgroundElements = persistedScene
-      ? canonicalizePdfBackground(
+      ? canonicalizePdfBackgroundForPersistence(
         persistedScene,
         elements as unknown as readonly Record<string, unknown>[],
       ) as unknown as readonly ExcalidrawElement[]
       : elements;
-    const persistentElements = detachElementsFromSlideFrames(persistentBackgroundElements);
+    const wrapperSafePersistentElements = detachElementsFromSlideFrames(persistentBackgroundElements);
+    const wrapperSafePersistentFiles = persistedScene
+      ? persistentFilesForScene(
+          persistedScene,
+          files,
+          transientDarkPdfFileIdsRef.current,
+        )
+      : files;
+    const persistentScene = canonicalizeClassroomTimeWidgetsForPersistence(
+      wrapperSafePersistentElements,
+      wrapperSafePersistentFiles,
+      projectRef.current?.projectCalendar,
+      Date.now(),
+      createLocalId,
+    );
     const displayFileId = persistedScene
       && !suspendDarkPdfDisplayRef.current
       ? darkPdfDisplayFileIdsRef.current.get(sceneId)
@@ -2989,15 +5199,9 @@ export default function App() {
     const editorElements = detachElementsFromSlideFrames(editorBackgroundElements);
     queueScenePersistence({
       sceneId,
-      elements: persistentElements,
+      elements: persistentScene.elements,
       appState,
-      files: persistedScene
-        ? persistentFilesForScene(
-          persistedScene,
-          files,
-          transientDarkPdfFileIdsRef.current,
-        )
-        : files,
+      files: persistentScene.files,
     });
     const elementGestureInProgress = !!(
       appState.newElement
@@ -3182,6 +5386,7 @@ export default function App() {
     setLassoGeometryFactory(null);
     setLassoInitialSelection(null);
     setIsMathToolsOpen(false);
+    setClassroomTimeDialog(null);
     setIsGeoGonOpen(false);
     setMathToolEdit(null);
     setMathInteraction(null);
@@ -3202,16 +5407,33 @@ export default function App() {
 
   const handleLibraryChange = useCallback((libraryItems: LibraryItems) => {
     const safeLibraryItems = sanitizeLibraryItems(libraryItems);
-    if (safeLibraryItems !== libraryItems && api) {
-      api.setToast({ message: "Web embeds and external links were removed from the library." });
+    const pendingTransfer = pendingClassroomTimeLibraryTransferRef.current;
+    const transfer = pendingTransfer && pendingTransfer.expiresAt >= Date.now()
+      ? applyClassroomTimeLibraryTransferIntent(safeLibraryItems, pendingTransfer)
+      : { items: safeLibraryItems, matchedItemId: null };
+    if (!pendingTransfer || pendingTransfer.expiresAt < Date.now() || transfer.matchedItemId) {
+      pendingClassroomTimeLibraryTransferRef.current = null;
+    }
+    const preparedLibraryItems = transfer.items;
+    libraryItemIdsRef.current = new Set(preparedLibraryItems.map((item) => item.id));
+    if (preparedLibraryItems !== libraryItems && api) {
+      if (safeLibraryItems !== libraryItems) {
+        api.setToast({ message: "Unsupported or unsafe content was removed from the library." });
+      }
+      const preparedById = new Map(preparedLibraryItems.map((item) => [item.id, item]));
       void api.updateLibrary({
-        libraryItems: (current) => sanitizeLibraryItems(current),
+        libraryItems: (current) => {
+          const safe = sanitizeLibraryItems(current);
+          return safe.map((item) => preparedById.get(item.id) ?? item) as LibraryItems;
+        },
         merge: false,
       }).catch((error) => {
         setErrorMessage(`Personal library could not be cleaned: ${error instanceof Error ? error.message : String(error)}`);
       });
     }
-    void saveLibraryItems(safeLibraryItems).catch((error) => {
+    const persistence = saveLibraryItems(preparedLibraryItems);
+    libraryPersistencePromiseRef.current = persistence;
+    void persistence.catch((error) => {
       setErrorMessage(`Personal library could not be saved: ${error instanceof Error ? error.message : String(error)}`);
     });
   }, [api]);
@@ -3228,10 +5450,66 @@ export default function App() {
     // completed. Fold that buffered edit into the old project before this
     // replacement starts, rather than clearing it below with the other
     // pending scene state.
-    commitLiveScenePersistence(
+    const outgoingProject = commitLiveScenePersistence(
       hydratedSceneIdRef.current || activeSceneIdRef.current || projectRef.current?.activeSceneId || "",
     );
     flushAutosave(true);
+    await autosaveQueueRef.current.catch(() => undefined);
+    if (!isCurrentOperation()) return false;
+    let startupProject = projectForBoardStartup(loaded.project);
+    const replacedAlarmIdentities = replacedClassroomTimeAlarmIdentities(
+      outgoingProject ?? null,
+      startupProject,
+    );
+    let outgoingCancellationReceipt: ClassroomAlarmCancellationReceiptV1 | null = null;
+    const restoreOutgoingAlarmsAfterAbandon = async () => {
+      const receipt = outgoingCancellationReceipt;
+      outgoingCancellationReceipt = null;
+      return restoreAbandonedOpenClassroomAlarms(receipt, outgoingProject ?? null);
+    };
+    if (replacedAlarmIdentities.length) {
+      const cancelled = await cancelClassroomAlarmIdentitiesWithReceipt(
+        replacedAlarmIdentities,
+        Date.now(),
+      );
+      if (cancelled.status !== "persisted" || !cancelled.receipt) {
+        if (isCurrentOperation()) {
+          setErrorMessage("The project was not opened because its classroom alarms could not be reconciled durably.");
+        }
+        return false;
+      }
+      outgoingCancellationReceipt = cancelled.receipt;
+      if (!isCurrentOperation()) {
+        if (!await restoreOutgoingAlarmsAfterAbandon()) {
+          setErrorMessage("The superseded project open was stopped, but its prior classroom timers had to be paused because their exact alarm schedule could not be restored.");
+        }
+        return false;
+      }
+    }
+    let preparedAlarms: PreparedClassroomAlarmPublication;
+    try {
+      preparedAlarms = await prepareClassroomAlarmPublication(
+        startupProject,
+        Date.now(),
+        { resolvePersistedTransactions: true },
+      );
+    } catch (error) {
+      if (!await restoreOutgoingAlarmsAfterAbandon()) {
+        setErrorMessage("The project was not opened, and its prior classroom timers had to be paused because their exact alarm schedule could not be restored.");
+      }
+      throw error;
+    }
+    trackPreparedClassroomAlarmReceipts(preparedAlarms.receipts);
+    startupProject = preparedAlarms.project;
+    if (!isCurrentOperation()) {
+      if (!await rollbackPreparedClassroomAlarmReceipts(preparedAlarms.receipts)) {
+        setErrorMessage("A superseded project-open alarm preparation could not be rolled back durably.");
+      }
+      if (!await restoreOutgoingAlarmsAfterAbandon()) {
+        setErrorMessage("The superseded project open was stopped, but its prior classroom timers had to be paused because their exact alarm schedule could not be restored.");
+      }
+      return false;
+    }
     pendingFrameIdRef.current = null;
     pendingProjectSearchTargetRef.current = null;
     pendingSlideFrameActionRef.current = null;
@@ -3249,13 +5527,10 @@ export default function App() {
       window.clearTimeout(autosaveTimerRef.current);
       autosaveTimerRef.current = null;
     }
-    await autosaveQueueRef.current.catch(() => undefined);
-    if (!isCurrentOperation()) return false;
     autosaveSuspendedRef.current = true;
     autosaveSuspensionGenerationRef.current = operation?.generation ?? null;
     autosaveSavingRef.current = false;
     autosaveCoveredSnapshotRef.current = null;
-    const startupProject = projectForBoardStartup(loaded.project);
     let replacementSaved = false;
     let replacementConflict: AutosaveConflictError | null = null;
     autosaveSavingRef.current = true;
@@ -3290,7 +5565,15 @@ export default function App() {
       }
     }
     if (autosaveQueueRef.current === replacementSave) autosaveSavingRef.current = false;
-    if (!isCurrentOperation()) return false;
+    if (!isCurrentOperation()) {
+      if (!await rollbackPreparedClassroomAlarmReceipts(preparedAlarms.receipts)) {
+        setErrorMessage("A superseded project-open alarm preparation could not be rolled back durably.");
+      }
+      if (!await restoreOutgoingAlarmsAfterAbandon()) {
+        setErrorMessage("The superseded project open was stopped, but its prior classroom timers had to be paused because their exact alarm schedule could not be restored.");
+      }
+      return false;
+    }
     if (!replacementSaved) autosaveCoveredSnapshotRef.current = null;
     pendingScenePersistenceRef.current = null;
     if (scenePersistenceTimerRef.current !== null) {
@@ -3303,6 +5586,10 @@ export default function App() {
     beginSceneHydration();
     pdfBytesRef.current = loaded.pdfBytes;
     projectRef.current = startupProject;
+    // From this point the incoming project is the synchronously published
+    // source of truth. The outgoing cancellation belongs to the successful
+    // replacement and must not be restored by a later async cleanup path.
+    outgoingCancellationReceipt = null;
     activeSceneIdRef.current = startupProject.activeSceneId;
     autosaveSnapshotRef.current = {
       project: startupProject,
@@ -3348,14 +5635,24 @@ export default function App() {
       setAutosaveRecoveryKind(null);
       setAutosaveRecoveryDetail(null);
     }
+    if (!await activatePublishedClassroomAlarmReceipts(preparedAlarms.receipts)) {
+      setErrorMessage("The opened project was loaded, but its classroom timers were paused because alarm activation failed.");
+    } else if (preparedAlarms.pausedIdentities.length) {
+      setErrorMessage("The project opened with some classroom timers paused because their prior alarm authority was no longer safe to resume.");
+    }
   return true;
   }, [
+    activatePublishedClassroomAlarmReceipts,
     beginSceneHydration,
     commitLiveScenePersistence,
     commitPendingScenePersistence,
     finalizePendingPdfUndo,
     flushAutosave,
     isCurrentFileOpenOperation,
+    pausePublishedClassroomAlarmIdentities,
+    restoreAbandonedOpenClassroomAlarms,
+    rollbackPreparedClassroomAlarmReceipts,
+    trackPreparedClassroomAlarmReceipts,
   ]);
 
   const handleFile = useCallback(async (file: File) => {
@@ -3642,7 +5939,10 @@ export default function App() {
     currentProject: ClassroomProject,
     exportPdfBytes: Record<PdfDocumentId, Uint8Array>,
     kind: "slides" | PdfExportMode,
+    deviceCalendarSnapshot: ClassroomDeviceCalendarStoreV1,
     annotationMode: "hybrid" | "visual" = "hybrid",
+    capturedAt = Date.now(),
+    boardTheme: "light" | "dark" = editorThemeRef.current,
   ) => {
     pdfExportAbortControllerRef.current?.abort();
     const controller = new AbortController();
@@ -3665,7 +5965,18 @@ export default function App() {
         PdfHybridFallbackRequiredError,
       } = await import("./lib/pdf/export-pdf");
       const exportOptions = {
+        capturedAt,
         signal: controller.signal,
+        classroomTimeRenderContextForScene: (
+          scene: Readonly<SerializedScene>,
+          exportCapturedAt: number,
+        ) => classroomTimeRenderContext(
+          scene.elements as unknown as readonly ExcalidrawElement[],
+          currentProject.projectCalendar,
+          deviceCalendarSnapshot,
+          exportCapturedAt,
+          boardTheme,
+        ),
         onProgress: (progress: PdfOperationProgress) => {
           if (!controller.signal.aborted && pdfExportAbortControllerRef.current === controller) {
             setBusyMessage(pdfOperationProgressMessage(progress));
@@ -3690,7 +6001,10 @@ export default function App() {
               setPendingVisualPdfFallback({
                 project: currentProject,
                 pdfBytes: exportPdfBytes,
+                deviceCalendarSnapshot,
                 mode: kind,
+                capturedAt,
+                boardTheme,
               });
               return;
             }
@@ -3724,7 +6038,27 @@ export default function App() {
     if (!currentProject) return;
     setPendingVisualPdfFallback(null);
     const exportPdfBytes = clonePdfBytes(pdfBytesRef.current);
-    await executePdfExport(currentProject, exportPdfBytes, kind);
+    const capturedAt = Date.now();
+    const boardTheme = editorThemeRef.current;
+    const deviceCalendarSnapshot = createClassroomCalendarStoreV1(
+      "device",
+      deviceClassroomCalendarRef.current.events,
+    );
+    const exportProject = materializeProjectClassroomTimeWidgets(
+      currentProject,
+      capturedAt,
+      deviceCalendarSnapshot,
+      boardTheme,
+    );
+    await executePdfExport(
+      exportProject,
+      exportPdfBytes,
+      kind,
+      deviceCalendarSnapshot,
+      "hybrid",
+      capturedAt,
+      boardTheme,
+    );
   }, [commitCurrentLiveScenePersistence, executePdfExport]);
 
   const cancelVisualPdfFallback = useCallback(() => {
@@ -3739,7 +6073,10 @@ export default function App() {
       pending.project,
       pending.pdfBytes,
       pending.mode,
+      pending.deviceCalendarSnapshot,
       "visual",
+      pending.capturedAt,
+      pending.boardTheme,
     );
   }, [executePdfExport, pendingVisualPdfFallback]);
 
@@ -3751,7 +6088,14 @@ export default function App() {
     try {
       await afterNextPaint();
       const { exportSlidesPptx } = await import("./lib/export-pptx");
-      const blob = await exportSlidesPptx(currentProject);
+      const capturedAt = Date.now();
+      const exportProject = materializeProjectClassroomTimeWidgets(
+        currentProject,
+        capturedAt,
+        deviceClassroomCalendarRef.current,
+        editorThemeRef.current,
+      );
+      const blob = await exportSlidesPptx(exportProject);
       downloadBlob(blob, `${safeFileStem(currentProject.title)}-slides.pptx`);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
@@ -3775,10 +6119,23 @@ export default function App() {
           liveElements as unknown as readonly Record<string, unknown>[],
         ) as unknown as readonly ExcalidrawElement[]
         : liveElements;
+      const capturedAt = Date.now();
+      const renderContext = classroomTimeRenderContext(
+        elements,
+        project.projectCalendar,
+        deviceClassroomCalendarRef.current,
+        capturedAt,
+        editorThemeRef.current,
+      );
+      const materializedElements = materializeClassroomTimeWidgetsForExport(
+        elements,
+        capturedAt,
+        renderContext,
+      );
       const files = scene
         ? cloneBinaryFiles(persistentFilesForScene(scene, api.getFiles(), transientDarkPdfFileIdsRef.current))
         : cloneBinaryFiles(api.getFiles());
-      const { blob, scale } = await exportFullBoardPng(api, { elements, files });
+      const { blob, scale } = await exportFullBoardPng(api, { elements: materializedElements, files });
       downloadBlob(blob, `${safeFileStem(project.title)}-full-board.png`);
       api.setToast({
         message: scale < 1
@@ -3812,6 +6169,30 @@ export default function App() {
     try {
       await waitForSceneHydrationToSettle(() => switchingSceneRef.current);
       if (api.getSceneElements().length === 0) return;
+      const capturedAt = Date.now();
+      const liveForExport = api.getSceneElementsIncludingDeleted();
+      const exportRenderContext = classroomTimeRenderContext(
+        liveForExport,
+        project.projectCalendar,
+        deviceClassroomCalendarRef.current,
+        capturedAt,
+        editorThemeRef.current,
+      );
+      const materialized = materializeClassroomTimeWidgetsForExport(
+        liveForExport,
+        capturedAt,
+        exportRenderContext,
+      );
+      if (materialized !== liveForExport && hydratedSceneIdRef.current) {
+        classroomTimeTickFenceRef.current.push({
+          sceneId: hydratedSceneIdRef.current,
+          elementFingerprint: classroomTimeElementFingerprint(materialized),
+          fileFingerprint: classroomTimeFileFingerprint(api.getFiles()),
+        });
+        if (classroomTimeTickFenceRef.current.length > 8) classroomTimeTickFenceRef.current.shift();
+        api.updateScene({ elements: materialized, captureUpdate: CaptureUpdateAction.NEVER });
+        await afterNextPaint();
+      }
       const scene = currentSceneRef.current;
       if (scene?.pdfPage) {
         suspendedPdfPreview = true;
@@ -3901,6 +6282,1364 @@ export default function App() {
     focusAfterMathToolsRef.current = "trigger";
     setIsMathToolsOpen(false);
     setMathToolEdit(null);
+  }, []);
+
+  const updateLiveClassroomTimeWidget = useCallback((
+    ownerId: string,
+    metadata: ClassroomTimeWidgetMetadataV1,
+    captureUpdate = CaptureUpdateAction.IMMEDIATELY,
+  ): boolean => {
+    if (!api || switchingSceneRef.current) return false;
+    const baseProject = commitCurrentLiveScenePersistence();
+    const sceneId = hydratedSceneIdRef.current;
+    const scene = sceneId ? baseProject?.scenes[sceneId] : undefined;
+    if (!baseProject || !sceneId || !scene) return false;
+    const liveElements = api.getSceneElementsIncludingDeleted();
+    let anchorFound = false;
+    const withMetadata = liveElements.map((element) => {
+      if (element.isDeleted || classroomTimeWidgetOwnerId(element) !== ownerId) return element;
+      if (!classroomTimeWidgetMetadata(element)) return element;
+      anchorFound = true;
+      return replaceClassroomTimeMetadata(element, metadata);
+    });
+    if (!anchorFound) return false;
+    const now = Date.now();
+    const renderContext = classroomTimeRenderContext(
+      withMetadata,
+      baseProject.projectCalendar,
+      deviceClassroomCalendarRef.current,
+      now,
+      editorThemeRef.current,
+    );
+    const reconciled = reconcileClassroomTimeWidgets(withMetadata, {
+      now,
+      files: api.getFiles(),
+      createId: createLocalId,
+      renderContext,
+    });
+    const liveFiles = mergeClassroomTimeFiles(
+      api.getFiles(),
+      reconciled.addedFiles,
+      reconciled.orphanedFileIds,
+    );
+    const projected = projectWithPendingScene(baseProject, {
+      sceneId,
+      elements: reconciled.elements,
+      appState: api.getAppState(),
+      files: persistentFilesForScene(scene, liveFiles, transientDarkPdfFileIdsRef.current),
+      preserveDeleted: true,
+    });
+    if (!projected) return false;
+    assertProjectFitsContentBudget(projected, pdfBytesRef.current);
+    if (reconciled.addedFiles.length) api.addFiles([...reconciled.addedFiles]);
+    for (const fileId of reconciled.orphanedFileIds) delete api.getFiles()[fileId];
+    const anchorId = reconciled.elements.find((element) => (
+      !element.isDeleted
+      && classroomTimeWidgetOwnerId(element) === ownerId
+      && classroomTimeWidgetMetadata(element) !== null
+    ))?.id;
+    api.setActiveTool({ type: "selection" });
+    classroomTimeAlarmAuthorityFenceRef.current.push({
+      sceneId,
+      elementFingerprint: classroomTimeElementFingerprint(reconciled.elements),
+      fileFingerprint: classroomTimeFileFingerprint(api.getFiles()),
+    });
+    if (classroomTimeAlarmAuthorityFenceRef.current.length > 8) {
+      classroomTimeAlarmAuthorityFenceRef.current.shift();
+    }
+    api.updateScene({
+      elements: reconciled.elements,
+      appState: anchorId ? { selectedElementIds: { [anchorId]: true } } : undefined,
+      captureUpdate,
+    });
+    commitLiveScenePersistence(sceneId, true);
+    flushAutosave(true);
+    return true;
+  }, [api, commitCurrentLiveScenePersistence, commitLiveScenePersistence, flushAutosave]);
+
+  const openClassroomTimeTool = useCallback((kind: ClassroomTimeWidgetKind) => {
+    const ownerId = createLocalId();
+    const metadata = createClassroomTimeMetadataFromPreferences(
+      kind,
+      ownerId,
+      classroomTimePreferencesRef.current,
+    );
+    focusAfterMathToolsRef.current = null;
+    setIsMathToolsOpen(false);
+    setMathToolEdit(null);
+    setClassroomTimeDialog({ mode: "insert", metadata });
+  }, []);
+
+  const pauseUnauthorizedLiveClassroomTimeWidgets = useCallback((now = Date.now()) => {
+    const currentProject = projectRef.current;
+    const sceneId = hydratedSceneIdRef.current;
+    if (
+      !api
+      || !currentProject
+      || !sceneId
+      || currentProject.activeSceneId !== sceneId
+      || switchingSceneRef.current
+    ) return;
+    const liveElements = api.getSceneElementsIncludingDeleted();
+    const pausedElements = pauseClassroomTimeElementsWithoutMatchingAlarmJob(
+      liveElements,
+      currentProject.id,
+      readClassroomAlarmRegistry(),
+      now,
+    );
+    if (pausedElements === liveElements) return;
+    const display = materializeClassroomTimeSceneForDisplay(
+      pausedElements,
+      api.getFiles(),
+      currentProject.projectCalendar,
+      deviceClassroomCalendarRef.current,
+      now,
+      createLocalId,
+      editorThemeRef.current,
+    );
+    if (display.addedFiles.length) api.addFiles([...display.addedFiles]);
+    for (const fileId of display.orphanedFileIds) delete api.getFiles()[fileId];
+    classroomTimeAlarmAuthorityFenceRef.current.push({
+      sceneId,
+      elementFingerprint: classroomTimeElementFingerprint(display.elements),
+      fileFingerprint: classroomTimeFileFingerprint(api.getFiles()),
+    });
+    if (classroomTimeAlarmAuthorityFenceRef.current.length > 8) {
+      classroomTimeAlarmAuthorityFenceRef.current.shift();
+    }
+    api.updateScene({
+      elements: display.elements,
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+    });
+    commitLiveScenePersistence(sceneId, true);
+    flushAutosave(true);
+  }, [api, commitLiveScenePersistence, flushAutosave]);
+
+  const reconcileExternalClassroomAlarmRegistry = useCallback((
+    registry: ClassroomAlarmRegistryV1,
+  ) => {
+    try {
+      classroomTimeAsyncOperationGenerationRef.current += 1;
+      const now = Date.now();
+      const baseProject = commitCurrentLiveScenePersistence() ?? projectRef.current;
+      if (!baseProject) return;
+      const safeProject = pauseUnauthorizedClassroomTimeWidgetsInProject(
+        baseProject,
+        registry,
+        now,
+      );
+      if (safeProject === baseProject) return;
+      assertProjectFitsContentBudget(safeProject, pdfBytesRef.current);
+      const sceneId = hydratedSceneIdRef.current;
+      const safeScene = sceneId && safeProject.activeSceneId === sceneId
+        ? safeProject.scenes[sceneId]
+        : null;
+      const rehydrateInterruptedSwitch = !!api && !!safeScene && switchingSceneRef.current;
+      let display: ReturnType<typeof materializeClassroomTimeSceneForDisplay> | null = null;
+      if (api && safeScene && !rehydrateInterruptedSwitch) {
+        display = materializeClassroomTimeSceneForDisplay(
+          safeScene.elements as unknown as readonly ExcalidrawElement[],
+          safeScene.files as unknown as BinaryFiles,
+          safeProject.projectCalendar,
+          deviceClassroomCalendarRef.current,
+          now,
+          createLocalId,
+          editorThemeRef.current,
+        );
+      }
+      stageProjectMutationForAutosave(safeProject);
+      if (rehydrateInterruptedSwitch && safeScene) {
+        loadSceneIntoEditor(safeScene);
+      } else if (api && display && sceneId) {
+        if (display.addedFiles.length) api.addFiles([...display.addedFiles]);
+        for (const fileId of display.orphanedFileIds) delete api.getFiles()[fileId];
+        classroomTimeAlarmAuthorityFenceRef.current.push({
+          sceneId,
+          elementFingerprint: classroomTimeElementFingerprint(display.elements),
+          fileFingerprint: classroomTimeFileFingerprint(api.getFiles()),
+        });
+        if (classroomTimeAlarmAuthorityFenceRef.current.length > 8) {
+          classroomTimeAlarmAuthorityFenceRef.current.shift();
+        }
+        api.updateScene({
+          elements: display.elements,
+          captureUpdate: CaptureUpdateAction.NEVER,
+        });
+      }
+      flushAutosave(true);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, [
+    api,
+    commitCurrentLiveScenePersistence,
+    flushAutosave,
+    loadSceneIntoEditor,
+    stageProjectMutationForAutosave,
+  ]);
+
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== CLASSROOM_ALARM_REGISTRY_STORAGE_KEY && event.key !== null) return;
+      reconcileExternalClassroomAlarmRegistry(readClassroomAlarmRegistry());
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [reconcileExternalClassroomAlarmRegistry]);
+
+  const submitClassroomTimeWidget = useCallback((metadata: ClassroomTimeWidgetMetadataV1) => {
+    if (!api || !classroomTimeDialog) return;
+    void (async () => {
+      try {
+      if (classroomTimeDialog.mode === "update") {
+        const operationFence = beginClassroomTimeAsyncOperation();
+        if (!operationFence) return;
+        const currentProject = projectRef.current;
+        const anchor = api.getSceneElements().find((element) => (
+          element.id === classroomTimeDialog.anchorId
+        ));
+        if (!currentProject || !anchor) {
+          throw new Error("That classroom time widget is no longer available.");
+        }
+        const oldDescriptors = activeClassroomTimeAlarmDescriptors(
+          currentProject.id,
+          [anchor],
+        );
+        let safeMetadata = metadata;
+        const requestedDescriptors = activeClassroomTimeAlarmDescriptors(
+          currentProject.id,
+          [replaceClassroomTimeMetadata(anchor, safeMetadata)],
+        );
+        for (const descriptor of requestedDescriptors) {
+          const existing = oldDescriptors.find((candidate) => candidate.id === descriptor.id);
+          if (!existing || !classroomAlarmJobMatchesDescriptor(
+            classroomAlarmJobFromDescriptor(existing),
+            descriptor,
+          )) {
+            safeMetadata = applyClassroomTimeControl(
+              safeMetadata,
+              descriptor.target,
+              "pause",
+              Date.now(),
+            );
+          }
+        }
+        const safeDescriptors = activeClassroomTimeAlarmDescriptors(
+          currentProject.id,
+          [replaceClassroomTimeMetadata(anchor, safeMetadata)],
+        );
+        const cancelledIdentities = oldDescriptors.filter((descriptor) => {
+          const retained = safeDescriptors.find((candidate) => candidate.id === descriptor.id);
+          return !retained || !classroomAlarmJobMatchesDescriptor(
+            classroomAlarmJobFromDescriptor(descriptor),
+            retained,
+          );
+        }).map((descriptor) => ({
+          sourceProjectId: descriptor.sourceProjectId,
+          ownerId: descriptor.ownerId,
+          target: descriptor.target,
+        }));
+        if (cancelledIdentities.length) {
+          const cancellation = await cancelClassroomAlarmIdentitiesWithReceipt(
+            cancelledIdentities,
+            Date.now(),
+          );
+          if (cancellation.status !== "persisted") {
+            throw new Error("The widget could not be updated because its alarm changes could not be saved durably.");
+          }
+          if (!isCurrentClassroomTimeAsyncOperation(operationFence)) {
+            pauseUnauthorizedLiveClassroomTimeWidgets();
+            return;
+          }
+        }
+        if (!updateLiveClassroomTimeWidget(safeMetadata.ownerId, safeMetadata)) {
+          if (cancelledIdentities.length) pauseUnauthorizedLiveClassroomTimeWidgets();
+          throw new Error("That classroom time widget is no longer available.");
+        }
+        setClassroomTimeDialog(null);
+        showClassroomTimeConfirmationToast(
+          cancelledIdentities.length
+            ? "Classroom time widget updated. Changed alarms are paused until you press Start."
+            : "Classroom time widget updated.",
+        );
+        return;
+      }
+      const baseProject = commitCurrentLiveScenePersistence();
+      const sceneId = hydratedSceneIdRef.current;
+      const scene = sceneId ? baseProject?.scenes[sceneId] : undefined;
+      if (!baseProject || !sceneId || !scene || switchingSceneRef.current) return;
+      if (countProjectClassroomTimeWidgets(baseProject) >= MAX_CLASSROOM_TIME_WIDGETS) {
+        throw new Error(`A project can contain at most ${MAX_CLASSROOM_TIME_WIDGETS} classroom time widgets.`);
+      }
+      const appState = api.getAppState();
+      const center = viewportCoordsToSceneCoords({
+        clientX: appState.offsetLeft + appState.width / 2,
+        clientY: appState.offsetTop + appState.height / 2,
+      }, appState);
+      const now = Date.now();
+      const created = createClassroomTimeWidgetScene({
+        metadata,
+        x: center.x - 170,
+        y: center.y - 125,
+        now,
+        createId: createLocalId,
+      });
+      const initialElements = [...api.getSceneElementsIncludingDeleted(), ...created.elements];
+      const initialFiles = mergeClassroomTimeFiles(api.getFiles(), created.files, []);
+      const renderContext = classroomTimeRenderContext(
+        initialElements,
+        baseProject.projectCalendar,
+        deviceClassroomCalendarRef.current,
+        now,
+        editorThemeRef.current,
+      );
+      const reconciled = reconcileClassroomTimeWidgets(initialElements, {
+        now,
+        files: initialFiles,
+        createId: createLocalId,
+        renderContext,
+      });
+      const liveFiles = mergeClassroomTimeFiles(
+        initialFiles,
+        reconciled.addedFiles,
+        reconciled.orphanedFileIds,
+      );
+      const projected = projectWithPendingScene(baseProject, {
+        sceneId,
+        elements: reconciled.elements,
+        appState,
+        files: persistentFilesForScene(scene, liveFiles, transientDarkPdfFileIdsRef.current),
+        preserveDeleted: true,
+      });
+      if (!projected) return;
+      assertProjectFitsContentBudget(projected, pdfBytesRef.current);
+      api.addFiles([...created.files, ...reconciled.addedFiles]);
+      for (const fileId of reconciled.orphanedFileIds) delete api.getFiles()[fileId];
+      api.setActiveTool({ type: "selection" });
+      api.updateScene({
+        elements: reconciled.elements,
+        appState: { selectedElementIds: { [created.anchorId]: true } },
+        captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+      });
+      commitLiveScenePersistence(sceneId, true);
+      flushAutosave(true);
+      setClassroomTimeDialog(null);
+      showClassroomTimeConfirmationToast(`${metadata.label || "Classroom time widget"} added.`);
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
+  }, [
+    api,
+    beginClassroomTimeAsyncOperation,
+    classroomTimeDialog,
+    commitCurrentLiveScenePersistence,
+    commitLiveScenePersistence,
+    flushAutosave,
+    isCurrentClassroomTimeAsyncOperation,
+    pauseUnauthorizedLiveClassroomTimeWidgets,
+    showClassroomTimeConfirmationToast,
+    updateLiveClassroomTimeWidget,
+  ]);
+
+  const createClassroomTimeCalendarEvent = useCallback(async (
+    layer: "device" | "project",
+    draft: ClassroomCalendarEventDraft,
+  ): Promise<ClassroomCalendarEventCreateResult> => {
+    try {
+      const timestamp = new Date().toISOString();
+      const event: ClassroomCalendarEventV1 = {
+        schemaVersion: 1,
+        id: createLocalId(),
+        date: draft.date,
+        title: draft.title.trim(),
+        ...(draft.note?.trim() ? { note: draft.note.trim() } : {}),
+        color: draft.color,
+        allDay: draft.allDay,
+        ...(!draft.allDay && draft.startTime ? { startTime: draft.startTime } : {}),
+        ...(!draft.allDay && draft.endTime ? { endTime: draft.endTime } : {}),
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      if (layer === "device") {
+        const result = await mutateDeviceClassroomCalendar((store) => (
+          upsertClassroomCalendarEvent(store, event)
+        ));
+        if (result.status !== "persisted") {
+          throw new Error("The device calendar event could not be saved durably.");
+        }
+        deviceClassroomCalendarRef.current = result.store;
+        setDeviceClassroomCalendar(result.store);
+        return { status: "created" };
+      }
+      const currentProject = projectRef.current;
+      if (!currentProject) return { status: "failed", message: "No project is open." };
+      const projectCalendar = upsertClassroomCalendarEvent(
+        currentProject.projectCalendar ?? createClassroomCalendarStoreV1("project"),
+        event,
+      );
+      const nextProject = {
+        ...currentProject,
+        projectCalendar,
+        updatedAt: nowIso(),
+      };
+      assertProjectFitsContentBudget(nextProject, pdfBytesRef.current);
+      stageProjectMutationForAutosave(nextProject);
+      window.requestAnimationFrame(() => flushAutosave(true));
+      const dialogMetadata = classroomTimeDialog?.metadata;
+      const keepsAllProjectEvents = !!dialogMetadata
+        && (dialogMetadata.kind === "calendar" || dialogMetadata.kind === "dashboard")
+        && dialogMetadata.calendar.projectEventIds.length === 0;
+      return keepsAllProjectEvents
+        ? { status: "created" }
+        : { status: "created", projectEventId: event.id };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setErrorMessage(message);
+      return { status: "failed", message };
+    }
+  }, [classroomTimeDialog?.metadata, flushAutosave, stageProjectMutationForAutosave]);
+
+  const restoreClassroomTimeWidgetDefaults = useCallback((kind: ClassroomTimeWidgetKind) => {
+    const ownerId = classroomTimeDialog?.metadata.ownerId ?? createLocalId();
+    return createClassroomTimeMetadataFromPreferences(
+      kind,
+      ownerId,
+      DEFAULT_CLASSROOM_TIME_PREFERENCES as ClassroomTimePreferencesV1,
+    );
+  }, [classroomTimeDialog?.metadata.ownerId]);
+
+  const saveClassroomTimeDefaults = useCallback((metadata: ClassroomTimeWidgetMetadataV1) => {
+    void (async () => {
+      try {
+        const result = await persistClassroomTimePreferencePatch(
+          classroomTimePreferencesRef.current,
+          classroomTimePreferencePatchForMetadata(metadata),
+        );
+        classroomTimePreferencesRef.current = result.preferences;
+        setClassroomTimePreferences(result.preferences);
+        if (result.status !== "persisted" && result.status !== "memory-only") {
+          setErrorMessage("Classroom time defaults could not be saved on this device.");
+        }
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
+  }, []);
+
+  const setClassroomAlarmPreferences = useCallback((preferences: { muted: boolean; volume: number }) => {
+    void (async () => {
+      try {
+        const result = await persistClassroomTimePreferencePatch(
+          classroomTimePreferencesRef.current,
+          { muted: preferences.muted, masterVolume: preferences.volume },
+        );
+        classroomTimePreferencesRef.current = result.preferences;
+        setClassroomTimePreferences(result.preferences);
+        if (result.status !== "persisted" && result.status !== "memory-only") {
+          setErrorMessage("Alarm preferences could not be saved on this device.");
+        }
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
+  }, []);
+
+  const testClassroomAlarm = useCallback((tone: ClassroomAlarmTone) => {
+    void (async () => {
+      try {
+        const prepared = await prepareClassroomAlarmAudio();
+        if (prepared.status !== "ready") {
+          setErrorMessage("Your browser blocked alarm audio. Try Test alarm again after interacting with the page.");
+          return;
+        }
+        const preferences = classroomTimePreferencesRef.current;
+        const playback = await testClassroomAlarmTone(
+          tone,
+          preferences.masterVolume,
+          preferences.muted,
+        );
+        if (playback.status === "blocked" || playback.status === "unavailable") {
+          setErrorMessage("Alarm audio is unavailable in this browser.");
+        }
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
+  }, []);
+
+  const controlSelectedClassroomTimeWidget = useCallback((
+    command: ClassroomTimeOverlayCommand,
+    target: ClassroomTimeOverlayTarget,
+  ) => {
+    const selection = selectedClassroomTime;
+    if (!selection) return;
+    setClassroomTimeActiveTarget(target);
+    void (async () => {
+      let operationFence: ClassroomTimeSchedulerPublicationFence | null = null;
+      let stagedReceipt: ClassroomAlarmTransactionReceiptV1 | null = null;
+      let stagedIdentity: ClassroomAlarmIdentity | null = null;
+      try {
+        if (command === "start") await prepareClassroomAlarmAudio();
+        operationFence = beginClassroomTimeAsyncOperation();
+        if (!operationFence) return;
+        if (!isCurrentClassroomTimeAsyncOperation(operationFence, true)) return;
+        if (!api) throw new Error("The classroom time widget is unavailable.");
+        const currentProject = projectRef.current;
+        const anchor = api.getSceneElements().find((element) => element.id === selection.anchorId);
+        const liveMetadata = anchor ? classroomTimeWidgetMetadata(anchor) : null;
+        if (!currentProject || !anchor || !liveMetadata || liveMetadata.ownerId !== selection.ownerId) {
+          throw new Error("That classroom time widget is no longer available.");
+        }
+        const identity = {
+          sourceProjectId: currentProject.id,
+          ownerId: selection.ownerId,
+          target,
+        } as const;
+        stagedIdentity = identity;
+        const wallNowMs = Date.now();
+        const nowMs = command === "start" || command === "skip"
+          ? nextClassroomAlarmGenerationStartMs(
+              readClassroomAlarmRegistry(),
+              identity,
+              wallNowMs,
+            )
+          : wallNowMs;
+        const metadata = applyClassroomTimeControl(
+          liveMetadata,
+          target,
+          command,
+          nowMs,
+        );
+        const descriptor = activeClassroomTimeAlarmDescriptors(
+          currentProject.id,
+          [replaceClassroomTimeMetadata(anchor, metadata)],
+        ).find((candidate) => candidate.id === `${selection.ownerId}:${target}`);
+        const mustCancel = command === "pause"
+          || command === "reset"
+          || (command === "skip" && !descriptor);
+        if (mustCancel) {
+          const cancellation = await cancelClassroomAlarmIdentitiesWithReceipt(
+            [identity],
+            nowMs,
+          );
+          if (cancellation.status !== "persisted") {
+            throw new Error("The classroom alarm cancellation could not be saved on this device.");
+          }
+          if (!isCurrentClassroomTimeAsyncOperation(operationFence, true)) {
+            pauseUnauthorizedLiveClassroomTimeWidgets();
+            return;
+          }
+        } else if (descriptor) {
+          const reservedJob = classroomAlarmJobFromDescriptor(descriptor);
+          const reservation = await stageTrustedClassroomAlarmJobs(
+            [reservedJob],
+            nowMs,
+          );
+          if (reservation.status !== "persisted" || !reservation.receipt) {
+            try {
+              await cancelClassroomAlarmIdentitiesWithReceipt([identity], Date.now());
+            } catch {
+              // The UI has not published the requested running generation.
+            }
+            pausePublishedClassroomAlarmIdentities([identity]);
+            throw new Error("The classroom alarm could not be scheduled on this device.");
+          }
+          stagedReceipt = reservation.receipt;
+          trackPreparedClassroomAlarmReceipts([stagedReceipt]);
+          if (!isCurrentClassroomTimeAsyncOperation(operationFence, true)) {
+            if (!await rollbackPreparedClassroomAlarmReceipts([stagedReceipt])) {
+              pausePublishedClassroomAlarmIdentities([identity]);
+              throw new Error("A superseded classroom alarm could not be rolled back durably.");
+            }
+            return;
+          }
+        }
+        if (!updateLiveClassroomTimeWidget(selection.ownerId, metadata)) {
+          if (stagedReceipt) {
+            if (!await rollbackPreparedClassroomAlarmReceipts([stagedReceipt])) {
+              pausePublishedClassroomAlarmIdentities([identity]);
+              throw new Error("The superseded classroom alarm could not be rolled back durably.");
+            }
+          } else if (mustCancel) {
+            pauseUnauthorizedLiveClassroomTimeWidgets();
+          }
+          throw new Error("That classroom time widget is no longer available.");
+        }
+        if (stagedReceipt) {
+          const publishedReceipt = stagedReceipt;
+          if (!await activatePublishedClassroomAlarmReceipts([publishedReceipt])) {
+            throw new Error("The timer was paused because its alarm could not be activated durably.");
+          }
+          setClassroomTimeAlarmNotice((current) => (
+            classroomTimeAlarmNoticeAfterSupersedingJob(current, publishedReceipt.stagedJobs[0].id)
+          ));
+        }
+      } catch (error) {
+        if (
+          stagedReceipt
+          && classroomTimeStagedTransactionIdsRef.current.has(stagedReceipt.transactionId)
+        ) {
+          const rolledBack = await rollbackPreparedClassroomAlarmReceipts([stagedReceipt]);
+          if (!rolledBack && stagedIdentity) {
+            pausePublishedClassroomAlarmIdentities([stagedIdentity]);
+          }
+        }
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
+  }, [
+    api,
+    activatePublishedClassroomAlarmReceipts,
+    beginClassroomTimeAsyncOperation,
+    isCurrentClassroomTimeAsyncOperation,
+    pausePublishedClassroomAlarmIdentities,
+    pauseUnauthorizedLiveClassroomTimeWidgets,
+    rollbackPreparedClassroomAlarmReceipts,
+    selectedClassroomTime,
+    trackPreparedClassroomAlarmReceipts,
+    updateLiveClassroomTimeWidget,
+  ]);
+
+  const customizeSelectedClassroomTimeWidget = useCallback(() => {
+    if (!selectedClassroomTime) return;
+    setClassroomTimeDialog({
+      mode: "update",
+      anchorId: selectedClassroomTime.anchorId,
+      metadata: selectedClassroomTime.metadata,
+    });
+  }, [selectedClassroomTime]);
+
+  const duplicateSelectedClassroomTimeWidget = useCallback(() => {
+    if (!api || !selectedClassroomTime) return;
+    try {
+      const baseProject = commitCurrentLiveScenePersistence();
+      const sceneId = hydratedSceneIdRef.current;
+      const scene = sceneId ? baseProject?.scenes[sceneId] : undefined;
+      if (!baseProject || !sceneId || !scene) return;
+      if (countProjectClassroomTimeWidgets(baseProject) >= MAX_CLASSROOM_TIME_WIDGETS) {
+        throw new Error(`A project can contain at most ${MAX_CLASSROOM_TIME_WIDGETS} classroom time widgets.`);
+      }
+      const liveElements = api.getSceneElements();
+      const source = liveElements.filter((element) => (
+        classroomTimeWidgetOwnerId(element) === selectedClassroomTime.ownerId
+      ));
+      if (!source.length) throw new Error("That classroom time widget is no longer available.");
+      const forked = forkClassroomTimeWidgets(source, Date.now(), createLocalId);
+      const duplicated = forked.elements.map((element) => ({
+        ...element,
+        x: element.x + 24,
+        y: element.y + 24,
+      })) as ExcalidrawElement[];
+      const elements = [...api.getSceneElementsIncludingDeleted(), ...duplicated];
+      const candidate = projectWithPendingScene(baseProject, {
+        sceneId,
+        elements,
+        appState: api.getAppState(),
+        files: persistentFilesForScene(scene, api.getFiles(), transientDarkPdfFileIdsRef.current),
+        preserveDeleted: true,
+      });
+      if (!candidate) return;
+      assertProjectFitsContentBudget(candidate, pdfBytesRef.current);
+      const anchorId = duplicated.find((element) => classroomTimeWidgetMetadata(element) !== null)?.id;
+      api.updateScene({
+        elements,
+        appState: anchorId ? { selectedElementIds: { [anchorId]: true } } : undefined,
+        captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+      });
+      commitLiveScenePersistence(sceneId, true);
+      flushAutosave(true);
+      showClassroomTimeConfirmationToast("Classroom time widget duplicated.");
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, [
+    api,
+    commitCurrentLiveScenePersistence,
+    commitLiveScenePersistence,
+    flushAutosave,
+    selectedClassroomTime,
+    showClassroomTimeConfirmationToast,
+  ]);
+
+  const convertSelectedClassroomTimeWidget = useCallback(() => {
+    if (!api || !selectedClassroomTime) return;
+    const ownerId = selectedClassroomTime.ownerId;
+    const sceneId = hydratedSceneIdRef.current;
+    const operationFence = beginClassroomTimeAsyncOperation();
+    if (!sceneId || !operationFence) return;
+    void (async () => {
+      try {
+        const currentProject = projectRef.current;
+        if (!currentProject) return;
+        const now = Date.now();
+        const cancellation = await cancelClassroomAlarmIdentitiesWithReceipt([
+          { sourceProjectId: currentProject.id, ownerId, target: "timer" },
+          { sourceProjectId: currentProject.id, ownerId, target: "pomodoro" },
+        ], now);
+        if (cancellation.status !== "persisted") {
+          throw new Error("The widget could not be converted because its alarms could not be cancelled durably.");
+        }
+        if (!isCurrentClassroomTimeAsyncOperation(operationFence)) {
+          pauseUnauthorizedLiveClassroomTimeWidgets();
+          return;
+        }
+        const renderContext = classroomTimeRenderContext(
+          api.getSceneElements(),
+          currentProject.projectCalendar,
+          EMPTY_DEVICE_CLASSROOM_CALENDAR,
+          now,
+          editorThemeRef.current,
+        );
+        const elements = ungroupClassroomTimeWidget(
+          api.getSceneElementsIncludingDeleted(),
+          ownerId,
+          now,
+          renderContext,
+        );
+        classroomTimeAlarmAuthorityFenceRef.current.push({
+          sceneId,
+          elementFingerprint: classroomTimeElementFingerprint(elements),
+          fileFingerprint: classroomTimeFileFingerprint(api.getFiles()),
+        });
+        if (classroomTimeAlarmAuthorityFenceRef.current.length > 8) {
+          classroomTimeAlarmAuthorityFenceRef.current.shift();
+        }
+        api.updateScene({ elements, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+        commitLiveScenePersistence(sceneId, true);
+        flushAutosave(true);
+        setSelectedClassroomTime(null);
+        showClassroomTimeConfirmationToast("Widget converted to ordinary editable elements.");
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
+  }, [
+    api,
+    beginClassroomTimeAsyncOperation,
+    commitLiveScenePersistence,
+    flushAutosave,
+    isCurrentClassroomTimeAsyncOperation,
+    pauseUnauthorizedLiveClassroomTimeWidgets,
+    selectedClassroomTime,
+    showClassroomTimeConfirmationToast,
+  ]);
+
+  const deleteSelectedClassroomTimeWidget = useCallback(() => {
+    if (!api || !selectedClassroomTime) return;
+    const ownerId = selectedClassroomTime.ownerId;
+    const sceneId = hydratedSceneIdRef.current;
+    const operationFence = beginClassroomTimeAsyncOperation();
+    if (!sceneId || !operationFence) return;
+    void (async () => {
+      try {
+        const currentProject = projectRef.current;
+        if (!currentProject) return;
+        const now = Date.now();
+        const cancellation = await cancelClassroomAlarmIdentitiesWithReceipt([
+          { sourceProjectId: currentProject.id, ownerId, target: "timer" },
+          { sourceProjectId: currentProject.id, ownerId, target: "pomodoro" },
+        ], now);
+        if (cancellation.status !== "persisted") {
+          throw new Error("The widget could not be deleted because its alarms could not be cancelled durably.");
+        }
+        if (!isCurrentClassroomTimeAsyncOperation(operationFence)) {
+          pauseUnauthorizedLiveClassroomTimeWidgets();
+          return;
+        }
+        const elements = api.getSceneElementsIncludingDeleted().map((element) => (
+          !element.isDeleted && classroomTimeWidgetOwnerId(element) === ownerId
+            ? newElementWith(element, { isDeleted: true })
+            : element
+        ));
+        classroomTimeAlarmAuthorityFenceRef.current.push({
+          sceneId,
+          elementFingerprint: classroomTimeElementFingerprint(elements),
+          fileFingerprint: classroomTimeFileFingerprint(api.getFiles()),
+        });
+        if (classroomTimeAlarmAuthorityFenceRef.current.length > 8) {
+          classroomTimeAlarmAuthorityFenceRef.current.shift();
+        }
+        api.updateScene({ elements, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+        commitLiveScenePersistence(sceneId, true);
+        flushAutosave(true);
+        setSelectedClassroomTime(null);
+        showClassroomTimeConfirmationToast("Classroom time widget deleted. Use Undo to restore it.");
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
+  }, [
+    api,
+    beginClassroomTimeAsyncOperation,
+    commitLiveScenePersistence,
+    flushAutosave,
+    isCurrentClassroomTimeAsyncOperation,
+    pauseUnauthorizedLiveClassroomTimeWidgets,
+    selectedClassroomTime,
+    showClassroomTimeConfirmationToast,
+  ]);
+
+  const reconcileClassroomTimeAlarmRegistry = useCallback(async (currentProject: ClassroomProject) => {
+    if (classroomTimeStagedTransactionIdsRef.current.size > 0) return;
+    if (!classroomTimeAlarmReconciliationNeeded(
+      currentProject,
+      readClassroomAlarmRegistry(),
+    )) return;
+    const nowMs = Date.now();
+    const operationFence = beginClassroomTimeAsyncOperation();
+    if (!operationFence || operationFence.project !== currentProject) return;
+    let preparedReceipts: readonly ClassroomAlarmTransactionReceiptV1[] = [];
+    let preparedProjectPublished = false;
+    try {
+      const prepared = await prepareClassroomAlarmPublication(currentProject, nowMs);
+      preparedReceipts = prepared.receipts;
+      trackPreparedClassroomAlarmReceipts(prepared.receipts);
+      if (!isCurrentClassroomTimeAsyncOperation(operationFence)) {
+        if (!await rollbackPreparedClassroomAlarmReceipts(prepared.receipts)) {
+          pausePublishedClassroomAlarmIdentities(
+            classroomAlarmIdentitiesForTransactionReceipts(prepared.receipts),
+          );
+          setErrorMessage("A superseded classroom alarm recovery could not be rolled back durably.");
+        }
+        return;
+      }
+      if (prepared.project !== currentProject) {
+        stageProjectMutationForAutosave(prepared.project);
+        preparedProjectPublished = true;
+        const sceneId = hydratedSceneIdRef.current;
+        const scene = sceneId && prepared.project.activeSceneId === sceneId
+          ? prepared.project.scenes[sceneId]
+          : null;
+        if (api && scene) {
+          const display = materializeClassroomTimeSceneForDisplay(
+            scene.elements as unknown as readonly ExcalidrawElement[],
+            scene.files as unknown as BinaryFiles,
+            prepared.project.projectCalendar,
+            deviceClassroomCalendarRef.current,
+            nowMs,
+            createLocalId,
+            editorThemeRef.current,
+          );
+          if (display.addedFiles.length) api.addFiles([...display.addedFiles]);
+          for (const fileId of display.orphanedFileIds) delete api.getFiles()[fileId];
+          api.updateScene({
+            elements: display.elements,
+            captureUpdate: CaptureUpdateAction.NEVER,
+          });
+        }
+        window.requestAnimationFrame(() => flushAutosave(true));
+      } else {
+        // Reaffirm the already-published project/ref pair immediately before
+        // making its exact recovered generation deliverable.
+        projectRef.current = currentProject;
+        preparedProjectPublished = true;
+      }
+      if (!await activatePublishedClassroomAlarmReceipts(prepared.receipts)) {
+        setErrorMessage("A recovered classroom timer was paused because its alarm could not be activated durably.");
+      } else if (prepared.pausedIdentities.length) {
+        setErrorMessage("A classroom timer was paused because its prior alarm authority was no longer safe to resume.");
+      }
+      preparedReceipts = [];
+    } catch (error) {
+      if (preparedReceipts.length) {
+        const identities = classroomAlarmIdentitiesForTransactionReceipts(preparedReceipts);
+        const rolledBack = await rollbackPreparedClassroomAlarmReceipts(preparedReceipts);
+        if (!rolledBack || preparedProjectPublished) {
+          pausePublishedClassroomAlarmIdentities(identities);
+        }
+      }
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, [
+    activatePublishedClassroomAlarmReceipts,
+    api,
+    beginClassroomTimeAsyncOperation,
+    flushAutosave,
+    isCurrentClassroomTimeAsyncOperation,
+    pausePublishedClassroomAlarmIdentities,
+    rollbackPreparedClassroomAlarmReceipts,
+    stageProjectMutationForAutosave,
+    trackPreparedClassroomAlarmReceipts,
+  ]);
+
+  useEffect(() => {
+    if (project) void reconcileClassroomTimeAlarmRegistry(project);
+  }, [project, reconcileClassroomTimeAlarmRegistry]);
+
+  const deliverClassroomAlarmBatch = useCallback(async (
+    jobs: readonly ClassroomAlarmJobV1[],
+    publishNotice: boolean,
+  ): Promise<"acknowledged" | "audio-blocked"> => {
+    if (publishNotice) {
+      setClassroomTimeAlarmNotice({
+        jobs: [...jobs],
+        jobIds: jobs.map((job) => job.id),
+        message: classroomAlarmNoticeMessage(jobs),
+        blocked: false,
+        deliveryPending: true,
+      });
+    }
+    const preferences = classroomTimePreferencesRef.current;
+    try {
+      const playback = await playClassroomAlarmTone(jobs[0]?.tone ?? "warm-chime", {
+        masterVolume: preferences.masterVolume,
+        muted: preferences.muted,
+      });
+      const acknowledged = playback.status === "played" || playback.status === "muted";
+      return acknowledged ? "acknowledged" : "audio-blocked";
+    } catch {
+      return "audio-blocked";
+    }
+  }, []);
+
+  const enableClassroomAlarmSound = useCallback(() => {
+    void (async () => {
+      try {
+        const prepared = await prepareClassroomAlarmAudio();
+        if (prepared.status !== "ready") {
+          setErrorMessage("Your browser is still blocking alarm audio. Interact with the page, then try again.");
+          return;
+        }
+        const result = await replayBlockedClassroomAlarmJobs(
+          classroomTimeClaimantIdRef.current,
+          Date.now(),
+          (jobs) => deliverClassroomAlarmBatch(jobs, false),
+        );
+        if (result.deliveryResult === "acknowledged") {
+          setClassroomTimeAlarmNotice((current) => current ? { ...current, blocked: false } : current);
+        }
+        if (result.persistenceStatus === "rolled-back" || result.persistenceStatus === "conflicted") {
+          setErrorMessage("The alarm result could not be saved on this device.");
+        }
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
+  }, [deliverClassroomAlarmBatch]);
+
+  const dismissClassroomAlarmNotice = useCallback(() => {
+    const notice = classroomTimeAlarmNoticeRef.current;
+    if (!classroomTimeAlarmNoticeCanDismiss(notice)) return;
+    void (async () => {
+      try {
+        if (notice.blocked) {
+          const noticeIds = new Set(notice.jobIds);
+          const blockedJobs = readClassroomAlarmRegistry().jobs.filter((job) => (
+            noticeIds.has(job.id) && job.deliveryState === "blocked"
+          ));
+          if (blockedJobs.length) {
+            const acknowledged = await acknowledgeBlockedClassroomAlarmJobs(
+              blockedJobs,
+              Date.now(),
+            );
+            if (acknowledged.status !== "persisted") {
+              throw new Error("The dismissed alarm could not be acknowledged on this device.");
+            }
+          }
+        }
+        setClassroomTimeAlarmNotice((current) => current === notice ? null : current);
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
+  }, []);
+
+  const runClassroomTimeScheduler = useCallback(async (now: number) => {
+    if (classroomTimeSchedulerRunningRef.current) return;
+    classroomTimeSchedulerRunningRef.current = true;
+    let stagedSchedulerReceipt: ClassroomAlarmTransactionReceiptV1 | null = null;
+    if (classroomTimeOverlayNeedsTicksRef.current) setClassroomTimeNowMs(now);
+    try {
+      const alarmResult = await claimAndMarkDueClassroomAlarmJobs(
+        classroomTimeClaimantIdRef.current,
+        now,
+        (jobs) => deliverClassroomAlarmBatch(jobs, true),
+      );
+      if (
+        alarmResult.persistenceStatus === "rolled-back"
+        || alarmResult.persistenceStatus === "conflicted"
+      ) setErrorMessage("A completed classroom alarm could not be saved on this device.");
+      if (alarmResult.deliveryResult === "audio-blocked") {
+        const deliveredIds = new Set(alarmResult.jobs.map((job) => job.id));
+        const blockedJobs = readClassroomAlarmRegistry().jobs.filter((job) => (
+          deliveredIds.has(job.id) && job.deliveryState === "blocked"
+        ));
+        setClassroomTimeAlarmNotice((current) => {
+          if (!current || !current.jobIds.some((jobId) => deliveredIds.has(jobId))) return current;
+          const currentIds = new Set(current.jobIds);
+          const settledJobs = blockedJobs.filter((job) => currentIds.has(job.id));
+          return {
+            jobs: settledJobs.length ? settledJobs : current.jobs,
+            jobIds: settledJobs.length ? settledJobs.map((job) => job.id) : current.jobIds,
+            message: settledJobs.length ? classroomAlarmNoticeMessage(settledJobs) : current.message,
+            blocked: true,
+            deliveryPending: false,
+          };
+        });
+      } else if (alarmResult.deliveryResult === "acknowledged") {
+        const deliveredIds = new Set(alarmResult.jobs.map((job) => job.id));
+        setClassroomTimeAlarmNotice((current) => (
+          current?.jobIds.some((jobId) => deliveredIds.has(jobId))
+            ? { ...current, blocked: false, deliveryPending: false }
+            : current
+        ));
+      }
+
+      const currentProject = projectRef.current;
+      const schedulerIndex = classroomTimeSchedulerIndexRef.current;
+      if (
+        !currentProject
+        || schedulerIndex.projectId !== currentProject.id
+        || schedulerIndex.widgetCount === 0
+      ) return;
+      if (
+        !api
+        || switchingSceneRef.current
+        || nativeImageExportOpenRef.current
+        || classroomTimePointerActiveRef.current
+        || classroomTimeGestureInProgress(api.getAppState())
+      ) return;
+
+      const activeSceneId = hydratedSceneIdRef.current;
+      let nextProject = currentProject;
+      let projectChanged = false;
+      let activeUpdate: {
+        elements: readonly ExcalidrawElement[];
+        addedFiles: readonly BinaryFileData[];
+        orphanedFileIds: readonly FileId[];
+      } | null = null;
+      const autoStartDescriptorsByIdentity = new Map<string, ClassroomTimeAlarmDescriptor>();
+
+      const transitionSceneIds = [...schedulerIndex.scenes.values()]
+        .filter((entry) => (
+          entry.nextTransitionAtMs !== null
+          && entry.nextTransitionAtMs <= now
+        ))
+        .map((entry) => entry.sceneId);
+      for (const sceneId of transitionSceneIds) {
+        const scene = currentProject.scenes[sceneId];
+        if (!scene) continue;
+        const isActive = scene.id === activeSceneId;
+        const sourceElements = isActive
+          ? api.getSceneElementsIncludingDeleted()
+          : scene.elements as unknown as readonly ExcalidrawElement[];
+        const previousAlarmDescriptors = activeClassroomTimeAlarmDescriptors(
+          currentProject.id,
+          sourceElements,
+        );
+        let runtimeChanged = false;
+        const advancedElements = sourceElements.map((element) => {
+          if (element.isDeleted) return element;
+          const metadata = classroomTimeWidgetMetadata(element);
+          if (!metadata) return element;
+          const advanced = advanceExpiredClassroomTimeWidget(metadata, now);
+          if (advanced.metadata === metadata || serializedValuesEqual(advanced.metadata, metadata)) return element;
+          runtimeChanged = true;
+          return replaceClassroomTimeMetadata(element, advanced.metadata);
+        });
+        if (!runtimeChanged) continue;
+        const sourceFiles = isActive ? api.getFiles() : scene.files as unknown as BinaryFiles;
+        const renderContext = classroomTimeRenderContext(
+          advancedElements,
+          nextProject.projectCalendar,
+          isActive
+            ? deviceClassroomCalendarRef.current
+            : EMPTY_DEVICE_CLASSROOM_CALENDAR,
+          now,
+          editorThemeRef.current,
+        );
+        const reconciled = reconcileClassroomTimeWidgets(advancedElements, {
+          now,
+          files: sourceFiles,
+          createId: createLocalId,
+          renderContext,
+        });
+        const nextAlarmDescriptors = activeClassroomTimeAlarmDescriptors(
+          currentProject.id,
+          reconciled.elements,
+        );
+        for (const descriptor of classroomTimeAlarmDescriptorsNeedingTrustedStart(
+          previousAlarmDescriptors,
+          nextAlarmDescriptors,
+        )) {
+          const key = classroomAlarmIdentityKey(descriptor);
+          const existing = autoStartDescriptorsByIdentity.get(key);
+          if (existing && !classroomAlarmJobMatchesDescriptor(
+            classroomAlarmJobFromDescriptor(existing),
+            descriptor,
+          )) {
+            throw new Error("A classroom alarm identity was advanced inconsistently across project scenes.");
+          }
+          autoStartDescriptorsByIdentity.set(key, descriptor);
+        }
+        const files = mergeClassroomTimeFiles(
+          sourceFiles,
+          reconciled.addedFiles,
+          reconciled.orphanedFileIds,
+        );
+        const pendingFiles = isActive
+          ? persistentFilesForScene(scene, files, transientDarkPdfFileIdsRef.current)
+          : files;
+        const updatedProject = projectWithPendingScene(nextProject, {
+          sceneId: scene.id,
+          elements: reconciled.elements,
+          appState: isActive ? api.getAppState() : scene.appState as unknown as AppState,
+          files: pendingFiles,
+          preserveDeleted: true,
+        });
+        if (!updatedProject) continue;
+        nextProject = updatedProject;
+        projectChanged = true;
+        if (isActive) {
+          activeUpdate = {
+            elements: reconciled.elements,
+            addedFiles: reconciled.addedFiles,
+            orphanedFileIds: reconciled.orphanedFileIds,
+          };
+        }
+      }
+
+      if (projectChanged) {
+        assertProjectFitsContentBudget(nextProject, pdfBytesRef.current);
+        const autoStartDescriptors = [...autoStartDescriptorsByIdentity.values()];
+        if (autoStartDescriptors.length) {
+          const registryBeforeReservation = readClassroomAlarmRegistry();
+          const blockedAutoStarts = autoStartDescriptors.filter((descriptor) => (
+            registryBeforeReservation.jobs.some((job) => (
+              classroomAlarmIdentityKey(job) === classroomAlarmIdentityKey(descriptor)
+              && (job.deliveryState === "blocked" || job.deliveryState === "delivering")
+            ))
+          ));
+          const blockedAutoStartKeys = new Set(
+            blockedAutoStarts.map(classroomAlarmIdentityKey),
+          );
+          const reservableAutoStarts = autoStartDescriptors.filter((descriptor) => (
+            !blockedAutoStartKeys.has(classroomAlarmIdentityKey(descriptor))
+          ));
+          const requestedJobs = reservableAutoStarts.map(classroomAlarmJobFromDescriptor);
+          let reservationFailure: unknown = null;
+          if (requestedJobs.length) {
+            const expectedFence: ClassroomTimeSchedulerPublicationFence = {
+              project: currentProject,
+              activeSceneId,
+              hydrationGeneration: sceneHydrationGenerationRef.current,
+              operationGeneration: classroomTimeAsyncOperationGenerationRef.current,
+              elementFingerprint: activeSceneId
+                ? classroomTimeElementFingerprint(api.getSceneElementsIncludingDeleted())
+                : null,
+              fileFingerprint: activeSceneId
+                ? classroomTimeFileFingerprint(api.getFiles())
+                : null,
+            };
+            try {
+              const reservation = await stageSchedulerClassroomAlarmJobs(requestedJobs, now);
+              if (reservation.status === "persisted" && reservation.receipt) {
+                stagedSchedulerReceipt = reservation.receipt;
+                trackPreparedClassroomAlarmReceipts([stagedSchedulerReceipt]);
+              }
+              else reservationFailure = new Error(`alarm storage returned ${reservation.status}`);
+            } catch (error) {
+              reservationFailure = error;
+            }
+            const currentActiveSceneId = hydratedSceneIdRef.current;
+            const publicationIsCurrent = classroomTimeSchedulerPublicationFenceMatches(
+              expectedFence,
+              {
+                project: projectRef.current,
+                activeSceneId: currentActiveSceneId,
+                hydrationGeneration: sceneHydrationGenerationRef.current,
+                operationGeneration: classroomTimeAsyncOperationGenerationRef.current,
+                elementFingerprint: currentActiveSceneId
+                  ? classroomTimeElementFingerprint(api.getSceneElementsIncludingDeleted())
+                  : null,
+                fileFingerprint: currentActiveSceneId
+                  ? classroomTimeFileFingerprint(api.getFiles())
+                  : null,
+              },
+              switchingSceneRef.current
+                || nativeImageExportOpenRef.current
+                || classroomTimePointerActiveRef.current
+                || classroomTimeGestureInProgress(api.getAppState()),
+            );
+            if (!publicationIsCurrent) {
+              if (
+                stagedSchedulerReceipt
+                && !await rollbackPreparedClassroomAlarmReceipts([stagedSchedulerReceipt])
+              ) {
+                pausePublishedClassroomAlarmIdentities(
+                  classroomAlarmIdentitiesForTransactionReceipts([stagedSchedulerReceipt]),
+                );
+                setErrorMessage("A superseded Pomodoro alarm could not be rolled back durably. Reload this board before relying on that timer.");
+              }
+              return;
+            }
+          }
+          let phasePaused = false;
+          if (reservableAutoStarts.length && !stagedSchedulerReceipt) {
+            nextProject = finalizeClassroomTimeSchedulerAlarmReservation(
+              nextProject,
+              reservableAutoStarts,
+              null,
+              now,
+            ).project;
+            phasePaused = true;
+            const detail = reservationFailure instanceof Error
+              ? ` ${reservationFailure.message}`
+              : "";
+            setErrorMessage(`The next Pomodoro phase was paused because its alarm could not be reserved durably.${detail}`);
+          }
+          if (blockedAutoStarts.length) {
+            const blocked = finalizeClassroomTimeSchedulerAlarmReservation(
+              nextProject,
+              blockedAutoStarts,
+              registryBeforeReservation,
+              now,
+            );
+            nextProject = blocked.project;
+            phasePaused = true;
+          }
+          if (phasePaused) {
+            assertProjectFitsContentBudget(nextProject, pdfBytesRef.current);
+            if (activeUpdate && activeSceneId) {
+              const activeScene = nextProject.scenes[activeSceneId];
+              if (activeScene) {
+                const materialized = materializeClassroomTimeSceneForDisplay(
+                  activeScene.elements as unknown as readonly ExcalidrawElement[],
+                  activeScene.files as unknown as BinaryFiles,
+                  nextProject.projectCalendar,
+                  deviceClassroomCalendarRef.current,
+                  now,
+                  createLocalId,
+                  editorThemeRef.current,
+                );
+                const liveFiles = api.getFiles();
+                activeUpdate = {
+                  elements: materialized.elements,
+                  addedFiles: Object.values(materialized.files).filter((file) => (
+                    !serializedValuesEqual(liveFiles[file.id], file)
+                  )),
+                  orphanedFileIds: [...new Set([
+                    ...activeUpdate.orphanedFileIds,
+                    ...materialized.orphanedFileIds,
+                  ])],
+                };
+              }
+            }
+          }
+        }
+        if (activeUpdate) {
+          if (activeUpdate.addedFiles.length) api.addFiles([...activeUpdate.addedFiles]);
+          for (const fileId of activeUpdate.orphanedFileIds) delete api.getFiles()[fileId];
+          classroomTimeTickFenceRef.current.push({
+            sceneId: activeSceneId ?? currentProject.activeSceneId,
+            elementFingerprint: classroomTimeElementFingerprint(activeUpdate.elements),
+            fileFingerprint: classroomTimeFileFingerprint(api.getFiles()),
+          });
+          if (classroomTimeTickFenceRef.current.length > 8) classroomTimeTickFenceRef.current.shift();
+          api.updateScene({
+            elements: activeUpdate.elements,
+            captureUpdate: CaptureUpdateAction.NEVER,
+          });
+        }
+        stageProjectMutationForAutosave(nextProject);
+        window.requestAnimationFrame(() => flushAutosave(true));
+        if (
+          stagedSchedulerReceipt
+          && !await activatePublishedClassroomAlarmReceipts([stagedSchedulerReceipt])
+        ) {
+          setErrorMessage("The next Pomodoro phase was paused because its staged alarm could not be activated durably.");
+        }
+        stagedSchedulerReceipt = null;
+        return;
+      }
+
+      if (!activeSceneId || !schedulerIndex.scenes.has(activeSceneId)) return;
+      const liveElements = api.getSceneElementsIncludingDeleted();
+      const renderContext = classroomTimeRenderContext(
+        liveElements,
+        currentProject.projectCalendar,
+        deviceClassroomCalendarRef.current,
+        now,
+        editorThemeRef.current,
+      );
+      const ticked = tickClassroomTimeWidgets(liveElements, now, renderContext);
+      if (ticked === liveElements) return;
+      const files = api.getFiles();
+      classroomTimeTickFenceRef.current.push({
+        sceneId: activeSceneId,
+        elementFingerprint: classroomTimeElementFingerprint(ticked),
+        fileFingerprint: classroomTimeFileFingerprint(files),
+        expectedDisplayContentFingerprint: classroomTimeDisplayTickContentFingerprint(ticked),
+      });
+      if (classroomTimeTickFenceRef.current.length > 8) classroomTimeTickFenceRef.current.shift();
+      api.updateScene({ elements: ticked, captureUpdate: CaptureUpdateAction.NEVER });
+    } catch (error) {
+      if (
+        stagedSchedulerReceipt
+        && classroomTimeStagedTransactionIdsRef.current.has(
+          stagedSchedulerReceipt.transactionId,
+        )
+      ) {
+        const identities = classroomAlarmIdentitiesForTransactionReceipts([
+          stagedSchedulerReceipt,
+        ]);
+        if (!await rollbackPreparedClassroomAlarmReceipts([stagedSchedulerReceipt])) {
+          pausePublishedClassroomAlarmIdentities(identities);
+        }
+      }
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      classroomTimeSchedulerRunningRef.current = false;
+    }
+  }, [
+    activatePublishedClassroomAlarmReceipts,
+    api,
+    deliverClassroomAlarmBatch,
+    flushAutosave,
+    pausePublishedClassroomAlarmIdentities,
+    rollbackPreparedClassroomAlarmReceipts,
+    stageProjectMutationForAutosave,
+    trackPreparedClassroomAlarmReceipts,
+  ]);
+
+  useEffect(() => {
+    let timeoutId: number | null = null;
+    let cancelled = false;
+    const schedule = () => {
+      if (cancelled) return;
+      const delay = Math.max(20, 1_000 - Date.now() % 1_000);
+      timeoutId = window.setTimeout(() => {
+        void runClassroomTimeScheduler(Date.now()).finally(schedule);
+      }, delay);
+    };
+    const catchUp = () => {
+      if (document.visibilityState !== "hidden") void runClassroomTimeScheduler(Date.now());
+    };
+    schedule();
+    document.addEventListener("visibilitychange", catchUp);
+    window.addEventListener("focus", catchUp);
+    return () => {
+      cancelled = true;
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+      document.removeEventListener("visibilitychange", catchUp);
+      window.removeEventListener("focus", catchUp);
+    };
+  }, [runClassroomTimeScheduler]);
+
+  useEffect(() => {
+    const releasePointer = () => { classroomTimePointerActiveRef.current = false; };
+    window.addEventListener("pointerup", releasePointer, true);
+    window.addEventListener("pointercancel", releasePointer, true);
+    return () => {
+      window.removeEventListener("pointerup", releasePointer, true);
+      window.removeEventListener("pointercancel", releasePointer, true);
+      if (classroomTimeClipboardRestoreTimerRef.current !== null) {
+        window.clearTimeout(classroomTimeClipboardRestoreTimerRef.current);
+      }
+      classroomTimeTickFenceRef.current = [];
+      classroomTimeAlarmAuthorityFenceRef.current = [];
+    };
   }, []);
 
   const openGeoGon = useCallback(() => {
@@ -5707,8 +9446,16 @@ export default function App() {
   }, [api]);
 
   const handleEditorDropCapture = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
-    const hasScreenshotDragType = Array.from(event.dataTransfer.types).includes(SCREENSHOT_DRAG_MIME);
+    const dataTransferTypes = Array.from(event.dataTransfer.types);
+    const hasScreenshotDragType = dataTransferTypes.includes(SCREENSHOT_DRAG_MIME);
     const file = event.dataTransfer.files?.[0];
+    const allowNativeLibraryDrop = shouldAllowNativePersonalLibraryCanvasDrop(
+      nativePersonalLibraryDragRef.current,
+      dataTransferTypes,
+      !!file,
+    );
+    nativePersonalLibraryDragRef.current = false;
+    if (allowNativeLibraryDrop) return;
     if (hasScreenshotDragType) {
       const screenshotId = event.dataTransfer.getData(SCREENSHOT_DRAG_MIME);
       const screenshot = screenshotsRef.current.find((item) => item.id === screenshotId);
@@ -5727,7 +9474,7 @@ export default function App() {
     // this capture boundary authoritative so Excalidraw cannot inspect a
     // scene-bearing image before the wrapper preflights it.
     if (!file) {
-      const libraryPayload = event.dataTransfer.getData("application/vnd.excalidrawlib+json");
+      const libraryPayload = event.dataTransfer.getData(EXCALIDRAW_LIBRARY_MIME);
       if (!libraryPayload) return;
       event.preventDefault();
       event.stopPropagation();
@@ -5735,7 +9482,7 @@ export default function App() {
       const libraryFile = new File(
         [libraryPayload],
         "dropped-library.excalidrawlib",
-        { type: "application/vnd.excalidrawlib+json" },
+        { type: EXCALIDRAW_LIBRARY_MIME },
       );
       void importDroppedLibrary(libraryFile);
       return;
@@ -5753,7 +9500,7 @@ export default function App() {
 
     const name = file.name.toLowerCase();
     const isLibrary = name.endsWith(".excalidrawlib")
-      || file.type === "application/vnd.excalidrawlib+json";
+      || file.type === EXCALIDRAW_LIBRARY_MIME;
     const isProjectFile = name.endsWith(".patterdraw")
       || name.endsWith(".canvasclassroom")
       || name.endsWith(".excalidraw")
@@ -5793,6 +9540,17 @@ export default function App() {
       api?.setToast({ message: error instanceof Error ? error.message : String(error) });
     });
   }, [api, handleFile, importDroppedLibrary, insertDroppedLocalImage, insertScreenshot]);
+
+  const handleEditorDragStartCapture = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    const target = event.target instanceof Element ? event.target : null;
+    nativePersonalLibraryDragRef.current = !!target?.closest(
+      ".layer-ui__library .library-unit__dragger",
+    );
+  }, []);
+
+  const handleEditorDragEndCapture = useCallback(() => {
+    nativePersonalLibraryDragRef.current = false;
+  }, []);
 
   const screenshotIdFromTransfer = useCallback((transfer: DataTransfer): string | null => {
     const types = Array.from(transfer.types);
@@ -6255,13 +10013,16 @@ export default function App() {
   const confirmPdfAnnotationClear = useCallback((scope: PdfAnnotationClearScope) => {
     const pending = pendingPdfAnnotationClear;
     if (!pending) return;
-    try {
+    void (async () => {
+      try {
       abortSceneOperations(true);
       cancelFileOpenOperations(true);
       const currentProject = commitLiveScenePersistence(pending.sceneId, true);
       if (!currentProject || currentProject.id !== pending.projectId) {
         throw new Error("The PDF document changed before annotations could be cleared.");
       }
+      const operationFence = beginClassroomTimeAsyncOperation();
+      if (!operationFence) return;
       const freshSummaries = pdfAnnotationScopeSummaries(currentProject, pending.sceneId);
       if (!pdfAnnotationSummaryMatches(pending.summaries[scope], freshSummaries[scope])) {
         const scene = currentProject.scenes[pending.sceneId];
@@ -6282,6 +10043,26 @@ export default function App() {
         now,
         updatedAt: nowIso(),
       });
+      const cancelledAlarmIdentities = removedClassroomTimeAlarmIdentities(
+        currentProject,
+        cleared.project,
+      );
+      let cancellationReceipt: ClassroomAlarmCancellationReceiptV1 | null = null;
+      if (cancelledAlarmIdentities.length) {
+        const cancellation = await cancelClassroomAlarmIdentitiesWithReceipt(
+          cancelledAlarmIdentities,
+          now,
+        );
+        if (cancellation.status !== "persisted" || !cancellation.receipt) {
+          throw new Error("Annotations could not be cleared because their alarms could not be cancelled durably.");
+        }
+        cancellationReceipt = cancellation.receipt;
+      }
+      if (!isCurrentClassroomTimeAsyncOperation(operationFence)) {
+        if (cancelledAlarmIdentities.length) pauseUnauthorizedLiveClassroomTimeWidgets();
+        setErrorMessage("Annotations changed while alarm cancellation was pending. Nothing was cleared; review the page and try again.");
+        return;
+      }
       // Replace an older reversible action only after every validation and
       // the new atomic clear have succeeded. A stale confirmation or failed
       // clear attempt must not consume the still-valid prior Undo.
@@ -6298,6 +10079,8 @@ export default function App() {
         kind: "clear-annotations",
         token,
         transaction: cleared.transaction,
+        cancelledAlarmIdentities,
+        cancellationReceipt,
       };
       pdfUndoTimerRef.current = window.setTimeout(() => {
         if (pendingPdfUndoRef.current?.token === token) {
@@ -6314,16 +10097,20 @@ export default function App() {
       setPendingPdfAnnotationClear(null);
       setProject(cleared.project);
       if (activeSceneWasCleared && activeScene) loadSceneIntoEditor(activeScene);
-    } catch (error) {
-      setPendingPdfAnnotationClear(null);
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-    }
+      } catch (error) {
+        setPendingPdfAnnotationClear(null);
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
   }, [
     abortSceneOperations,
+    beginClassroomTimeAsyncOperation,
     cancelFileOpenOperations,
     commitLiveScenePersistence,
     finalizePendingPdfUndo,
+    isCurrentClassroomTimeAsyncOperation,
     loadSceneIntoEditor,
+    pauseUnauthorizedLiveClassroomTimeWidgets,
     pendingPdfAnnotationClear,
   ]);
 
@@ -6335,7 +10122,34 @@ export default function App() {
       finalizePendingPdfUndo();
       return;
     }
-    try {
+    void (async () => {
+      let undoPublished = false;
+      let stagedUndoAlarmReceipt: ClassroomAlarmTransactionReceiptV1 | null = null;
+      const rollbackStagedUndoAlarm = async (
+        receipt: ClassroomAlarmTransactionReceiptV1,
+      ) => {
+        try {
+          return await rollbackPreparedClassroomAlarmReceipts(
+            [receipt],
+            (_transactionReceipt, refreshedCancellationReceipt) => {
+              if (
+                pendingPdfUndoRef.current === pending
+                && Date.now() < pending.transaction.expiresAt
+              ) {
+                pendingPdfUndoRef.current = {
+                  ...pending,
+                  cancellationReceipt: refreshedCancellationReceipt,
+                };
+              }
+            },
+          );
+        } finally {
+          if (stagedUndoAlarmReceipt?.transactionId === receipt.transactionId) {
+            stagedUndoAlarmReceipt = null;
+          }
+        }
+      };
+      try {
       abortSceneOperations(true);
       cancelFileOpenOperations(true);
       const activeSceneId = activeSceneIdRef.current
@@ -6343,6 +10157,13 @@ export default function App() {
         || "";
       const currentProject = commitLiveScenePersistence(activeSceneId, true);
       if (!currentProject) throw new Error("The current project is unavailable.");
+      const operationFence = beginClassroomTimeAsyncOperation();
+      if (!operationFence) return;
+      const undoIsCurrent = () => (
+        pendingPdfUndoRef.current === pending
+        && Date.now() < pending.transaction.expiresAt
+        && isCurrentClassroomTimeAsyncOperation(operationFence)
+      );
       if (pending.kind === "delete-page") {
         const restored = undoPdfPageDelete(
           currentProject,
@@ -6356,24 +10177,64 @@ export default function App() {
           );
           return;
         }
-        const activeSceneWillChange = restored.project.activeSceneId !== currentProject.activeSceneId;
+        const cancelledAlarmJobs = pending.cancellationReceipt?.cancelledJobs ?? [];
+        if (cancelledAlarmJobs.length && pending.cancellationReceipt) {
+          const alarmRestore = await stageCancelledClassroomAlarmReceipt(
+            pending.cancellationReceipt,
+            now,
+          );
+          if (alarmRestore.status !== "persisted" || !alarmRestore.receipt) {
+            finalizePendingPdfUndo();
+            setErrorMessage("The deleted page could not be restored because its alarms could not be restored durably.");
+            return;
+          }
+          stagedUndoAlarmReceipt = alarmRestore.receipt;
+          trackPreparedClassroomAlarmReceipts([stagedUndoAlarmReceipt]);
+        }
+        if (!undoIsCurrent()) {
+          if (stagedUndoAlarmReceipt) {
+            if (!await rollbackStagedUndoAlarm(stagedUndoAlarmReceipt)) {
+              finalizePendingPdfUndo();
+              setErrorMessage("The deleted-page Undo expired because its staged alarm could not be rolled back durably.");
+            }
+          }
+          return;
+        }
+        const restoredJobKeys = new Set(cancelledAlarmJobs.map((job) => (
+          `${job.sourceProjectId}:${job.ownerId}:${job.target}`
+        )));
+        const restoredProject = pauseClassroomAlarmIdentitiesInProject(
+          restored.project,
+          pending.cancelledAlarmIdentities.filter((identity) => !restoredJobKeys.has(
+            `${identity.sourceProjectId}:${identity.ownerId}:${identity.target}`,
+          )),
+          now,
+        );
+        const activeSceneWillChange = restoredProject.activeSceneId !== currentProject.activeSceneId;
         finalizePendingPdfUndo();
         setErrorMessage(null);
         pendingProjectSearchTargetRef.current = null;
         if (activeSceneWillChange) beginSceneHydration();
         pdfBytesRef.current = restored.pdfBytes;
-        projectRef.current = restored.project;
-        activeSceneIdRef.current = restored.project.activeSceneId;
+        projectRef.current = restoredProject;
+        activeSceneIdRef.current = restoredProject.activeSceneId;
         setPdfBytes(restored.pdfBytes);
-        setProject(restored.project);
+        setProject(restoredProject);
         setWorkspaceMode("pdf");
+        undoPublished = true;
+        if (
+          stagedUndoAlarmReceipt
+          && !await activatePublishedClassroomAlarmReceipts([stagedUndoAlarmReceipt])
+        ) {
+          setErrorMessage("The page was restored, but its classroom timers were paused because alarm activation failed.");
+        }
+        stagedUndoAlarmReceipt = null;
         return;
       }
       const restored = undoPdfAnnotationClear(currentProject, pending.transaction, {
         now,
         updatedAt: nowIso(),
       });
-      const activeScene = restored.project.scenes[activeSceneId];
       const activeSceneWasRestored = restored.affectedPageIds.includes(activeSceneId);
 
       if (!pdfAnnotationUndoFitsContentBudget(restored.project, pdfBytesRef.current)) {
@@ -6383,24 +10244,78 @@ export default function App() {
         return;
       }
 
+      const cancelledAlarmJobs = pending.cancellationReceipt?.cancelledJobs ?? [];
+      if (cancelledAlarmJobs.length && pending.cancellationReceipt) {
+        const alarmRestore = await stageCancelledClassroomAlarmReceipt(
+          pending.cancellationReceipt,
+          now,
+        );
+        if (alarmRestore.status !== "persisted" || !alarmRestore.receipt) {
+          finalizePendingPdfUndo();
+          setErrorMessage("Annotations could not be restored because their alarms could not be restored durably.");
+          return;
+        }
+        stagedUndoAlarmReceipt = alarmRestore.receipt;
+        trackPreparedClassroomAlarmReceipts([stagedUndoAlarmReceipt]);
+      }
+      if (!undoIsCurrent()) {
+        if (stagedUndoAlarmReceipt) {
+          if (!await rollbackStagedUndoAlarm(stagedUndoAlarmReceipt)) {
+            finalizePendingPdfUndo();
+            setErrorMessage("Annotation Undo expired because its staged alarm could not be rolled back durably.");
+          }
+        }
+        return;
+      }
+      const restoredJobKeys = new Set(cancelledAlarmJobs.map((job) => (
+        `${job.sourceProjectId}:${job.ownerId}:${job.target}`
+      )));
+      const restoredProject = pauseClassroomAlarmIdentitiesInProject(
+        restored.project,
+        pending.cancelledAlarmIdentities.filter((identity) => !restoredJobKeys.has(
+          `${identity.sourceProjectId}:${identity.ownerId}:${identity.target}`,
+        )),
+        now,
+      );
+      const activeScene = restoredProject.scenes[activeSceneId];
+
       finalizePendingPdfUndo();
       setErrorMessage(null);
       pendingProjectSearchTargetRef.current = null;
-      projectRef.current = restored.project;
-      activeSceneIdRef.current = restored.project.activeSceneId;
-      setProject(restored.project);
+      projectRef.current = restoredProject;
+      activeSceneIdRef.current = restoredProject.activeSceneId;
+      setProject(restoredProject);
       if (activeSceneWasRestored && activeScene) loadSceneIntoEditor(activeScene);
-    } catch (error) {
-      finalizePendingPdfUndo();
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-    }
+      undoPublished = true;
+      if (
+        stagedUndoAlarmReceipt
+        && !await activatePublishedClassroomAlarmReceipts([stagedUndoAlarmReceipt])
+      ) {
+        setErrorMessage("Annotations were restored, but their classroom timers were paused because alarm activation failed.");
+      }
+      stagedUndoAlarmReceipt = null;
+      } catch (error) {
+        if (!undoPublished && stagedUndoAlarmReceipt) {
+          if (!await rollbackStagedUndoAlarm(stagedUndoAlarmReceipt)) {
+            finalizePendingPdfUndo();
+          }
+        }
+        if (undoPublished && pendingPdfUndoRef.current === pending) finalizePendingPdfUndo();
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
   }, [
     abortSceneOperations,
+    activatePublishedClassroomAlarmReceipts,
+    beginClassroomTimeAsyncOperation,
     beginSceneHydration,
     cancelFileOpenOperations,
     commitLiveScenePersistence,
     finalizePendingPdfUndo,
+    isCurrentClassroomTimeAsyncOperation,
     loadSceneIntoEditor,
+    rollbackPreparedClassroomAlarmReceipts,
+    trackPreparedClassroomAlarmReceipts,
   ]);
 
   useEffect(() => {
@@ -6506,19 +10421,42 @@ export default function App() {
     if (!window.confirm(
       `Delete output page ${initialPageIndex + 1}? This removes the page and its annotations from the project. You can undo for ten seconds.`,
     )) return;
-    try {
+    void (async () => {
+      try {
       abortSceneOperations(true);
       cancelFileOpenOperations(true);
       // Capture the newest live stroke and retained tombstones before the
       // scene leaves the project map and becomes the memory-only undo record.
       const currentProject = commitLiveScenePersistence(sceneId, true);
       if (!currentProject) throw new Error("The current project is unavailable.");
+      const operationFence = beginClassroomTimeAsyncOperation();
+      if (!operationFence) return;
       const deleted = deletePdfPageReversibly(
         currentProject,
         pdfBytesRef.current,
         sceneId,
         { updatedAt: nowIso() },
       );
+      const cancelledAlarmIdentities = removedClassroomTimeAlarmIdentities(
+        currentProject,
+        deleted.project,
+      );
+      let cancellationReceipt: ClassroomAlarmCancellationReceiptV1 | null = null;
+      if (cancelledAlarmIdentities.length) {
+        const cancellation = await cancelClassroomAlarmIdentitiesWithReceipt(
+          cancelledAlarmIdentities,
+          Date.now(),
+        );
+        if (cancellation.status !== "persisted" || !cancellation.receipt) {
+          throw new Error("The page could not be deleted because its alarms could not be cancelled durably.");
+        }
+        cancellationReceipt = cancellation.receipt;
+      }
+      if (!isCurrentClassroomTimeAsyncOperation(operationFence)) {
+        if (cancelledAlarmIdentities.length) pauseUnauthorizedLiveClassroomTimeWidgets();
+        setErrorMessage("The page changed while alarm cancellation was pending. Nothing was deleted; review the page and try again.");
+        return;
+      }
       // Failed validation or a cancelled confirmation must not consume the
       // previous Undo. Replace it only after the deletion candidate exists.
       finalizePendingPdfUndo();
@@ -6527,6 +10465,8 @@ export default function App() {
         kind: "delete-page",
         token,
         transaction: deleted.transaction,
+        cancelledAlarmIdentities,
+        cancellationReceipt,
       };
       pdfUndoTimerRef.current = window.setTimeout(() => {
         if (pendingPdfUndoRef.current?.token === token) finalizePendingPdfUndo();
@@ -6550,15 +10490,19 @@ export default function App() {
       setProject(deleted.project);
       setWorkspaceMode(reconcilePdfPageOrder(deleted.project).length ? "pdf" : "board");
       setErrorMessage(null);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-    }
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
   }, [
     abortSceneOperations,
     beginSceneHydration,
+    beginClassroomTimeAsyncOperation,
     cancelFileOpenOperations,
     commitLiveScenePersistence,
     finalizePendingPdfUndo,
+    isCurrentClassroomTimeAsyncOperation,
+    pauseUnauthorizedLiveClassroomTimeWidgets,
   ]);
 
   const addPdfPage = useCallback(async () => {
@@ -6983,6 +10927,174 @@ export default function App() {
     return () => document.removeEventListener("paste", handleDocumentPasteCapture, true);
   }, [api, insertDroppedLocalImage]);
 
+  const handleEditorCopyCapture = useCallback((event: ReactClipboardEvent<HTMLDivElement>) => {
+    if (!api || switchingSceneRef.current || !projectRef.current) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+    const appState = api.getAppState();
+    const visibleElements = api.getSceneElements();
+    const selectedOwners = new Set(visibleElements.flatMap((element) => {
+      if (!appState.selectedElementIds[element.id]) return [];
+      const ownerId = classroomTimeWidgetOwnerId(element);
+      return ownerId ? [ownerId] : [];
+    }));
+    if (!selectedOwners.size) return;
+    const prepared = attachProjectCalendarTransferCache(
+      visibleElements,
+      projectRef.current,
+      selectedOwners,
+    );
+    if (prepared === visibleElements) return;
+    const preparedById = new Map(prepared.map((element) => [element.id, element]));
+    const liveElements = api.getSceneElementsIncludingDeleted();
+    const nextElements = liveElements.map((element) => {
+      const ownerId = classroomTimeWidgetOwnerId(element);
+      return ownerId && selectedOwners.has(ownerId)
+        ? preparedById.get(element.id) ?? element
+        : element;
+    });
+    if (nextElements.every((element, index) => element === liveElements[index])) return;
+    const sceneId = activeSceneIdRef.current;
+    if (!sceneId) return;
+    classroomTimeTickFenceRef.current.push({
+      sceneId,
+      elementFingerprint: classroomTimeElementFingerprint(nextElements),
+      fileFingerprint: classroomTimeFileFingerprint(api.getFiles()),
+    });
+    if (classroomTimeTickFenceRef.current.length > 8) classroomTimeTickFenceRef.current.shift();
+    api.updateScene({ elements: nextElements, captureUpdate: CaptureUpdateAction.NEVER });
+    if (classroomTimeClipboardRestoreTimerRef.current !== null) {
+      window.clearTimeout(classroomTimeClipboardRestoreTimerRef.current);
+    }
+    classroomTimeClipboardRestoreTimerRef.current = window.setTimeout(() => {
+      classroomTimeClipboardRestoreTimerRef.current = null;
+      if (!api || switchingSceneRef.current || activeSceneIdRef.current !== sceneId) return;
+      const currentElements = api.getSceneElementsIncludingDeleted();
+      let changed = false;
+      const restored = currentElements.map((element) => {
+        const metadata = classroomTimeWidgetMetadata(element);
+        if (
+          !metadata
+          || (metadata.kind !== "calendar" && metadata.kind !== "dashboard")
+          || !selectedOwners.has(metadata.ownerId)
+          || metadata.calendar.transferCache === null
+        ) return element;
+        changed = true;
+        return replaceClassroomTimeMetadata(element, {
+          ...metadata,
+          calendar: { ...metadata.calendar, transferCache: null },
+        });
+      });
+      if (!changed) return;
+      classroomTimeTickFenceRef.current.push({
+        sceneId,
+        elementFingerprint: classroomTimeElementFingerprint(restored),
+        fileFingerprint: classroomTimeFileFingerprint(api.getFiles()),
+      });
+      if (classroomTimeTickFenceRef.current.length > 8) classroomTimeTickFenceRef.current.shift();
+      api.updateScene({ elements: restored, captureUpdate: CaptureUpdateAction.NEVER });
+    }, 0);
+  }, [api]);
+
+  const handleClassroomTimeDuplicate = useCallback<NonNullable<ExcalidrawProps["onDuplicate"]>>((
+    nextElements,
+    previousElements,
+  ) => {
+    const editorApi = api;
+    const currentProject = projectRef.current;
+    const sceneId = activeSceneIdRef.current;
+    if (!editorApi || !currentProject || !sceneId || switchingSceneRef.current) return;
+    try {
+      const now = Date.now();
+      const forked = forkNativeClassroomTimeWidgetDuplicates(
+        nextElements,
+        previousElements,
+        now,
+        createLocalId,
+      );
+      if (!Object.keys(forked.ownerIdMap).length) return;
+      const previousIds = new Set(previousElements.map((element) => element.id));
+      let projectCalendar = currentProject.projectCalendar
+        ?? createClassroomCalendarStoreV1("project");
+      let calendarChanged = false;
+      const importedElements = forked.elements.map((element) => {
+        if (previousIds.has(element.id)) return element;
+        const metadata = classroomTimeWidgetMetadata(element);
+        if (
+          !metadata
+          || (metadata.kind !== "calendar" && metadata.kind !== "dashboard")
+          || metadata.calendar.transferCache === null
+        ) return element;
+        const imported = importClassroomTimeCalendarTransfer(
+          metadata,
+          currentProject.id,
+          projectCalendar,
+        );
+        projectCalendar = imported.projectCalendar;
+        calendarChanged = calendarChanged || imported.calendarChanged;
+        return imported.metadata === metadata
+          ? element
+          : replaceClassroomTimeMetadata(element, imported.metadata);
+      });
+      const activeScene = currentProject.scenes[sceneId];
+      if (!activeScene) return [...previousElements];
+      const reconciled = reconcileClassroomTimeWidgets(importedElements, {
+        now,
+        files: editorApi.getFiles(),
+        createId: createLocalId,
+        renderContext: classroomTimeRenderContext(
+          importedElements,
+          projectCalendar,
+          deviceClassroomCalendarRef.current,
+          now,
+          editorThemeRef.current,
+        ),
+      });
+      const liveFiles = mergeClassroomTimeFiles(
+        editorApi.getFiles(),
+        reconciled.addedFiles,
+        reconciled.orphanedFileIds,
+      );
+      const candidateProject: ClassroomProject = {
+        ...currentProject,
+        projectCalendar,
+        scenes: {
+          ...currentProject.scenes,
+          [sceneId]: {
+            ...activeScene,
+            elements: reconciled.elements as unknown as SerializedScene["elements"],
+            files: persistentFilesForScene(
+              activeScene,
+              liveFiles,
+              transientDarkPdfFileIdsRef.current,
+            ) as unknown as SerializedScene["files"],
+          },
+        },
+      };
+      if (countProjectClassroomTimeWidgets(candidateProject) > MAX_CLASSROOM_TIME_WIDGETS) {
+        throw new Error(`A project can contain at most ${MAX_CLASSROOM_TIME_WIDGETS} classroom time widgets.`);
+      }
+      assertProjectFitsContentBudget(candidateProject, pdfBytesRef.current);
+      if (calendarChanged || !currentProject.projectCalendar) {
+        const updatedProject = {
+          ...currentProject,
+          projectCalendar,
+          updatedAt: nowIso(),
+        };
+        projectRef.current = updatedProject;
+        setProject((current) => current?.id === updatedProject.id
+          ? { ...current, projectCalendar, updatedAt: updatedProject.updatedAt }
+          : current);
+      }
+      for (const fileId of reconciled.orphanedFileIds) delete editorApi.getFiles()[fileId];
+      if (reconciled.addedFiles.length) editorApi.addFiles([...reconciled.addedFiles]);
+      return [...reconciled.elements];
+    } catch (error) {
+      editorApi.setToast({ message: error instanceof Error ? error.message : String(error) });
+      return [...previousElements];
+    }
+  }, [api]);
+
   const handlePaste = useCallback<NonNullable<ExcalidrawProps["onPaste"]>>(async (data, event) => {
     const clipboard = event?.clipboardData;
     try {
@@ -7055,8 +11167,138 @@ export default function App() {
     return true;
   }, [api]);
 
+  const addPreparedClassroomTimeLibraryItem = useCallback(async (
+    prepared: PreparedClassroomTimeLibraryItem,
+  ) => {
+    if (!api) return;
+    pendingClassroomTimeLibraryTransferRef.current = null;
+    try {
+      if (libraryItemIdsRef.current.has(prepared.item.id)) {
+        throw new Error("The Classroom Time library item ID collides with an existing item.");
+      }
+      const exactLibraryItemsRef: { current: LibraryItems | null } = { current: null };
+      await api.updateLibrary({
+        libraryItems: (current) => {
+          const next = sanitizeLibraryItems([
+            prepared.item,
+            ...sanitizeLibraryItems(current),
+          ] as LibraryItems);
+          exactLibraryItemsRef.current = next;
+          return next;
+        },
+        merge: false,
+      });
+      const exactLibraryItems = exactLibraryItemsRef.current;
+      if (!exactLibraryItems) {
+        throw new Error("The updated personal library could not be verified.");
+      }
+      // Excalidraw deliberately does not await onLibraryChange. Persist the
+      // exact functional-update result here so success means IndexedDB has
+      // completed, independent of callback ordering.
+      const persistence = saveLibraryItems(exactLibraryItems);
+      libraryPersistencePromiseRef.current = persistence;
+      await persistence;
+      libraryItemIdsRef.current = new Set(exactLibraryItems.map((item) => item.id));
+      showClassroomTimeConfirmationToast(
+        `${prepared.item.name || "Classroom Time widget"} added to Personal Library.`,
+      );
+    } catch (error) {
+      setErrorMessage(`Classroom Time widget could not be added to Personal Library: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [api, showClassroomTimeConfirmationToast]);
+
   const handleEditorClickCapture = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
     const target = event.target instanceof Element ? event.target : null;
+    const libraryAddTarget = target?.closest(
+      '.context-menu [data-testid="addToLibrary"], .layer-ui__library .library-unit__pulse, .layer-ui__library .library-unit__adder',
+    );
+    if (libraryAddTarget) {
+      const currentProject = projectRef.current;
+      if (api && currentProject) {
+        const liveElements = api.getSceneElements();
+        const selectedElementIds = api.getAppState().selectedElementIds;
+        let preparedLibraryItem: PreparedClassroomTimeLibraryItem | null = null;
+        const contextMenuAdd = !!libraryAddTarget.closest(".context-menu");
+        const cleanUpInterceptedLibraryUi = () => {
+          const appState = api.getAppState();
+          api.updateScene({
+            appState: {
+              contextMenu: null,
+              selectedElementIds: contextMenuAdd ? appState.selectedElementIds : {},
+              selectedGroupIds: contextMenuAdd ? appState.selectedGroupIds : {},
+              activeEmbeddable: contextMenuAdd ? appState.activeEmbeddable : null,
+            },
+            captureUpdate: CaptureUpdateAction.NEVER,
+          });
+        };
+        try {
+          preparedLibraryItem = prepareClassroomTimeLibraryItemForSelection(
+            liveElements,
+            api.getFiles(),
+            currentProject,
+            selectedElementIds,
+          );
+        } catch (error) {
+          event.preventDefault();
+          event.stopPropagation();
+          event.nativeEvent.stopImmediatePropagation();
+          cleanUpInterceptedLibraryUi();
+          setErrorMessage(error instanceof Error ? error.message : String(error));
+          return;
+        }
+        if (preparedLibraryItem) {
+          event.preventDefault();
+          event.stopPropagation();
+          event.nativeEvent.stopImmediatePropagation();
+          cleanUpInterceptedLibraryUi();
+          void addPreparedClassroomTimeLibraryItem(preparedLibraryItem);
+          return;
+        }
+        const selectedOwners = new Set(liveElements.flatMap((element) => {
+          if (!selectedElementIds[element.id]) return [];
+          const ownerId = classroomTimeWidgetOwnerId(element);
+          return ownerId ? [ownerId] : [];
+        }));
+        const prepared = attachProjectCalendarTransferCache(
+          liveElements,
+          currentProject,
+          selectedOwners,
+        );
+        const preparedById = new Map(prepared.map((element) => [element.id, element]));
+        const cacheByAnchorId = new Map<
+          string,
+          ClassroomTimeLibraryTransferIntent["cacheByAnchorId"] extends ReadonlyMap<string, infer Value>
+            ? Value
+            : never
+        >();
+        for (const element of liveElements) {
+          const metadata = classroomTimeWidgetMetadata(element);
+          if (
+            !metadata
+            || (metadata.kind !== "calendar" && metadata.kind !== "dashboard")
+            || !selectedOwners.has(metadata.ownerId)
+          ) continue;
+          const preparedMetadata = classroomTimeWidgetMetadata(preparedById.get(element.id) ?? element);
+          if (
+            !preparedMetadata
+            || (preparedMetadata.kind !== "calendar" && preparedMetadata.kind !== "dashboard")
+            || preparedMetadata.calendar.transferCache === null
+          ) continue;
+          cacheByAnchorId.set(element.id, {
+            ownerId: metadata.ownerId,
+            kind: metadata.kind,
+            transferCache: preparedMetadata.calendar.transferCache,
+          });
+        }
+        pendingClassroomTimeLibraryTransferRef.current = cacheByAnchorId.size
+          ? {
+              baselineItemIds: new Set(libraryItemIdsRef.current),
+              cacheByAnchorId,
+              expiresAt: Date.now() + 5_000,
+            }
+          : null;
+      }
+    }
     if (target?.closest('[data-testid="lib-dropdown--load"]')) {
       // Own the native library chooser so its bytes and recursive shape are
       // checked before Excalidraw's migration/restore code can traverse them.
@@ -7082,7 +11324,7 @@ export default function App() {
     event.preventDefault();
     event.stopPropagation();
     api?.setToast({ message: "Use Ctrl/⌘+V to paste local content safely." });
-  }, [api]);
+  }, [addPreparedClassroomTimeLibraryItem, api]);
 
   const generateNativeImageFileId = useCallback<NonNullable<ExcalidrawProps["generateIdForFile"]>>(
     async (file) => {
@@ -7162,6 +11404,7 @@ export default function App() {
   }, [api]);
 
   const handleEditorPointerDownCapture = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    classroomTimePointerActiveRef.current = true;
     const target = event.target instanceof Element ? event.target : null;
     const sidebarTrigger = target?.closest(".default-sidebar .sidebar-tab-trigger");
     const triggerList = sidebarTrigger?.parentElement;
@@ -7312,6 +11555,21 @@ export default function App() {
     startScreenshotCapture,
     toggleProjectFind,
   ]);
+
+  const showClassroomTimeOverlay = Boolean(
+    api
+    && selectedClassroomTime
+    && !presentation
+    && !featurePreferences.obsCaptureArea
+    && !classroomTimeDialog
+    && !isMathToolsOpen
+    && !isGeoGonOpen
+    && !mathInteraction
+    && !isScreenshotCaptureActive
+    && !busyMessage
+    && !nativeImageExportOpenRef.current
+  );
+  classroomTimeOverlayNeedsTicksRef.current = showClassroomTimeOverlay;
 
   if (!project || !currentScene) return <div className="loading-screen">Opening PatterDraw…</div>;
 
@@ -7517,7 +11775,10 @@ export default function App() {
           onClickCapture={handleEditorClickCapture}
           onKeyDownCapture={handleEditorKeyDownCapture}
           onPointerDownCapture={handleEditorPointerDownCapture}
+          onDragStartCapture={handleEditorDragStartCapture}
+          onDragEndCapture={handleEditorDragEndCapture}
           onDropCapture={handleEditorDropCapture}
+          onCopyCapture={handleEditorCopyCapture}
           onDragOver={handleScreenshotDragOver}
           onDrop={handleScreenshotDrop}
         >
@@ -7525,6 +11786,7 @@ export default function App() {
             excalidrawAPI={setApi}
             initialData={initialExcalidrawData}
             onChange={handleChange}
+            onDuplicate={handleClassroomTimeDuplicate}
             onLibraryChange={handleLibraryChange}
             onPaste={handlePaste}
             onLinkOpen={handleLinkOpen}
@@ -7547,6 +11809,20 @@ export default function App() {
                   : "widescreen"}
             />
           ) : null}
+          {showClassroomTimeOverlay && selectedClassroomTime ? (
+              <ClassroomTimeOverlay
+                metadata={selectedClassroomTime.metadata}
+                nowMs={classroomTimeNowMs}
+                activeTarget={classroomTimeActiveTarget}
+                completionNotice={null}
+                onCommand={controlSelectedClassroomTimeWidget}
+                onConvertToOrdinaryElements={convertSelectedClassroomTimeWidget}
+                onCustomize={customizeSelectedClassroomTimeWidget}
+                onDeleteWidget={deleteSelectedClassroomTimeWidget}
+                onDismissCompletion={dismissClassroomAlarmNotice}
+                onDuplicate={duplicateSelectedClassroomTimeWidget}
+              />
+            ) : null}
           {!featurePreferences.obsCaptureArea && isSlideFrameDrawingActive && workspaceMode === "slides" && (
             <div
               className="slide-frame-draw-overlay"
@@ -7894,8 +12170,27 @@ export default function App() {
           initialConfiguration={mathToolEdit?.initialConfiguration}
           onCancel={closeMathTools}
           onOpenGeoGon={openGeoGon}
+          onOpenClassroomTimeTool={openClassroomTimeTool}
           onInsert={insertMathTool}
           onStartInteraction={startMathInteraction}
+        />
+      ) : null}
+      {classroomTimeDialog && !presentation && !featurePreferences.obsCaptureArea ? (
+        <ClassroomTimeDialog
+          metadata={classroomTimeDialog.metadata}
+          mode={classroomTimeDialog.mode}
+          boardTheme={editorTheme}
+          alarmMuted={classroomTimePreferences.muted}
+          alarmVolume={classroomTimePreferences.masterVolume}
+          projectEventCount={project.projectCalendar?.events.length ?? 0}
+          deviceEventCount={deviceClassroomCalendar.events.length}
+          onAlarmPreferencesChange={setClassroomAlarmPreferences}
+          onCancel={() => setClassroomTimeDialog(null)}
+          onCreateCalendarEvent={createClassroomTimeCalendarEvent}
+          onRestoreDefaults={restoreClassroomTimeWidgetDefaults}
+          onSubmit={submitClassroomTimeWidget}
+          onTestAlarm={testClassroomAlarm}
+          onUseAsDefault={saveClassroomTimeDefaults}
         />
       ) : null}
       {featurePreferences.mathTools && isGeoGonOpen ? (
@@ -7916,20 +12211,46 @@ export default function App() {
       {errorMessage && (
         <div className="error-toast" role="alert"><span>{errorMessage}</span><button type="button" onClick={() => setErrorMessage(null)}>Dismiss</button></div>
       )}
-      {pdfUndoToast && (
-        <div className="pdf-annotation-clear-toast" role="status">
-          <span>
-            {pdfUndoToast.kind === "clear-annotations" ? (
-              <>
-                Cleared {pdfUndoToast.annotationCount} {pdfUndoToast.annotationCount === 1 ? "annotation" : "annotations"}
-                {" from "}{pdfUndoToast.affectedPageCount} {pdfUndoToast.affectedPageCount === 1 ? "page" : "pages"}
-              </>
-            ) : (
-              <>Deleted output page {pdfUndoToast.deletedPageNumber}</>
-            )}
-          </span>
-          <span aria-hidden="true">—</span>
-          <button type="button" onClick={undoPendingPdfAction}>Undo</button>
+      {(classroomTimeConfirmationToast || pdfUndoToast || classroomTimeAlarmNotice) && (
+        <div className="app-toast-stack" style={{ pointerEvents: "none" }}>
+          {classroomTimeConfirmationToast && (
+            <div className="pdf-annotation-clear-toast app-toast" role="status">
+              <span>{classroomTimeConfirmationToast.message}</span>
+            </div>
+          )}
+          {pdfUndoToast && (
+            <div className="pdf-annotation-clear-toast app-toast app-toast--pdf-undo" role="status" style={{ pointerEvents: "auto" }}>
+              <span>
+                {pdfUndoToast.kind === "clear-annotations" ? (
+                  <>
+                    Cleared {pdfUndoToast.annotationCount} {pdfUndoToast.annotationCount === 1 ? "annotation" : "annotations"}
+                    {" from "}{pdfUndoToast.affectedPageCount} {pdfUndoToast.affectedPageCount === 1 ? "page" : "pages"}
+                  </>
+                ) : (
+                  <>Deleted output page {pdfUndoToast.deletedPageNumber}</>
+                )}
+              </span>
+              <span aria-hidden="true">—</span>
+              <button type="button" onClick={undoPendingPdfAction}>Undo</button>
+            </div>
+          )}
+          {classroomTimeAlarmNotice && (
+            <div className="pdf-annotation-clear-toast app-toast app-toast--classroom-alarm" role="alert" style={{ pointerEvents: "auto" }}>
+              <strong>Time is up</strong>
+              <span>{classroomTimeAlarmNotice.message}</span>
+              {classroomTimeAlarmNotice.blocked
+                && !classroomTimeAlarmNotice.deliveryPending
+                && !presentation
+                && !featurePreferences.obsCaptureArea ? (
+                <button type="button" onClick={enableClassroomAlarmSound}>Enable sound</button>
+              ) : null}
+              {classroomTimeAlarmNoticeCanDismiss(classroomTimeAlarmNotice)
+                && !presentation
+                && !featurePreferences.obsCaptureArea ? (
+                <button type="button" onClick={dismissClassroomAlarmNotice}>Dismiss</button>
+              ) : null}
+            </div>
+          )}
         </div>
       )}
     </div>

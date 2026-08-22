@@ -7,6 +7,17 @@ import {
 } from "../../types";
 import { getProjectContentSize } from "../project-budget";
 import {
+  classroomTimeWidgetMetadata,
+  classroomTimeWidgetOwnerId,
+  createClassroomTimeWidgetScene,
+} from "../classroom-time/scene";
+import { startTimerRuntime } from "../classroom-time/runtime";
+import {
+  createDefaultClassroomTimeWidgetMetadata,
+  createIdleTimerRuntime,
+} from "../classroom-time/types";
+import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
+import {
   PDF_PAGE_DELETE_UNDO_MS,
   deletePdfPageReversibly,
   duplicatePdfPage,
@@ -364,6 +375,71 @@ describe("PDF page duplication", () => {
     expect(result.additionalManifestBytes).toBeGreaterThan(0);
     expect(Object.isFrozen(result.elementIdMap)).toBe(true);
     expect(Object.isFrozen(result.fileIdMap)).toBe(true);
+  });
+
+  it("rekeys a Classroom Time widget and pauses the copy at the captured instant", () => {
+    const originalPage = page("widget-page");
+    const base = createDefaultClassroomTimeWidgetMetadata("timer", "timer-owner");
+    if (base.kind !== "timer") throw new Error("Expected timer metadata.");
+    const metadata = {
+      ...base,
+      timer: { ...base.timer, durationMs: 60_000 },
+      runtime: startTimerRuntime(createIdleTimerRuntime(60_000), 60_000, 1_000),
+    };
+    const created = createClassroomTimeWidgetScene({
+      metadata,
+      x: 100,
+      y: 120,
+      now: 1_000,
+    });
+    originalPage.elements = [
+      ...originalPage.elements,
+      ...created.elements as unknown as readonly Record<string, unknown>[],
+    ];
+    originalPage.files = {
+      ...originalPage.files,
+      ...Object.fromEntries(created.files.map((candidate) => [candidate.id, candidate])),
+    };
+    const { project, pdfBytes } = fixture([originalPage]);
+    const before = structuredClone(project);
+
+    const result = duplicatePdfPage(project, pdfBytes, originalPage.id, {
+      now: 6_000,
+      updatedAt: "2026-08-20T01:00:06.000Z",
+    });
+    const duplicate = result.project.scenes[result.duplicatedSceneId];
+    const sourceAnchor = created.elements.find((candidate) => (
+      classroomTimeWidgetMetadata(candidate)?.kind === "timer"
+    ));
+    if (!sourceAnchor) throw new Error("Expected source timer anchor.");
+    const duplicateAnchor = duplicate.elements
+      .map((candidate) => candidate as unknown as ExcalidrawElement)
+      .find((candidate) => classroomTimeWidgetMetadata(candidate)?.kind === "timer");
+    if (!duplicateAnchor) throw new Error("Expected duplicated timer anchor.");
+    const copiedMetadata = classroomTimeWidgetMetadata(duplicateAnchor);
+    const copiedOwnerId = classroomTimeWidgetOwnerId(duplicateAnchor);
+
+    expect(project).toEqual(before);
+    expect(copiedOwnerId).not.toBe("timer-owner");
+    expect(copiedMetadata).toMatchObject({
+      kind: "timer",
+      ownerId: copiedOwnerId,
+      runtime: {
+        status: "paused",
+        remainingMs: 55_000,
+        deadlineMs: null,
+        completedAtMs: null,
+      },
+    });
+    const duplicateWidgetParts = duplicate.elements
+      .map((candidate) => candidate as unknown as ExcalidrawElement)
+      .filter((candidate) => classroomTimeWidgetOwnerId(candidate) === copiedOwnerId);
+    expect(duplicateWidgetParts).toHaveLength(created.elements.length);
+    expect(duplicateWidgetParts.every((candidate) => candidate.groupIds.includes(copiedOwnerId!)))
+      .toBe(true);
+    expect(result.elementIdMap[sourceAnchor.id]).toBe(duplicateAnchor.id);
+    if (duplicateAnchor.type !== "image") throw new Error("Expected duplicated timer image anchor.");
+    expect(result.fileIdMap[created.files[0].id]).toBe(duplicateAnchor.fileId);
   });
 
   it("rejects capacity, content-budget, and caller preflight failures without publishing a partial page", () => {

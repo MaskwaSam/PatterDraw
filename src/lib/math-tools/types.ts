@@ -1,5 +1,21 @@
-export type MathToolCategory = "instruments" | "graphs" | "manipulatives";
+import type { ClassroomTimeWidgetKind } from "../classroom-time/types";
+
+export type MathToolCategory = "instruments" | "graphs" | "manipulatives" | "classroom";
 export type MathToolCalibration = "logical-units" | "pdf-points" | "scene-geometry";
+
+/**
+ * Live classroom widgets are opened through the wrapper instead of being
+ * flattened into a GeneratedMathToolInsertion.
+ */
+export interface ClassroomTimeToolCardDefinition {
+  id: string;
+  kind: ClassroomTimeWidgetKind;
+  category: "classroom";
+  title: string;
+  description: string;
+  detail: string;
+  preview: "calendar" | "clock" | "dashboard" | "pomodoro" | "timer";
+}
 
 export type MathToolKind =
   | "algebra-tile"

@@ -13,6 +13,7 @@ import {
   pdfAdditionPreservesAnnotationUndo,
 } from "./annotation-undo-reservation";
 import { getProjectContentSize } from "../project-budget";
+import { createDefaultClassroomTimeWidgetMetadata } from "../classroom-time/types";
 import { createBlankProject, type ClassroomProject, type SerializedScene } from "../../types";
 
 function localFile(id: string, data = id): Record<string, unknown> {
@@ -86,6 +87,37 @@ function element(
     height: 80,
     isDeleted: false,
     ...extra,
+  };
+}
+
+function classroomTimeWidget(ownerId: string): {
+  annotations: readonly Record<string, unknown>[];
+  files: Record<string, Record<string, unknown>>;
+} {
+  const fileId = `${ownerId}-shell-file`;
+  const metadata = createDefaultClassroomTimeWidgetMetadata("timer", ownerId);
+  return {
+    annotations: [
+      element(`${ownerId}-anchor`, "image", {
+        fileId,
+        groupIds: [ownerId],
+        customData: { classroomTimeWidget: metadata },
+      }),
+      element(`${ownerId}-value`, "text", {
+        groupIds: [ownerId],
+        customData: {
+          classroomTimeWidget: { version: 1, ownerId, role: "primary-value" },
+        },
+      }),
+      element(`${ownerId}-deleted-part`, "text", {
+        isDeleted: true,
+        groupIds: [ownerId],
+        customData: {
+          classroomTimeWidget: { version: 1, ownerId, role: "secondary-value" },
+        },
+      }),
+    ],
+    files: { [fileId]: localFile(fileId, "widget-shell") },
   };
 }
 
@@ -186,6 +218,19 @@ describe("PatterDraw PDF annotation identity", () => {
     expect(isPatterDrawPdfAnnotation({ ...scene, pdfPage: undefined }, element("board"))).toBe(false);
   });
 
+  it("counts a complete Classroom Time widget as one logical annotation", () => {
+    const widget = classroomTimeWidget("timer-owner");
+    const scene = page("page", {
+      annotations: [...widget.annotations, element("ordinary-mark")],
+      files: widget.files,
+    });
+
+    expect(countPdfPageAnnotations(scene)).toBe(2);
+    expect(scene.elements.slice(1).map((candidate) => (
+      isPatterDrawPdfAnnotation(scene, candidate)
+    ))).toEqual([true, true, false, true]);
+  });
+
   it("uses selected-file occurrence identity for source scope and document identity for legacy pages", () => {
     const pages = [
       page("main-1", { sourceInstanceId: "main-a", annotations: [element("a")] }),
@@ -279,6 +324,28 @@ describe("PatterDraw PDF annotation identity", () => {
 });
 
 describe("clearing PDF annotations", () => {
+  it("clears every live member of a widget atomically and restores it as one annotation", () => {
+    const widget = classroomTimeWidget("timer-owner");
+    const original = projectWithPages([page("one", {
+      annotations: [...widget.annotations, element("ordinary-mark")],
+      files: widget.files,
+    })]);
+
+    const cleared = clearPdfAnnotations(original, "one", "page", { now: 1_000 });
+    expect(cleared.summary.annotationCount).toBe(2);
+    expect(cleared.transaction.annotationCount).toBe(2);
+    expect(cleared.project.scenes.one.elements.map((candidate) => candidate.id)).toEqual([
+      "one-background",
+      "timer-owner-deleted-part",
+    ]);
+    expect(cleared.project.scenes.one.files).not.toHaveProperty("timer-owner-shell-file");
+
+    const restored = undoPdfAnnotationClear(cleared.project, cleared.transaction, { now: 1_001 });
+    expect(restored.restoredAnnotationCount).toBe(2);
+    expect(restored.project.scenes.one.elements).toEqual(original.scenes.one.elements);
+    expect(restored.project.scenes.one.files).toEqual(original.scenes.one.files);
+  });
+
   it("reserves capacity for file-backed annotations until Undo expires", () => {
     const imageFile = localFile("student-image", "A".repeat(4_096));
     const original = projectWithPages([page("one", {

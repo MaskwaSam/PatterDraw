@@ -42,6 +42,22 @@ import {
 } from "./export-pdf";
 import { getPdfRasterBudget } from "./raster-limits";
 import { copySourcePageTransparencyGroup } from "./source-page";
+import {
+  classroomTimeWidgetRole,
+  createClassroomTimeWidgetScene,
+  resolveClassroomTimeAppearance,
+} from "../classroom-time/scene";
+import { classroomTimeRenderContext } from "../classroom-time/app-runtime";
+import {
+  createClassroomCalendarStoreV1,
+  type ClassroomCalendarEventV1,
+} from "../classroom-time/calendar";
+import { startTimerRuntime } from "../classroom-time/runtime";
+import {
+  createDefaultClassroomTimeWidgetMetadata,
+  createIdleTimerRuntime,
+} from "../classroom-time/types";
+import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 
 const baseElement = {
   id: "background",
@@ -84,6 +100,23 @@ function fullAnnotation(overrides: Record<string, unknown> = {}) {
     link: null,
     locked: false,
     ...overrides,
+  };
+}
+
+function calendarEvent(
+  id: string,
+  date: string,
+  title: string,
+): ClassroomCalendarEventV1 {
+  return {
+    schemaVersion: 1,
+    id,
+    date,
+    title,
+    color: "#2563eb",
+    allDay: true,
+    createdAt: "2026-08-20T00:00:00.000Z",
+    updatedAt: "2026-08-20T00:00:00.000Z",
   };
 }
 
@@ -462,6 +495,244 @@ describe("PDF export bounds", () => {
       width: 634,
       height: 844,
     });
+  });
+
+  it("materializes every Classroom Time visual at one captured instant without mutating the project", async () => {
+    const source = await PDFDocument.create();
+    source.addPage([160, 160]);
+    const sourceBytes = await source.save();
+    const baseMetadata = createDefaultClassroomTimeWidgetMetadata("timer", "export-timer");
+    if (baseMetadata.kind !== "timer") throw new Error("Expected timer metadata.");
+    const metadata = {
+      ...baseMetadata,
+      timer: { ...baseMetadata.timer, durationMs: 60_000 },
+      runtime: startTimerRuntime(createIdleTimerRuntime(60_000), 60_000, 1_000),
+    };
+    const created = createClassroomTimeWidgetScene({
+      metadata,
+      x: 20,
+      y: 20,
+      now: 1_000,
+    });
+    const project = projectWithAnnotations(
+      sourceBytes.byteLength,
+      created.elements as unknown as readonly Record<string, unknown>[],
+    );
+    project.scenes.page = {
+      ...project.scenes.page,
+      files: Object.fromEntries(created.files.map((candidate) => [candidate.id, candidate])),
+    };
+    const before = structuredClone(project);
+    const canvas = createCanvas(64, 64);
+    const exportToCanvasMock = vi.mocked(exportToCanvas);
+    const previousImplementation = exportToCanvasMock.getMockImplementation();
+    exportToCanvasMock.mockImplementation(async (options: Parameters<typeof exportToCanvas>[0]) => {
+      const primary = options.elements.find((candidate: ExcalidrawElement) => (
+        classroomTimeWidgetRole(candidate as ExcalidrawElement) === "primary-value"
+      )) as (ExcalidrawElement & { type: "text" }) | undefined;
+      expect(primary?.text).toBe("00:55");
+      expect(primary?.updated).toBe(6_000);
+      return canvas as unknown as HTMLCanvasElement;
+    });
+
+    try {
+      await exportAnnotatedPdf(project, { pdf: sourceBytes }, "expand", {
+        annotationMode: "visual",
+        capturedAt: 6_000,
+      });
+      expect(exportToCanvasMock).toHaveBeenCalledOnce();
+      expect(project).toEqual(before);
+      const storedPrimary = project.scenes.page.elements
+        .map((candidate) => candidate as unknown as ExcalidrawElement)
+        .find((candidate) => classroomTimeWidgetRole(candidate) === "primary-value");
+      expect(storedPrimary).toMatchObject({ updated: 1_000, text: "01:00" });
+    } finally {
+      exportToCanvasMock.mockReset();
+      if (previousImplementation) exportToCanvasMock.mockImplementation(previousImplementation);
+    }
+  });
+
+  it("preserves dark follow-board styling and structured calendar events for an inactive PDF scene", async () => {
+    const source = await PDFDocument.create();
+    source.addPage([160, 160]);
+    source.addPage([160, 160]);
+    const sourceBytes = await source.save();
+    const baseMetadata = createDefaultClassroomTimeWidgetMetadata("calendar", "inactive-calendar");
+    if (baseMetadata.kind !== "calendar") throw new Error("Expected calendar metadata.");
+    const metadata = {
+      ...baseMetadata,
+      calendar: {
+        ...baseMetadata.calendar,
+        view: "agenda" as const,
+        projectEventIds: ["project-current"],
+      },
+    };
+    const created = createClassroomTimeWidgetScene({
+      metadata,
+      x: 20,
+      y: 20,
+      now: 1_000,
+      renderContext: {
+        calendarEventLabelsByOwner: {
+          "inactive-calendar": ["08-01 · Stale project", "08-02 · Stale device"],
+        },
+      },
+    });
+    const dashboardBase = createDefaultClassroomTimeWidgetMetadata("dashboard", "inactive-dashboard");
+    if (dashboardBase.kind !== "dashboard") throw new Error("Expected dashboard metadata.");
+    const dashboard = createClassroomTimeWidgetScene({
+      metadata: {
+        ...dashboardBase,
+        calendar: {
+          ...dashboardBase.calendar,
+          view: "agenda",
+          projectEventIds: ["project-current"],
+        },
+      },
+      x: 20,
+      y: 540,
+      now: 1_000,
+      renderContext: {
+        calendarEventLabelsByOwner: {
+          "inactive-dashboard": ["08-01 · Stale project", "08-02 · Stale device"],
+        },
+      },
+    });
+    const project = projectWithAnnotations(sourceBytes.byteLength, []);
+    const inactiveScene = {
+      id: "inactive-page",
+      name: "Inactive calendar page",
+      elements: [
+        { ...baseElement, id: "inactive-background" },
+        ...created.elements as unknown as readonly Record<string, unknown>[],
+        ...dashboard.elements as unknown as readonly Record<string, unknown>[],
+      ],
+      appState: {},
+      files: Object.fromEntries(
+        [...created.files, ...dashboard.files].map((candidate) => [candidate.id, candidate]),
+      ),
+      pdfPage: {
+        documentId: "pdf",
+        pageIndex: 1,
+        width: 160,
+        height: 160,
+        rotation: 0 as const,
+        backgroundElementId: "inactive-background",
+      },
+    } satisfies SerializedScene;
+    project.scenes[inactiveScene.id] = inactiveScene;
+    project.pdfPageOrder = ["page", inactiveScene.id];
+    project.pdfDocuments.pdf = {
+      ...project.pdfDocuments.pdf,
+      pageCount: 2,
+    };
+    project.projectCalendar = createClassroomCalendarStoreV1("project", [
+      {
+        ...calendarEvent("project-current", "2026-08-22", "Project assembly"),
+        note: "Meet in the library",
+        color: "#C2410C",
+      },
+    ]);
+    const deviceCalendar = createClassroomCalendarStoreV1("device", [
+      {
+        ...calendarEvent("device-current", "2026-08-23", "Device appointment"),
+        note: "Private reminder",
+        color: "#D946EF",
+      },
+    ]);
+    const capturedAt = Date.UTC(2026, 7, 21, 12, 0, 0);
+    const resolver = vi.fn((scene: Readonly<SerializedScene>, timestamp: number) => (
+      classroomTimeRenderContext(
+        scene.elements as unknown as readonly ExcalidrawElement[],
+        project.projectCalendar,
+        deviceCalendar,
+        timestamp,
+        "dark",
+      )
+    ));
+    const before = structuredClone(project);
+    const canvas = createCanvas(64, 64);
+    const exportToCanvasMock = vi.mocked(exportToCanvas);
+    const previousImplementation = exportToCanvasMock.getMockImplementation();
+    exportToCanvasMock.mockImplementation(async (options: Parameters<typeof exportToCanvas>[0]) => {
+      const eventElements = options.elements
+        .filter((candidate: ExcalidrawElement) => (
+          String(classroomTimeWidgetRole(candidate)).startsWith("calendar-event-")
+        ));
+      expect(eventElements.map((candidate: ExcalidrawElement) => (
+        candidate.type === "text" ? candidate.text : ""
+      ))).toEqual([
+        "08-22 · Project assembly — Meet in the library",
+        "08-23 · Device appointment — Private reminder",
+      ]);
+      expect(eventElements.map((candidate: ExcalidrawElement) => candidate.strokeColor))
+        .toEqual(["#C2410C", "#D946EF"]);
+      const expectedCalendarForeground = resolveClassroomTimeAppearance(
+        baseMetadata.appearance,
+        "dark",
+      ).foregroundColor;
+      expect(options.elements.find((candidate: ExcalidrawElement) => (
+        classroomTimeWidgetRole(candidate) === "calendar-month"
+      ))?.strokeColor).toBe(expectedCalendarForeground);
+      const dashboardElements = options.elements
+        .filter((candidate: ExcalidrawElement) => (
+          String(classroomTimeWidgetRole(candidate)).startsWith("dashboard-calendar-day-")
+        ));
+      const dashboardProjectEvent = dashboardElements.find((candidate: ExcalidrawElement) => (
+        candidate.type === "text"
+        && candidate.text.includes("Project assembly — Meet in the library")
+      ));
+      const dashboardDeviceEvent = dashboardElements.find((candidate: ExcalidrawElement) => (
+        candidate.type === "text"
+        && candidate.text.includes("Device appointment — Private reminder")
+      ));
+      expect(dashboardProjectEvent?.strokeColor).toBe("#C2410C");
+      expect(dashboardDeviceEvent?.strokeColor).toBe("#D946EF");
+      expect(dashboardProjectEvent).toBeDefined();
+      expect(dashboardDeviceEvent).toBeDefined();
+      expect(options.elements.some((candidate: ExcalidrawElement) => (
+        candidate.type === "text"
+        && candidate.text.includes("Project assembly — Meet in the library")
+      )))
+        .toBe(true);
+      expect(options.elements.some((candidate: ExcalidrawElement) => (
+        candidate.type === "text"
+        && candidate.text.includes("Device appointment — Private reminder")
+      )))
+        .toBe(true);
+      return canvas as unknown as HTMLCanvasElement;
+    });
+
+    try {
+      await exportAnnotatedPdf(project, { pdf: sourceBytes }, "expand", {
+        annotationMode: "visual",
+        capturedAt,
+        classroomTimeRenderContextForScene: resolver,
+      });
+      expect(project.activeSceneId).toBe("page");
+      expect(resolver.mock.calls.map((call) => call[1])).toEqual([
+        capturedAt,
+        capturedAt,
+      ]);
+      expect(exportToCanvasMock).toHaveBeenCalledOnce();
+      expect(project).toEqual(before);
+      expect(JSON.stringify(project)).not.toContain("Private reminder");
+      const storedLabels = project.scenes[inactiveScene.id].elements
+        .map((candidate) => candidate as unknown as ExcalidrawElement)
+        .filter((candidate) => String(classroomTimeWidgetRole(candidate)).startsWith("calendar-event-"))
+        .map((candidate) => candidate.type === "text" ? candidate.text : "");
+      expect(storedLabels).toEqual(["08-01 · Stale project", "08-02 · Stale device"]);
+    } finally {
+      exportToCanvasMock.mockReset();
+      if (previousImplementation) exportToCanvasMock.mockImplementation(previousImplementation);
+    }
+  });
+
+  it("rejects an invalid caller-captured widget export timestamp", async () => {
+    const project = blankPdfProjectForIntegrity(1);
+    await expect(exportAnnotatedPdf(project, { pdf: Uint8Array.of(1) }, "expand", {
+      capturedAt: Number.NaN,
+    })).rejects.toThrow(/export timestamp is invalid/i);
   });
 
   it("normalizes encrypted and unsupported export failures with recovery guidance", () => {
@@ -2136,6 +2407,139 @@ describe("PDF export bounds", () => {
       expect(result.diagnostics.rasterElementCount).toBe(1);
       expect(result.diagnostics.pages.map((page) => page.rasterReasons["vector-budget"]))
         .toEqual([0, 1]);
+    } finally {
+      exportToCanvasMock.mockReset();
+      if (previousImplementation) exportToCanvasMock.mockImplementation(previousImplementation);
+    }
+  });
+
+  it("preserves dark follow-board styling and structured calendar events for inactive slides", async () => {
+    const frame = fullAnnotation({
+      id: "calendar-slide-frame",
+      type: "frame",
+      x: 0,
+      y: 0,
+      width: 900,
+      height: 620,
+      name: "Calendar slide",
+      customData: { classroomSlide: { kind: "slide", version: 1 } },
+    });
+    const baseMetadata = createDefaultClassroomTimeWidgetMetadata("calendar", "slide-calendar");
+    if (baseMetadata.kind !== "calendar") throw new Error("Expected calendar metadata.");
+    const created = createClassroomTimeWidgetScene({
+      metadata: {
+        ...baseMetadata,
+        calendar: {
+          ...baseMetadata.calendar,
+          view: "agenda",
+          projectEventIds: ["slide-project-event"],
+        },
+      },
+      x: 20,
+      y: 20,
+      now: 1_000,
+      frameId: "calendar-slide-frame",
+      renderContext: {
+        calendarEventLabelsByOwner: {
+          "slide-calendar": ["08-01 · Old project", "08-02 · Old device"],
+        },
+      },
+    });
+    const slideScene = {
+      id: "calendar-slide-scene",
+      name: "Calendar slide scene",
+      elements: [
+        frame,
+        ...created.elements as unknown as readonly Record<string, unknown>[],
+      ],
+      appState: {},
+      files: Object.fromEntries(created.files.map((candidate) => [candidate.id, candidate])),
+    } satisfies SerializedScene;
+    const otherScene = {
+      id: "active-board",
+      name: "Active board",
+      elements: [],
+      appState: {},
+      files: {},
+    } satisfies SerializedScene;
+    const projectCalendar = createClassroomCalendarStoreV1("project", [
+      {
+        ...calendarEvent("slide-project-event", "2026-08-24", "Slide project event"),
+        note: "Project details",
+        color: "#0F766E",
+      },
+    ]);
+    const deviceCalendar = createClassroomCalendarStoreV1("device", [
+      {
+        ...calendarEvent("slide-device-event", "2026-08-25", "Slide device event"),
+        note: "Private slide details",
+        color: "#B45309",
+      },
+    ]);
+    const project: ClassroomProject = {
+      schemaVersion: 1,
+      id: "calendar-slides-project",
+      title: "Calendar slides",
+      createdAt: "2026-08-21T00:00:00.000Z",
+      updatedAt: "2026-08-21T00:00:00.000Z",
+      activeSceneId: otherScene.id,
+      scenes: {
+        [otherScene.id]: otherScene,
+        [slideScene.id]: slideScene,
+      },
+      slideOrder: [{
+        id: "calendar-slide",
+        sceneId: slideScene.id,
+        frameId: "calendar-slide-frame",
+        title: "Calendar slide",
+      }],
+      pdfDocuments: {},
+      projectCalendar,
+    };
+    const capturedAt = Date.UTC(2026, 7, 21, 12, 0, 0);
+    const resolver = vi.fn((scene: Readonly<SerializedScene>, timestamp: number) => (
+      classroomTimeRenderContext(
+        scene.elements as unknown as readonly ExcalidrawElement[],
+        projectCalendar,
+        deviceCalendar,
+        timestamp,
+        "dark",
+      )
+    ));
+    const before = structuredClone(project);
+    const exportToCanvasMock = vi.mocked(exportToCanvas);
+    const previousImplementation = exportToCanvasMock.getMockImplementation();
+    exportToCanvasMock.mockImplementation(async (options: Parameters<typeof exportToCanvas>[0]) => {
+      const eventElements = options.elements
+        .filter((candidate: ExcalidrawElement) => (
+          String(classroomTimeWidgetRole(candidate)).startsWith("calendar-event-")
+        ));
+      expect(eventElements.map((candidate: ExcalidrawElement) => (
+        candidate.type === "text" ? candidate.text : ""
+      ))).toEqual([
+        "08-24 · Slide project event — Project details",
+        "08-25 · Slide device event — Private slide details",
+      ]);
+      expect(eventElements.map((candidate: ExcalidrawElement) => candidate.strokeColor))
+        .toEqual(["#0F766E", "#B45309"]);
+      expect(options.elements.find((candidate: ExcalidrawElement) => (
+        classroomTimeWidgetRole(candidate) === "calendar-month"
+      ))?.strokeColor).toBe(resolveClassroomTimeAppearance(
+        baseMetadata.appearance,
+        "dark",
+      ).foregroundColor);
+      return createCanvas(64, 64) as unknown as HTMLCanvasElement;
+    });
+
+    try {
+      await exportSlidesPdf(project, {
+        capturedAt,
+        classroomTimeRenderContextForScene: resolver,
+      });
+      expect(resolver).toHaveBeenCalledOnce();
+      expect(resolver).toHaveBeenCalledWith(slideScene, capturedAt);
+      expect(project).toEqual(before);
+      expect(JSON.stringify(project)).not.toContain("Private slide details");
     } finally {
       exportToCanvasMock.mockReset();
       if (previousImplementation) exportToCanvasMock.mockImplementation(previousImplementation);

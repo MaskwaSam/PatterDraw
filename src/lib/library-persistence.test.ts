@@ -27,6 +27,8 @@ import {
   MAX_NATIVE_LIBRARY_BLOB_BYTES,
   MAX_STRUCTURAL_DEPTH,
 } from "./structural-limits";
+import { createDefaultClassroomTimeWidgetMetadata } from "./classroom-time/types";
+import { createClassroomTimeWidgetScene } from "./classroom-time/scene";
 
 const restoredItems = [{
   id: "shape-library-item",
@@ -45,6 +47,45 @@ const unsafeRestoredItems = [{
     { id: "frame", type: "iframe", link: "https://example.invalid" },
   ],
 }] as unknown as LibraryItems;
+
+function sequence(prefix: string): () => string {
+  let index = 0;
+  return () => `${prefix}-${index++}`;
+}
+
+function classroomTimeLibraryItem(): LibraryItems[number] {
+  const metadata = createDefaultClassroomTimeWidgetMetadata("dashboard", "library-dashboard");
+  const created = createClassroomTimeWidgetScene({
+    metadata,
+    x: 10,
+    y: 20,
+    now: 1_725_000_000_000,
+    createId: sequence("library-dashboard-part"),
+  });
+  return {
+    id: "classroom-time-library-item",
+    status: "unpublished",
+    created: 1_725_000_000_000,
+    name: "Classroom Dashboard",
+    elements: created.elements.map((element) => ({ ...element, frameId: null })),
+  } as LibraryItems[number];
+}
+
+function arbitraryImageLibraryItem(): LibraryItems[number] {
+  return {
+    id: "arbitrary-image",
+    status: "unpublished",
+    created: 1,
+    elements: [{
+      id: "image",
+      type: "image",
+      fileId: "unavailable-image-file",
+      status: "saved",
+      groupIds: [],
+      frameId: null,
+    }],
+  } as unknown as LibraryItems[number];
+}
 
 describe("personal library persistence", () => {
   beforeEach(() => {
@@ -113,6 +154,18 @@ describe("personal library persistence", () => {
     expect(oversized.text).not.toHaveBeenCalled();
   });
 
+  it("filters arbitrary images at the native library import boundary", async () => {
+    const complete = classroomTimeLibraryItem();
+    restoreLibraryItemsMock.mockReturnValue([arbitraryImageLibraryItem(), complete]);
+    const file = new Blob([JSON.stringify({
+      type: "excalidrawlib",
+      version: 2,
+      libraryItems: [[{ id: "restored-by-mock", type: "rectangle" }]],
+    })]);
+
+    await expect(loadSafeLibraryFromBlob(file)).resolves.toEqual([complete]);
+  });
+
   it("rejects deeply nested native library data before Excalidraw restore", async () => {
     let nested: Record<string, unknown> = { leaf: true };
     for (let index = 0; index <= MAX_STRUCTURAL_DEPTH; index += 1) nested = { next: nested };
@@ -144,6 +197,20 @@ describe("personal library persistence", () => {
     expect(setMock).toHaveBeenCalledWith("patterdraw:library:v1", restoredItems);
   });
 
+  it("self-heals arbitrary images out of restored local storage", async () => {
+    const stored = [[{ id: "stored-item", type: "rectangle" }]];
+    const complete = classroomTimeLibraryItem();
+    getMock
+      .mockResolvedValueOnce(stored)
+      .mockResolvedValueOnce(stored)
+      .mockResolvedValue(undefined);
+    restoreLibraryItemsMock.mockReturnValue([arbitraryImageLibraryItem(), complete]);
+    setMock.mockResolvedValue(undefined);
+
+    await expect(loadLibraryItems()).resolves.toEqual([complete]);
+    expect(setMock).toHaveBeenCalledWith("patterdraw:library:v1", [complete]);
+  });
+
   it("removes blocked embeds and external link metadata from library items", () => {
     expect(sanitizeLibraryItems(unsafeRestoredItems)).toEqual([{
       id: "unsafe-library-item",
@@ -151,6 +218,93 @@ describe("personal library persistence", () => {
       created: 1,
       elements: [{ id: "shape", type: "rectangle", link: null, customData: {} }],
     }]);
+  });
+
+  it("retains ordinary shape-only library items", () => {
+    const shapeOnly = [{
+      id: "ordinary-shapes",
+      status: "unpublished",
+      created: 1,
+      elements: [
+        { id: "rectangle", type: "rectangle", link: null },
+        { id: "label", type: "text", link: null },
+      ],
+    }] as unknown as LibraryItems;
+
+    expect(sanitizeLibraryItems(shapeOnly)).toBe(shapeOnly);
+  });
+
+  it("rejects arbitrary image library items without BinaryFiles", () => {
+    const imageOnly = [arbitraryImageLibraryItem()] as LibraryItems;
+
+    expect(sanitizeLibraryItems(imageOnly)).toEqual([]);
+  });
+
+  it("rejects malformed, partial, and mixed Classroom Time image items", () => {
+    const complete = classroomTimeLibraryItem();
+    const anchorIndex = complete.elements.findIndex((element) => element.type === "image");
+    const anchor = complete.elements[anchorIndex];
+    if (!anchor || anchor.type !== "image") throw new Error("Dashboard fixture has no image anchor.");
+    const malformedElements = complete.elements.map((element, index) => index === anchorIndex ? {
+      ...element,
+      customData: {
+        classroomTimeWidget: {
+          ...(element.customData?.classroomTimeWidget as Record<string, unknown>),
+          version: 2,
+        },
+      },
+    } : element);
+    const partialElements = complete.elements.slice(0, -1);
+    const mixedElements = [...complete.elements, {
+      ...complete.elements[1],
+      id: "unrelated-shape",
+      type: "rectangle",
+      customData: undefined,
+      groupIds: [],
+    }];
+    const variants = [malformedElements, partialElements, mixedElements].map((elements, index) => ({
+      ...complete,
+      id: `invalid-classroom-time-${index}`,
+      elements,
+    })) as LibraryItems;
+
+    expect(sanitizeLibraryItems(variants)).toEqual([]);
+  });
+
+  it("retains one complete validated Classroom Time widget with a reproducible shell", () => {
+    const item = classroomTimeLibraryItem();
+    const library = [item] as LibraryItems;
+
+    expect(sanitizeLibraryItems(library)).toBe(library);
+  });
+
+  it("reconstructs a complete Classroom Time item without incidental native image fields", () => {
+    const item = classroomTimeLibraryItem();
+    const portable = {
+      ...item,
+      elements: item.elements.map((element) => element.type === "image" ? {
+        ...element,
+        fileId: null,
+        status: undefined,
+      } : element),
+    } as LibraryItems[number];
+    const library = [portable] as LibraryItems;
+
+    expect(sanitizeLibraryItems(library)).toBe(library);
+  });
+
+  it("fails closed instead of throwing when a Classroom Time group array is malformed", () => {
+    const item = classroomTimeLibraryItem();
+    const malformed = {
+      ...item,
+      elements: item.elements.map((element, index) => index === 1 ? {
+        ...element,
+        groupIds: undefined,
+      } : element),
+    } as unknown as LibraryItems[number];
+
+    expect(() => sanitizeLibraryItems([malformed])).not.toThrow();
+    expect(sanitizeLibraryItems([malformed])).toEqual([]);
   });
 
   it("drops a library item whose only content is a blocked embed", () => {
@@ -176,5 +330,16 @@ describe("personal library persistence", () => {
       created: 1,
       elements: [{ id: "shape", type: "rectangle", link: null, customData: {} }],
     }]);
+  });
+
+  it("does not persist arbitrary images while retaining complete Classroom Time widgets", async () => {
+    getMock.mockResolvedValue(undefined);
+    await loadLibraryItems();
+    setMock.mockResolvedValue(undefined);
+    const complete = classroomTimeLibraryItem();
+
+    await saveLibraryItems([arbitraryImageLibraryItem(), complete]);
+
+    expect(setMock).toHaveBeenCalledWith("patterdraw:library:v1", [complete]);
   });
 });

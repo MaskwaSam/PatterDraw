@@ -3,6 +3,11 @@ import type {
   SceneId,
   SerializedScene,
 } from "../../types";
+import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
+import {
+  classroomTimeWidgetOwnerId,
+  expandClassroomTimeWidgetElementIds,
+} from "../classroom-time/scene";
 import { canonicalizePdfBackground } from "./background";
 import { orderedPdfScenes } from "./page-order";
 
@@ -38,6 +43,8 @@ interface PdfAnnotationPageSnapshot {
     element: Readonly<Record<string, unknown>>;
   }[];
   removedElementIds: readonly string[];
+  /** Logical count: every Classroom Time widget contributes one annotation. */
+  removedAnnotationCount: number;
   removedFiles: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   retainedFiles: readonly {
     id: string;
@@ -237,11 +244,28 @@ export function isPatterDrawPdfAnnotation(
 
 export function countPdfPageAnnotations(scene: SerializedScene): number {
   if (!scene.pdfPage) return 0;
-  let count = 0;
+  const widgetOwners = new Set<string>();
+  let ordinaryElementCount = 0;
   for (const element of scene.elements) {
-    if (isPatterDrawPdfAnnotation(scene, element)) count += 1;
+    if (!isPatterDrawPdfAnnotation(scene, element)) continue;
+    const ownerId = classroomTimeWidgetOwnerId(element as unknown as ExcalidrawElement);
+    if (ownerId) widgetOwners.add(ownerId);
+    else ordinaryElementCount += 1;
   }
-  return count;
+  return ordinaryElementCount + widgetOwners.size;
+}
+
+function countLogicalAnnotationElements(
+  elements: readonly Readonly<Record<string, unknown>>[],
+): number {
+  const widgetOwners = new Set<string>();
+  let ordinaryElementCount = 0;
+  for (const element of elements) {
+    const ownerId = classroomTimeWidgetOwnerId(element as unknown as ExcalidrawElement);
+    if (ownerId) widgetOwners.add(ownerId);
+    else ordinaryElementCount += 1;
+  }
+  return ordinaryElementCount + widgetOwners.size;
 }
 
 function pagesForScope(
@@ -369,7 +393,23 @@ function clearOnePage(project: ClassroomProject, scene: SerializedScene): {
   const canonical = canonicalScene(scene);
   const workspace = canonical.pdfPage!;
   const originalElements = canonical.elements;
-  const removedElements = originalElements.filter((element) => isPatterDrawPdfAnnotation(canonical, element));
+  const selectedElementIds = new Set(
+    originalElements
+      .filter((element) => isPatterDrawPdfAnnotation(canonical, element))
+      .map((element) => element.id as string),
+  );
+  // Expand by the wrapper-owned identity before removing. This keeps the
+  // operation atomic if a future clear entry point begins from one widget
+  // part. Deleted members remain below as tombstones.
+  const expandedElementIds = expandClassroomTimeWidgetElementIds(
+    originalElements as unknown as readonly ExcalidrawElement[],
+    selectedElementIds,
+  );
+  const removedElements = originalElements.filter((element) => (
+    element.isDeleted !== true
+    && expandedElementIds.has(element.id as string)
+    && element.id !== workspace.backgroundElementId
+  ));
   if (!removedElements.length) throw new Error(`PDF page “${scene.name}” has no annotations to clear.`);
   const retainedElements = originalElements.filter((element) => !isPatterDrawPdfAnnotation(canonical, element));
   const clearedFileIds = referencedFileIds(removedElements);
@@ -405,6 +445,7 @@ function clearOnePage(project: ClassroomProject, scene: SerializedScene): {
       originalElements: snapshotValue(originalElements),
       retainedElements: Object.freeze(retainedElementSnapshots),
       removedElementIds: Object.freeze(removedElements.map((element) => element.id as string)),
+      removedAnnotationCount: countLogicalAnnotationElements(removedElements),
       removedFiles: freezeValue(removedFiles),
       retainedFiles: Object.freeze(retainedFileSnapshots),
     }),
@@ -477,7 +518,7 @@ function assertValidTransaction(transaction: PdfAnnotationClearTransaction): voi
   ) {
     throw new Error("The PDF annotation undo transaction is invalid.");
   }
-  let removedElementCount = 0;
+  let removedAnnotationCount = 0;
   const pageIds = new Set<string>();
   for (let index = 0; index < transaction.pages.length; index += 1) {
     const snapshot = transaction.pages[index];
@@ -489,6 +530,8 @@ function assertValidTransaction(transaction: PdfAnnotationClearTransaction): voi
       || !Array.isArray(snapshot.originalElements)
       || !Array.isArray(snapshot.retainedElements)
       || !Array.isArray(snapshot.removedElementIds)
+      || !Number.isSafeInteger(snapshot.removedAnnotationCount)
+      || snapshot.removedAnnotationCount < 1
       || !Array.isArray(snapshot.retainedFiles)
       || !isRecord(snapshot.removedFiles)
       || typeof snapshot.pageFingerprint !== "string"
@@ -497,10 +540,26 @@ function assertValidTransaction(transaction: PdfAnnotationClearTransaction): voi
     ) {
       throw new Error("The PDF annotation undo transaction contains an invalid page snapshot.");
     }
-    removedElementCount += snapshot.removedElementIds.length;
+    const removedIds = new Set(snapshot.removedElementIds);
+    const removedElements = snapshot.originalElements.filter((
+      element: Readonly<Record<string, unknown>>,
+    ) => (
+      isRecord(element)
+      && typeof element.id === "string"
+      && removedIds.has(element.id)
+    ));
+    if (
+      removedIds.size !== snapshot.removedElementIds.length
+      || snapshot.removedElementIds.some((id: unknown) => typeof id !== "string" || !id)
+      || removedElements.length !== removedIds.size
+      || countLogicalAnnotationElements(removedElements) !== snapshot.removedAnnotationCount
+    ) {
+      throw new Error("The PDF annotation undo transaction has an invalid logical annotation count.");
+    }
+    removedAnnotationCount += snapshot.removedAnnotationCount;
     pageIds.add(snapshot.sceneId);
   }
-  if (removedElementCount !== transaction.annotationCount) {
+  if (removedAnnotationCount !== transaction.annotationCount) {
     throw new Error("The PDF annotation undo transaction has an invalid annotation count.");
   }
 }

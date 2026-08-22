@@ -1,4 +1,8 @@
 import type { ClassroomProject, SerializedScene } from "../types";
+import {
+  parseClassroomTimeChildData,
+  parseClassroomTimeWidgetMetadata,
+} from "./classroom-time/types";
 import { reconcilePdfPageOrder } from "./pdf/page-order";
 import { getSlideRenderData } from "./slide-render";
 
@@ -142,9 +146,25 @@ function textEntries(scenes: readonly SceneEntry[]): TextEntry[] {
   for (const sceneEntry of scenes) {
     for (const [elementOrder, rawElement] of sceneEntry.scene.elements.entries()) {
       if (!isRecord(rawElement)) continue;
-      if (rawElement.type !== "text" || rawElement.isDeleted) continue;
+      if (rawElement.isDeleted) continue;
       const elementId = nonEmptyString(rawElement.id);
-      const text = typeof rawElement.text === "string" ? rawElement.text : null;
+      const customData = isRecord(rawElement.customData) ? rawElement.customData : null;
+      const classroomTimeValue = customData?.classroomTimeWidget;
+      const classroomTimeMetadata = rawElement.type === "image"
+        ? parseClassroomTimeWidgetMetadata(classroomTimeValue)
+        : null;
+      const classroomTimeChild = classroomTimeMetadata
+        ? null
+        : parseClassroomTimeChildData(classroomTimeValue);
+      // Generated clock/timer/calendar text changes every second and would
+      // swamp Project Find with implementation details. Index the stable
+      // anchor label once and omit every generated child instead.
+      if (classroomTimeChild) continue;
+      const text = classroomTimeMetadata
+        ? classroomTimeMetadata.label
+        : rawElement.type === "text" && typeof rawElement.text === "string"
+          ? rawElement.text
+          : null;
       if (!elementId || text === null) continue;
       const key = `${sceneEntry.sceneId}:${elementId}`;
       // A malformed scene can contain duplicate IDs. Keep the first source
@@ -215,7 +235,11 @@ function readSlideMatches(
     }
     if (!rendered) continue;
     for (const element of rendered.elements) {
-      if (element.type !== "text" || element.isDeleted) continue;
+      if (element.isDeleted) continue;
+      const customData = isRecord(element.customData) ? element.customData : null;
+      const isClassroomTimeAnchor = element.type === "image"
+        && !!parseClassroomTimeWidgetMetadata(customData?.classroomTimeWidget);
+      if (element.type !== "text" && !isClassroomTimeAnchor) continue;
       const elementId = nonEmptyString(element.id);
       if (!elementId) continue;
       const key = `${slide.sceneId}:${elementId}`;

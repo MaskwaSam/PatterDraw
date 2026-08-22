@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MATH_TOOL_CATALOGUE, MATH_TOOL_CATEGORIES, mathToolPreview, mathToolsForCategory } from "./catalogue";
+import { CLASSROOM_TIME_TOOL_CARDS, MATH_TOOL_CATALOGUE, MATH_TOOL_CATEGORIES, mathToolPreview, mathToolsForCategory } from "./catalogue";
 import {
   DEFAULT_CARTESIAN_PLANE,
   DEFAULT_NUMBER_LINE,
@@ -21,7 +21,7 @@ function svgDocument(svg: string): XMLDocument {
 
 describe("math tool catalogue", () => {
   it("contains unique typed definitions in stable complete categories", () => {
-    expect(MATH_TOOL_CATEGORIES.map((category) => category.id)).toEqual(["instruments", "graphs", "manipulatives"]);
+    expect(MATH_TOOL_CATEGORIES.map((category) => category.id)).toEqual(["instruments", "graphs", "manipulatives", "classroom"]);
     expect(new Set(MATH_TOOL_CATALOGUE.map((tool) => tool.id)).size).toBe(MATH_TOOL_CATALOGUE.length);
     expect(new Set(MATH_TOOL_CATALOGUE.map((tool) => tool.kind)).size).toBe(MATH_TOOL_CATALOGUE.length);
     expect(MATH_TOOL_CATALOGUE.every((tool) => tool.availabilityState === "available")).toBe(true);
@@ -32,6 +32,10 @@ describe("math tool catalogue", () => {
     expect(mathToolsForCategory("instruments").map((tool) => tool.kind)).toEqual(["ruler", "protractor", "set-square", "compass", "angle-measurement", "geometry-stencil"]);
     expect(mathToolsForCategory("graphs").map((tool) => tool.kind)).toEqual(["cartesian-plane", "number-line", "unit-circle", "function-plot", "grid", "transformation"]);
     expect(mathToolsForCategory("manipulatives").map((tool) => tool.kind)).toEqual(["fraction-piece", "algebra-tile", "integer-chip", "probability-piece"]);
+    expect(mathToolsForCategory("classroom")).toEqual([]);
+    expect(CLASSROOM_TIME_TOOL_CARDS.map((tool) => tool.kind)).toEqual(["clock", "timer", "pomodoro", "calendar", "dashboard"]);
+    expect(new Set(CLASSROOM_TIME_TOOL_CARDS.map((tool) => tool.id)).size).toBe(CLASSROOM_TIME_TOOL_CARDS.length);
+    expect(CLASSROOM_TIME_TOOL_CARDS.every((tool) => tool.category === "classroom")).toBe(true);
   });
 
   it("generates a safe local preview and valid metadata for every definition", () => {

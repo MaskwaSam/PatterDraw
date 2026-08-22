@@ -1,5 +1,6 @@
 import { duplicateElements } from "@excalidraw/element";
 import type { ExcalidrawElement } from "@excalidraw/element/types";
+import type { ExcalidrawElement as ClassroomTimeExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import type {
   ClassroomProject,
   ClassroomSlide,
@@ -10,6 +11,7 @@ import type {
   SerializedScene,
 } from "../../types";
 import { createLocalId } from "../id";
+import { forkDuplicatedClassroomTimeWidgets } from "../classroom-time/scene";
 import {
   assertProjectFitsContentBudget,
   getProjectContentSize,
@@ -515,6 +517,19 @@ export function duplicatePdfPage(
     duplicated.origIdToDuplicateId,
     reserved,
   );
+  const forkedWidgets = forkDuplicatedClassroomTimeWidgets(
+    duplicated.duplicatedElements as unknown as readonly ClassroomTimeExcalidrawElement[],
+    {
+      sourceToDuplicateGroupIds: groupIdMap,
+      now,
+      createId: () => uniqueId(createId, reserved, "classroom widget owner"),
+    },
+  );
+  for (const [sourceOwnerId, duplicatedOwnerId] of Object.entries(forkedWidgets.ownerIdMap)) {
+    // App-state selection follows the final atomic widget group, not the
+    // transient group identity created by Excalidraw's duplicate helper.
+    groupIdMap.set(sourceOwnerId, duplicatedOwnerId);
+  }
   const backgroundElementId = duplicated.origIdToDuplicateId.get(
     canonical.pdfPage!.backgroundElementId,
   );
@@ -534,7 +549,7 @@ export function duplicatePdfPage(
     ...canonical,
     id: duplicatedSceneId,
     name: options.name?.trim() || duplicateName(project, canonical),
-    elements: cloneValue(duplicated.duplicatedElements) as unknown as readonly Record<string, unknown>[],
+    elements: cloneValue(forkedWidgets.elements) as unknown as readonly Record<string, unknown>[],
     appState: duplicateAppState(
       canonical.appState,
       duplicated.origIdToDuplicateId,

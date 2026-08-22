@@ -18,6 +18,17 @@ import { bytesForBlob } from "../blob-bytes";
 import { isBlockedEmbeddedElementType } from "../embedded-content-policy";
 import { sha256Hex } from "../sha256";
 import { getSlideRenderData } from "../slide-render";
+import {
+  classroomTimeLogicalOwnerIds,
+  materializeClassroomTimeWidgetsForExport,
+  type ClassroomTimeCalendarEventDisplay,
+  type ClassroomTimeRenderContext,
+} from "../classroom-time/scene";
+import {
+  MAX_CALENDAR_EVENT_NOTE_LENGTH,
+  MAX_CALENDAR_EVENT_TITLE_LENGTH,
+  SAFE_HEX_COLOR_PATTERN,
+} from "../classroom-time/constants";
 import { orderedPdfScenes } from "./page-order";
 import {
   copySourcePageTransparencyGroup,
@@ -73,7 +84,20 @@ export interface ExportAnnotatedPdfOptions {
   ) => void;
   /** Test/device override; production callers should use the defaults. */
   resourceLimits?: Partial<PdfExportResourceLimits>;
+  /** One caller-captured wall-clock instant shared by every exported widget. */
+  capturedAt?: number;
+  /**
+   * Resolves ephemeral display data for one stored scene. Device calendar
+   * data stays with the caller; only this bounded render context enters the
+   * non-mutating export copy.
+   */
+  classroomTimeRenderContextForScene?: PdfClassroomTimeRenderContextResolver;
 }
+
+export type PdfClassroomTimeRenderContextResolver = (
+  scene: Readonly<SerializedScene>,
+  capturedAt: number,
+) => ClassroomTimeRenderContext | null | undefined;
 
 export interface ExportSlidesPdfOptions extends ExportAnnotatedPdfOptions {}
 
@@ -632,6 +656,180 @@ function reportAnnotationRunProgress(
   throwIfPdfOperationAborted(options.signal);
 }
 
+function exportCapturedAt(options: ExportAnnotatedPdfOptions): number {
+  const capturedAt = options.capturedAt ?? Date.now();
+  if (!Number.isSafeInteger(capturedAt) || capturedAt < 0) {
+    throw new Error("The PDF export timestamp is invalid.");
+  }
+  return capturedAt;
+}
+
+const EMPTY_CLASSROOM_TIME_RENDER_CONTEXT: ClassroomTimeRenderContext = Object.freeze({});
+const MAX_PDF_EXPORT_CALENDAR_LABELS_PER_WIDGET = 6;
+const MAX_PDF_EXPORT_CALENDAR_LABEL_LENGTH = 512;
+const PDF_EXPORT_CALENDAR_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isBoundedUnicodeString(value: unknown, maximumCodePoints: number): value is string {
+  if (typeof value !== "string" || value.length > maximumCodePoints * 2) return false;
+  let codePoints = 0;
+  for (const _character of value) {
+    codePoints += 1;
+    if (codePoints > maximumCodePoints) return false;
+  }
+  return true;
+}
+
+function isPdfExportCalendarDate(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = PDF_EXPORT_CALENDAR_DATE_PATTERN.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < 1 || month < 1 || month > 12 || day < 1) return false;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= daysInMonth[month - 1];
+}
+
+function copyPdfExportCalendarEvent(
+  value: unknown,
+): Readonly<ClassroomTimeCalendarEventDisplay> {
+  if (
+    !isPlainRecord(value)
+    || !isPdfExportCalendarDate(value.date)
+    || !isBoundedUnicodeString(value.label, MAX_CALENDAR_EVENT_TITLE_LENGTH)
+    || value.label.trim().length === 0
+    || !isBoundedUnicodeString(value.color, 7)
+    || !SAFE_HEX_COLOR_PATTERN.test(value.color)
+    || (
+      value.note !== undefined
+      && !isBoundedUnicodeString(value.note, MAX_CALENDAR_EVENT_NOTE_LENGTH)
+    )
+  ) {
+    throw new Error("The Classroom Time PDF calendar events are invalid.");
+  }
+  return Object.freeze({
+    date: value.date,
+    label: value.label,
+    ...(value.note === undefined ? {} : { note: value.note }),
+    color: value.color.toUpperCase(),
+  });
+}
+
+function classroomTimeRenderContextForExport(
+  scene: SerializedScene,
+  capturedAt: number,
+  resolver: PdfClassroomTimeRenderContextResolver | undefined,
+): ClassroomTimeRenderContext {
+  if (!resolver) return EMPTY_CLASSROOM_TIME_RENDER_CONTEXT;
+  const requested = resolver(scene, capturedAt);
+  if (requested === null || requested === undefined) {
+    return EMPTY_CLASSROOM_TIME_RENDER_CONTEXT;
+  }
+  if (!isPlainRecord(requested)) {
+    throw new Error("The Classroom Time PDF render context is invalid.");
+  }
+  const requestedRecord = requested as unknown as Record<string, unknown>;
+  const requestedBoardTheme = requestedRecord.boardTheme;
+  if (
+    requestedBoardTheme !== undefined
+    && requestedBoardTheme !== "light"
+    && requestedBoardTheme !== "dark"
+  ) {
+    throw new Error("The Classroom Time PDF board theme is invalid.");
+  }
+
+  // Copy only display fields for owners actually present in this scene. This
+  // bounds caller-supplied data while keeping device calendar objects out of
+  // every project and export-scene structure.
+  const owners = classroomTimeLogicalOwnerIds(
+    scene.elements as unknown as readonly ExcalidrawElement[],
+  );
+  const requestedEvents = requestedRecord.calendarEventsByOwner;
+  const eventsByOwner: Record<string, readonly ClassroomTimeCalendarEventDisplay[]> = {};
+  if (requestedEvents !== undefined) {
+    if (!isPlainRecord(requestedEvents)) {
+      throw new Error("The Classroom Time PDF calendar events are invalid.");
+    }
+    for (const ownerId of owners) {
+      if (!Object.hasOwn(requestedEvents, ownerId)) continue;
+      const events = requestedEvents[ownerId];
+      if (events === undefined) continue;
+      if (
+        !Array.isArray(events)
+        || events.length > MAX_PDF_EXPORT_CALENDAR_LABELS_PER_WIDGET
+      ) {
+        throw new Error("The Classroom Time PDF calendar events are invalid.");
+      }
+      eventsByOwner[ownerId] = Object.freeze(events.map(copyPdfExportCalendarEvent));
+    }
+  }
+
+  const requestedLabels = requestedRecord.calendarEventLabelsByOwner;
+  const labelsByOwner: Record<string, readonly string[]> = {};
+  if (requestedLabels !== undefined) {
+    if (!isPlainRecord(requestedLabels)) {
+      throw new Error("The Classroom Time PDF calendar labels are invalid.");
+    }
+    for (const ownerId of owners) {
+      if (!Object.hasOwn(requestedLabels, ownerId)) continue;
+      const labels = requestedLabels[ownerId];
+      if (labels === undefined) continue;
+      if (
+        !Array.isArray(labels)
+        || labels.length > MAX_PDF_EXPORT_CALENDAR_LABELS_PER_WIDGET
+        || labels.some((label) => (
+          typeof label !== "string"
+          || label.length > MAX_PDF_EXPORT_CALENDAR_LABEL_LENGTH
+        ))
+      ) {
+        throw new Error("The Classroom Time PDF calendar labels are invalid.");
+      }
+      labelsByOwner[ownerId] = Object.freeze([...labels]);
+    }
+  }
+
+  const hasEvents = Object.keys(eventsByOwner).length > 0;
+  const hasLabels = Object.keys(labelsByOwner).length > 0;
+  return requestedBoardTheme !== undefined || hasEvents || hasLabels
+    ? Object.freeze({
+        ...(requestedBoardTheme === undefined ? {} : { boardTheme: requestedBoardTheme }),
+        ...(hasEvents ? { calendarEventsByOwner: Object.freeze(eventsByOwner) } : {}),
+        ...(hasLabels ? { calendarEventLabelsByOwner: Object.freeze(labelsByOwner) } : {}),
+      })
+    : EMPTY_CLASSROOM_TIME_RENDER_CONTEXT;
+}
+
+function materializeSceneForExport<T extends SerializedScene>(
+  scene: T,
+  capturedAt: number,
+  resolver: PdfClassroomTimeRenderContextResolver | undefined,
+): T {
+  const renderContext = classroomTimeRenderContextForExport(
+    scene,
+    capturedAt,
+    resolver,
+  );
+  const elements = materializeClassroomTimeWidgetsForExport(
+    scene.elements as unknown as readonly ExcalidrawElement[],
+    capturedAt,
+    renderContext,
+  );
+  return elements === scene.elements
+    ? scene
+    : {
+      ...scene,
+      elements: elements as unknown as readonly Record<string, unknown>[],
+    };
+}
+
 export async function exportAnnotatedPdfWithDiagnostics(
   project: ClassroomProject,
   pdfBytes: Record<PdfDocumentId, Uint8Array>,
@@ -639,12 +837,18 @@ export async function exportAnnotatedPdfWithDiagnostics(
   options: ExportAnnotatedPdfOptions = {},
 ): Promise<PdfExportResult> {
   throwIfPdfOperationAborted(options.signal);
+  const capturedAt = exportCapturedAt(options);
   const annotationMode = options.annotationMode ?? "hybrid";
   if (annotationMode !== "hybrid" && annotationMode !== "visual") {
     throw new Error("The PDF annotation export mode is invalid.");
   }
   const scenes = orderedPdfScenes(project)
-    .filter((scene): scene is SerializedScene & { pdfPage: NonNullable<SerializedScene["pdfPage"]> } => !!scene.pdfPage);
+    .filter((scene): scene is SerializedScene & { pdfPage: NonNullable<SerializedScene["pdfPage"]> } => !!scene.pdfPage)
+    .map((scene) => materializeSceneForExport(
+      scene,
+      capturedAt,
+      options.classroomTimeRenderContextForScene,
+    ));
   if (!scenes.length) throw new Error("This project has no imported PDF pages.");
 
   const output = await awaitPdfOperation(PDFDocument.create(), options.signal);
@@ -1036,6 +1240,7 @@ export async function exportSlidesPdf(
   options: ExportSlidesPdfOptions = {},
 ): Promise<Blob> {
   throwIfPdfOperationAborted(options.signal);
+  const capturedAt = exportCapturedAt(options);
   if (!project.slideOrder.length) throw new Error("Add at least one frame slide before exporting.");
   const output = await awaitPdfOperation(PDFDocument.create(), options.signal);
   const browserRasterBudget = getBrowserPdfRasterBudget();
@@ -1053,6 +1258,7 @@ export async function exportSlidesPdf(
   );
   output.setTitle(`${project.title} — slides`);
   output.setCreator("PatterDraw");
+  const materializedScenes = new Map<string, SerializedScene>();
 
   for (let slideIndex = 0; slideIndex < project.slideOrder.length; slideIndex += 1) {
     const slide = project.slideOrder[slideIndex];
@@ -1065,8 +1271,17 @@ export async function exportSlidesPdf(
       project.slideOrder.length,
       `${project.title} — slides`,
     );
-    const scene = project.scenes[slide.sceneId];
-    if (!scene) continue;
+    const storedScene = project.scenes[slide.sceneId];
+    if (!storedScene) continue;
+    let scene = materializedScenes.get(storedScene.id);
+    if (!scene) {
+      scene = materializeSceneForExport(
+        storedScene,
+        capturedAt,
+        options.classroomTimeRenderContextForScene,
+      );
+      materializedScenes.set(storedScene.id, scene);
+    }
     const renderData = getSlideRenderData(scene, slide.frameId);
     if (!renderData) continue;
     const dimensions = getSlidePdfExportDimensions(

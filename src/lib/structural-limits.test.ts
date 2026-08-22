@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_LIBRARY_ITEMS,
+  MAX_PROJECT_CALENDAR_EVENTS,
   MAX_PROJECT_ELEMENTS_PER_SCENE,
   MAX_PROJECT_TOTAL_ELEMENTS,
   MAX_STRUCTURAL_DEPTH,
@@ -78,6 +79,47 @@ describe("untrusted structured import limits", () => {
       (_, index) => ({ id: `element-${index}`, type: "rectangle" }),
     );
     expect(() => assertProjectStructure(project)).toThrow(/elements/);
+  });
+
+  it("bounds the optional project calendar before semantic restoration", () => {
+    const project = createBlankProject();
+    project.projectCalendar = {
+      schemaVersion: 1,
+      layer: "project",
+      events: Array.from({ length: MAX_PROJECT_CALENDAR_EVENTS + 1 }, () => ({})),
+    } as unknown as NonNullable<typeof project.projectCalendar>;
+    expect(() => assertProjectStructure(project)).toThrow(/more than 500 events.*projectCalendar\.events/);
+  });
+
+  it("bounds project-wide Classroom Time anchors and transfer caches", () => {
+    const project = createBlankProject();
+    project.scenes[project.activeSceneId].elements = Array.from({ length: 65 }, (_, index) => ({
+      id: `widget-${index}`,
+      type: "image",
+      customData: {
+        classroomTimeWidget: { version: 1, ownerId: `owner-${index}`, kind: "clock" },
+      },
+    }));
+    expect(() => assertProjectStructure(project)).toThrow(/more than 64 classroom time widgets/);
+
+    expect(() => assertSceneStructure({
+      elements: [{
+        id: "calendar",
+        type: "image",
+        customData: {
+          classroomTimeWidget: {
+            version: 1,
+            ownerId: "calendar-owner",
+            kind: "calendar",
+            calendar: {
+              transferCache: { payload: "x".repeat(512 * 1_024 + 1) },
+            },
+          },
+        },
+      }],
+      appState: {},
+      files: {},
+    })).toThrow(/calendar transfer cache.*string larger/i);
   });
 
   it("accepts file maps beyond the generic object width and enforces the scene file ceiling", () => {

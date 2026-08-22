@@ -12,6 +12,17 @@ import {
   type LocalImageRasterInfo,
 } from "./image-safety";
 import { sanitizeClassroomMathToolMetadata } from "./math-tools/types";
+import {
+  createClassroomCalendarStoreV1,
+  filterClassroomCalendarStoreV1,
+  isClassroomCalendarStoreV1,
+} from "./classroom-time/calendar";
+import { MAX_CLASSROOM_TIME_WIDGETS } from "./classroom-time/constants";
+import {
+  parseClassroomTimeChildData,
+  parseClassroomTimeWidgetMetadata,
+  type ClassroomTimeWidgetMetadataV1,
+} from "./classroom-time/types";
 import { canonicalizePdfBackground } from "./pdf/background";
 import { reconcilePdfPageOrder } from "./pdf/page-order";
 import {
@@ -49,6 +60,7 @@ const LEGACY_DEFAULT_PROJECT_TITLES = new Set([
   "Untitled classroom canvas",
   "Untitled PatterDraw project",
 ]);
+const CLASSROOM_TIME_CUSTOM_DATA_KEY = "classroomTimeWidget";
 
 export interface ProjectRasterSafetyOptions {
   /** Cancel a restore/preflight when a newer open or navigation supersedes it. */
@@ -74,6 +86,25 @@ export function normalizeSlideFrameAspectRatio(
 ): SlideFrameAspectRatio {
   if (value === "16:9" || value === "4:3" || value === "freeform") return value;
   return legacyWidescreen === true ? "16:9" : "freeform";
+}
+
+/** Count canonical, non-deleted widget anchors across every project scene. */
+export function countProjectClassroomTimeWidgets(
+  project: Pick<ClassroomProject, "scenes">,
+): number {
+  let count = 0;
+  for (const scene of Object.values(project.scenes ?? {})) {
+    if (!scene || !Array.isArray(scene.elements)) continue;
+    for (const element of scene.elements) {
+      if (!element || element.isDeleted || element.type !== "image") continue;
+      const customData = element.customData;
+      if (!customData || typeof customData !== "object" || Array.isArray(customData)) continue;
+      if (parseClassroomTimeWidgetMetadata(
+        (customData as Record<string, unknown>)[CLASSROOM_TIME_CUSTOM_DATA_KEY],
+      )) count += 1;
+    }
+  }
+  return count;
 }
 
 export function isSafeLocalImageSource(value: unknown): value is string {
@@ -160,6 +191,16 @@ function sanitizeSceneAfterStructureCheck(scene: SerializedScene): SerializedSce
         if (mathTool) customData.classroomMathTool = mathTool;
         else delete customData.classroomMathTool;
       }
+      if (CLASSROOM_TIME_CUSTOM_DATA_KEY in customData) {
+        const value = customData[CLASSROOM_TIME_CUSTOM_DATA_KEY];
+        const metadata = next.type === "image"
+          ? parseClassroomTimeWidgetMetadata(value)
+          : null;
+        const child = metadata ? null : parseClassroomTimeChildData(value);
+        if (metadata) customData[CLASSROOM_TIME_CUSTOM_DATA_KEY] = metadata;
+        else if (child) customData[CLASSROOM_TIME_CUSTOM_DATA_KEY] = child;
+        else delete customData[CLASSROOM_TIME_CUSTOM_DATA_KEY];
+      }
       if (CLASSROOM_SLIDE_CUSTOM_DATA_KEY in customData) {
         const slide = next.type === "frame"
           ? sanitizeClassroomSlideMetadata(customData[CLASSROOM_SLIDE_CUSTOM_DATA_KEY])
@@ -180,6 +221,40 @@ function sanitizeSceneAfterStructureCheck(scene: SerializedScene): SerializedSce
   canonicalizePersistedWrapperTool(appState);
   safe.appState = appState;
   return safe;
+}
+
+function metadataWithoutTransferCache(
+  metadata: ClassroomTimeWidgetMetadataV1,
+): ClassroomTimeWidgetMetadataV1 {
+  if (metadata.kind !== "calendar" && metadata.kind !== "dashboard") return metadata;
+  if (metadata.calendar.transferCache === null) return metadata;
+  return {
+    ...metadata,
+    calendar: {
+      ...metadata.calendar,
+      transferCache: null,
+    },
+  };
+}
+
+/** Transfer caches are clipboard/library transport, never canonical project data. */
+function stripProjectCalendarTransferCaches(scene: SerializedScene): void {
+  scene.elements = scene.elements.map((element) => {
+    const customData = element.customData;
+    if (!customData || typeof customData !== "object" || Array.isArray(customData)) return element;
+    const value = (customData as Record<string, unknown>)[CLASSROOM_TIME_CUSTOM_DATA_KEY];
+    const metadata = element.type === "image" ? parseClassroomTimeWidgetMetadata(value) : null;
+    if (!metadata) return element;
+    const canonical = metadataWithoutTransferCache(metadata);
+    if (canonical === metadata) return element;
+    return {
+      ...element,
+      customData: {
+        ...(customData as Record<string, unknown>),
+        [CLASSROOM_TIME_CUSTOM_DATA_KEY]: canonical,
+      },
+    };
+  });
 }
 
 export function sanitizeScene(scene: SerializedScene): SerializedScene {
@@ -220,11 +295,16 @@ export function sanitizeProject(project: ClassroomProject): ClassroomProject {
   safe.slideOrder = reconcileSlideTitleModes(clone(project.slideOrder));
   safe.pdfDocuments = clone(project.pdfDocuments);
   safe.pdfPageOrder = project.pdfPageOrder ? clone(project.pdfPageOrder) : undefined;
+  safe.projectCalendar = project.projectCalendar === undefined
+    ? createClassroomCalendarStoreV1("project")
+    : filterClassroomCalendarStoreV1(project.projectCalendar, "project")
+      ?? createClassroomCalendarStoreV1("project");
   safe.scenes = Object.fromEntries(
     Object.entries(project.scenes).map(([id, scene]) => [id, sanitizeSceneAfterStructureCheck(scene)]),
   );
   for (const scene of Object.values(safe.scenes)) {
     scene.elements = canonicalizePdfBackground(scene, scene.elements);
+    stripProjectCalendarTransferCaches(scene);
   }
   // v1 projects historically used slideOrder as the only classification. Tag
   // those exact frames, detach their children in place, and keep the schema.
@@ -333,6 +413,15 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
   if (project.pdfPageOrder !== undefined && !Array.isArray(project.pdfPageOrder)) {
     throw new Error("PDF page order must be a list.");
   }
+  if (
+    project.projectCalendar !== undefined
+    && !isClassroomCalendarStoreV1(project.projectCalendar, "project")
+  ) {
+    throw new Error("Project classroom calendar metadata is invalid.");
+  }
+  if (requireSanitized && project.projectCalendar === undefined) {
+    throw new Error("Sanitized project classroom calendar metadata is missing.");
+  }
 
   if (project.pdfPageOrder) {
     const orderedIds = new Set<string>();
@@ -351,6 +440,8 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
 
   const frameElements = new Map<string, Set<string>>();
   const pdfSourceInstances = new Map<string, { documentId: string; sourceName: string }>();
+  const classroomTimeAnchorOwners = new Set<string>();
+  let classroomTimeAnchorCount = 0;
   for (const [sceneKey, scene] of Object.entries(project.scenes)) {
     if (
       !scene
@@ -408,6 +499,38 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
       if (customData && typeof customData === "object" && "classroomMathTool" in customData) {
         if (!sanitizeClassroomMathToolMetadata((customData as Record<string, unknown>).classroomMathTool)) {
           throw new Error("A math tool has invalid classroom metadata.");
+        }
+      }
+      if (
+        customData
+        && typeof customData === "object"
+        && CLASSROOM_TIME_CUSTOM_DATA_KEY in customData
+      ) {
+        const value = (customData as Record<string, unknown>)[CLASSROOM_TIME_CUSTOM_DATA_KEY];
+        const metadata = element.type === "image"
+          ? parseClassroomTimeWidgetMetadata(value)
+          : null;
+        const child = metadata ? null : parseClassroomTimeChildData(value);
+        if (!metadata && !child) {
+          throw new Error("A classroom time widget has invalid metadata.");
+        }
+        if (metadata) {
+          if (
+            (metadata.kind === "calendar" || metadata.kind === "dashboard")
+            && metadata.calendar.transferCache !== null
+          ) {
+            throw new Error("A saved classroom time widget contains a non-canonical calendar transfer cache.");
+          }
+          if (!element.isDeleted) {
+            if (classroomTimeAnchorOwners.has(metadata.ownerId)) {
+              throw new Error("A project contains a duplicate classroom time widget identity.");
+            }
+            classroomTimeAnchorOwners.add(metadata.ownerId);
+            classroomTimeAnchorCount += 1;
+            if (classroomTimeAnchorCount > MAX_CLASSROOM_TIME_WIDGETS) {
+              throw new Error(`A project can contain at most ${MAX_CLASSROOM_TIME_WIDGETS} classroom time widgets.`);
+            }
+          }
         }
       }
       if (customData && typeof customData === "object" && CLASSROOM_SLIDE_CUSTOM_DATA_KEY in customData) {

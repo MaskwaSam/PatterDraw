@@ -1,5 +1,10 @@
 import type { ClassroomProject, SerializedScene } from "../types";
 import { MAX_AUXILIARY_STORAGE_BYTES } from "./storage-budget";
+import {
+  MAX_CALENDAR_EVENTS_PER_LAYER,
+  MAX_CALENDAR_TRANSFER_CACHE_BYTES,
+  MAX_CLASSROOM_TIME_WIDGETS,
+} from "./classroom-time/constants";
 
 /**
  * Structural limits are deliberately independent from the semantic project
@@ -33,6 +38,9 @@ export const MAX_PROJECT_ELEMENTS_PER_SCENE = 100_000;
 export const MAX_PROJECT_TOTAL_ELEMENTS = 250_000;
 export const MAX_PROJECT_FILES_PER_SCENE = 10_000;
 export const MAX_PROJECT_TOTAL_FILES = 25_000;
+/** Classroom Time limits apply across the complete project, not per scene. */
+export const MAX_PROJECT_CLASSROOM_TIME_WIDGETS = MAX_CLASSROOM_TIME_WIDGETS;
+export const MAX_PROJECT_CALENDAR_EVENTS = MAX_CALENDAR_EVENTS_PER_LAYER;
 
 /** The auxiliary storage budget is 64 MiB; these counts leave migration room. */
 export const MAX_LIBRARY_ITEMS = 4_096;
@@ -357,6 +365,45 @@ function requireArray(value: unknown, label: string, path: string): asserts valu
   }
 }
 
+function assertClassroomTimeElementStructure(
+  elements: readonly unknown[],
+  label: string,
+  path: string,
+): number {
+  let anchors = 0;
+  for (let index = 0; index < elements.length; index += 1) {
+    const element = elements[index];
+    if (!isPlainObject(element) || !isPlainObject(element.customData)) continue;
+    const marker = element.customData.classroomTimeWidget;
+    if (!isPlainObject(marker)) continue;
+    if (element.isDeleted !== true && element.type === "image" && typeof marker.kind === "string") {
+      anchors += 1;
+    }
+    if (!isPlainObject(marker.calendar)) continue;
+    const transferCache = marker.calendar.transferCache;
+    if (transferCache === undefined || transferCache === null) continue;
+    const cachePath = `${path}.${index}.customData.classroomTimeWidget.calendar.transferCache`;
+    assertStructuredData(transferCache, {
+      label: `${label} classroom calendar transfer cache`,
+      maxArrayLength: MAX_CALENDAR_EVENTS_PER_LAYER,
+      maxStringBytes: MAX_CALENDAR_TRANSFER_CACHE_BYTES,
+      maxTotalStringBytes: MAX_CALENDAR_TRANSFER_CACHE_BYTES,
+    });
+    if (
+      isPlainObject(transferCache)
+      && Array.isArray(transferCache.events)
+      && transferCache.events.length > MAX_CALENDAR_EVENTS_PER_LAYER
+    ) {
+      throw structuralError(
+        label,
+        `${cachePath}.events`,
+        `contains more than ${MAX_CALENDAR_EVENTS_PER_LAYER} transfer events`,
+      );
+    }
+  }
+  return anchors;
+}
+
 /** Validate a complete PatterDraw project before sanitizeProject/clone. */
 export function assertProjectStructure(
   value: unknown,
@@ -384,6 +431,7 @@ export function assertProjectStructure(
   }
   let totalElements = 0;
   let totalFiles = 0;
+  let totalClassroomTimeWidgets = 0;
   for (const sceneId of sceneIds) {
     const scene = scenes[sceneId];
     requirePlainRecord(scene, label, `scenes.${sceneId}`);
@@ -395,6 +443,18 @@ export function assertProjectStructure(
     totalElements += elements.length;
     if (!Number.isSafeInteger(totalElements) || totalElements > MAX_PROJECT_TOTAL_ELEMENTS) {
       throw structuralError(label, "scenes", `exceeds the total element count of ${MAX_PROJECT_TOTAL_ELEMENTS}`);
+    }
+    totalClassroomTimeWidgets += assertClassroomTimeElementStructure(
+      elements,
+      label,
+      `scenes.${sceneId}.elements`,
+    );
+    if (totalClassroomTimeWidgets > MAX_PROJECT_CLASSROOM_TIME_WIDGETS) {
+      throw structuralError(
+        label,
+        "scenes",
+        `contains more than ${MAX_PROJECT_CLASSROOM_TIME_WIDGETS} classroom time widgets`,
+      );
     }
     const files = scene.files;
     requirePlainRecord(files, label, `scenes.${sceneId}.files`);
@@ -423,6 +483,17 @@ export function assertProjectStructure(
   if (Object.keys(project.pdfDocuments).length > MAX_PROJECT_SCENES) {
     throw structuralError(label, "pdfDocuments", `contains more than ${MAX_PROJECT_SCENES} documents`);
   }
+  if (project.projectCalendar !== undefined) {
+    requirePlainRecord(project.projectCalendar, label, "projectCalendar");
+    requireArray(project.projectCalendar.events, label, "projectCalendar.events");
+    if (project.projectCalendar.events.length > MAX_PROJECT_CALENDAR_EVENTS) {
+      throw structuralError(
+        label,
+        "projectCalendar.events",
+        `contains more than ${MAX_PROJECT_CALENDAR_EVENTS} events`,
+      );
+    }
+  }
 }
 
 /** Validate an Excalidraw scene or the scene-shaped native import object. */
@@ -440,6 +511,13 @@ export function assertSceneStructure(
   requireArray(value.elements, label, "elements");
   if (value.elements.length > MAX_PROJECT_ELEMENTS_PER_SCENE) {
     throw structuralError(label, "elements", `contains more than ${MAX_PROJECT_ELEMENTS_PER_SCENE} elements`);
+  }
+  if (assertClassroomTimeElementStructure(value.elements, label, "elements") > MAX_PROJECT_CLASSROOM_TIME_WIDGETS) {
+    throw structuralError(
+      label,
+      "elements",
+      `contains more than ${MAX_PROJECT_CLASSROOM_TIME_WIDGETS} classroom time widgets`,
+    );
   }
   if (value.appState !== undefined) requirePlainRecord(value.appState, label, "appState");
   if (value.files !== undefined) {

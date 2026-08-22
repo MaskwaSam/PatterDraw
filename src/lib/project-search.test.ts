@@ -3,6 +3,7 @@ import type { ClassroomProject, SerializedScene } from "../types";
 import { createBlankProject } from "../types";
 import { slideFrameCustomData } from "./slides";
 import { searchProjectText } from "./project-search";
+import { createDefaultClassroomTimeWidgetMetadata } from "./classroom-time/types";
 
 function element(
   id: string,
@@ -97,6 +98,39 @@ describe("searchProjectText", () => {
     });
 
     expect(searchProjectText(project, "needle").map((result) => result.elementId)).toEqual(["live"]);
+  });
+
+  it("indexes a Classroom Time anchor label once and excludes generated child text", () => {
+    const metadata = createDefaultClassroomTimeWidgetMetadata("timer", "timer-owner");
+    metadata.label = "Period 2 countdown";
+    const project = projectWithScenes({
+      board: scene("board", "Canvas", [
+        element("timer-anchor", "image", {
+          customData: { classroomTimeWidget: metadata },
+        }),
+        element("timer-title", "text", {
+          text: "Period 2 countdown",
+          customData: {
+            classroomTimeWidget: { version: 1, ownerId: "timer-owner", role: "title" },
+          },
+        }),
+        element("timer-value", "text", {
+          text: "04:59",
+          customData: {
+            classroomTimeWidget: { version: 1, ownerId: "timer-owner", role: "primary-value" },
+          },
+        }),
+      ]),
+    });
+
+    expect(searchProjectText(project, "Period 2")).toEqual([
+      expect.objectContaining({
+        key: "board:timer-anchor",
+        elementId: "timer-anchor",
+        text: "Period 2 countdown",
+      }),
+    ]);
+    expect(searchProjectText(project, "04:59")).toEqual([]);
   });
 
   it("classifies board, slide, and PDF text in deterministic navigation order", () => {

@@ -35,6 +35,7 @@ import type {
   MathToolCategory,
   MathToolConfiguration,
   MathToolKind,
+  ClassroomTimeToolCardDefinition,
   ProtractorMathToolMetadata,
   RulerMathToolMetadata,
 } from "./types";
@@ -43,7 +44,56 @@ export const MATH_TOOL_CATEGORIES: readonly { id: MathToolCategory; label: strin
   { id: "instruments", label: "Instruments" },
   { id: "graphs", label: "Graphs" },
   { id: "manipulatives", label: "Manipulatives" },
+  { id: "classroom", label: "Classroom" },
 ];
+
+export const CLASSROOM_TIME_TOOL_CARDS: readonly ClassroomTimeToolCardDefinition[] = Object.freeze([
+  {
+    id: "classroom-clock",
+    kind: "clock",
+    category: "classroom",
+    title: "Clock",
+    description: "Live digital or analog classroom clock",
+    detail: "Show the time, date, weekday, seconds, and timezone on the board.",
+    preview: "clock",
+  },
+  {
+    id: "classroom-timer",
+    kind: "timer",
+    category: "classroom",
+    title: "Timer",
+    description: "Custom countdown with a local alarm",
+    detail: "Set a duration, progress style, colours, tone, and repeat behaviour.",
+    preview: "timer",
+  },
+  {
+    id: "classroom-pomodoro",
+    kind: "pomodoro",
+    category: "classroom",
+    title: "Pomodoro",
+    description: "Focus and break cycles for class work",
+    detail: "Use classic 25/5/15 timing or customize every phase and cycle.",
+    preview: "pomodoro",
+  },
+  {
+    id: "classroom-calendar",
+    kind: "calendar",
+    category: "classroom",
+    title: "Class Calendar",
+    description: "Project and device-local classroom events",
+    detail: "Show a month, week, or agenda view with colour-coded class events.",
+    preview: "calendar",
+  },
+  {
+    id: "classroom-dashboard",
+    kind: "dashboard",
+    category: "classroom",
+    title: "Dashboard",
+    description: "Clock, timers, and calendar in one widget",
+    detail: "Choose the panels your class needs and customize them together.",
+    preview: "dashboard",
+  },
+]);
 
 interface MathToolDefinitionCore {
   id: string;

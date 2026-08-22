@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboa
 import {
   MATH_TOOL_CATALOGUE,
   MATH_TOOL_CATEGORIES,
+  CLASSROOM_TIME_TOOL_CARDS,
   mathToolPreview,
   mathToolsForCategory,
   type MathInteractionKind,
@@ -12,6 +13,7 @@ import type {
   MathToolCategory,
   MathToolConfiguration,
 } from "../lib/math-tools/types";
+import type { ClassroomTimeWidgetKind } from "../lib/classroom-time/types";
 import {
   persistExperimentalFeaturesPreference,
   readExperimentalFeaturesPreference,
@@ -23,6 +25,7 @@ interface MathToolsDialogProps {
   initialConfiguration?: MathToolConfiguration | null;
   onCancel: () => void;
   onOpenGeoGon: () => void;
+  onOpenClassroomTimeTool: (kind: ClassroomTimeWidgetKind) => void;
   onInsert: (tool: GeneratedMathToolInsertion) => void;
   onStartInteraction: (kind: MathInteractionKind) => void;
 }
@@ -215,6 +218,7 @@ export function MathToolsDialog({
   initialConfiguration,
   onCancel,
   onOpenGeoGon,
+  onOpenClassroomTimeTool,
   onInsert,
   onStartInteraction,
 }: MathToolsDialogProps) {
@@ -384,7 +388,25 @@ export function MathToolsDialog({
                   <span>Build a 3D geometry view and insert it as a local vector image.</span>
                 </button>
               ) : null}
-              {tools.length ? tools.map((definition, index) => {
+              {experimentalFeaturesEnabled && category === "classroom" ? CLASSROOM_TIME_TOOL_CARDS.map((definition) => (
+                <button
+                  key={definition.id}
+                  className="math-tool-card classroom-time-tool-card"
+                  type="button"
+                  data-testid={`math-tool-${definition.id}`}
+                  onClick={() => onOpenClassroomTimeTool(definition.kind)}
+                >
+                  <span className="math-tool-card-heading"><strong>{definition.title}</strong><span>Live widget</span></span>
+                  <span className={`classroom-time-tool-preview is-${definition.preview}`} aria-hidden="true">
+                    {definition.preview === "clock" ? <><strong>10:42</strong><small>MONDAY · MAY 12</small></> : null}
+                    {definition.preview === "timer" ? <><strong>05:00</strong><i><b /></i><small>CLASS TIMER</small></> : null}
+                    {definition.preview === "pomodoro" ? <><strong>25:00</strong><i><b /></i><small>FOCUS · 1 OF 4</small></> : null}
+                    {definition.preview === "calendar" ? <><small>MAY 2026</small><span>{Array.from({ length: 14 }, (_, day) => <b key={day}>{day + 1}</b>)}</span></> : null}
+                    {definition.preview === "dashboard" ? <><span><b>10:42</b><b>05:00</b></span><small>CLASSROOM DASHBOARD</small></> : null}
+                  </span>
+                  <span>{definition.description}</span>
+                </button>
+              )) : tools.length ? tools.map((definition, index) => {
                 const preview = mathToolPreview(definition);
                 return (
                   <button

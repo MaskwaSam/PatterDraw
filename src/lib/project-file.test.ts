@@ -10,6 +10,7 @@ import {
 import { sanitizeProject } from "./safety";
 import { MATH_TOOL_CATALOGUE } from "./math-tools/catalogue";
 import { MAX_STRUCTURAL_DEPTH } from "./structural-limits";
+import type { ClassroomCalendarEventV1 } from "./classroom-time/calendar";
 
 const MINIMAL_PDF_BASE64 = "JVBERi0xLjcKJYGBgYEKCjEgMCBvYmoKPDwKL1R5cGUgL1BhZ2VzCi9LaWRzIFsgNCAwIFIgXQovQ291bnQgMQo+PgplbmRvYmoKCjIgMCBvYmoKPDwKL1R5cGUgL0NhdGFsb2cKL1BhZ2VzIDEgMCBSCj4+CmVuZG9iagoKMyAwIG9iago8PAovUHJvZHVjZXIgPEZFRkYwMDcwMDA2NDAwNjYwMDJEMDA2QzAwNjkwMDYyMDAyMDAwMjgwMDY4MDA3NDAwNzQwMDcwMDA3MzAwM0EwMDJGMDAyRjAwNjcwMDY5MDA3NDAwNjgwMDc1MDA2MjAwMkUwMDYzMDA2RjAwNkQwMDJGMDA0ODAwNkYwMDcwMDA2NDAwNjkwMDZFMDA2NzAwMkYwMDcwMDA2NDAwNjYwMDJEMDA2QzAwNjkwMDYyMDAyOT4KL01vZERhdGUgKEQ6MjAyNjA4MDUwMTQ2MzFaKQovQ3JlYXRvciA8RkVGRjAwNzAwMDY0MDA2NjAwMkQwMDZDMDA2OTAwNjIwMDIwMDAyODAwNjgwMDc0MDA3NDAwNzAwMDczMDAzQTAwMkYwMDJGMDA2NzAwNjkwMDc0MDA2ODAwNzUwMDYyMDAyRTAwNjMwMDZGMDA2RDAwMkYwMDQ4MDA2RjAwNzAwMDY0MDA2OTAwNkUwMDY3MDAyRjAwNzAwMDY0MDA2NjAwMkQwMDZDMDA2OTAwNjIwMDI5PgovQ3JlYXRpb25EYXRlIChEOjIwMjYwODA1MDE0NjMxWikKPj4KZW5kb2JqCgo0IDAgb2JqCjw8Ci9UeXBlIC9QYWdlCi9QYXJlbnQgMSAwIFIKL1Jlc291cmNlcyA8PAo+PgovTWVkaWFCb3ggWyAwIDAgNjEyIDc5MiBdCj4+CmVuZG9iagoKeHJlZgowIDUKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDE2IDAwMDAwIG4gCjAwMDAwMDAwNzYgMDAwMDAgbiAKMDAwMDAwMDEyNiAwMDAwMCBuIAowMDAwMDAwNTk2IDAwMDAwIG4gCgp0cmFpbGVyCjw8Ci9TaXplIDUKL1Jvb3QgMiAwIFIKL0luZm8gMyAwIFIKPj4KCnN0YXJ0eHJlZgo2ODcKJSVFT0Y=";
 const validPdfBytes = () => Uint8Array.from(atob(MINIMAL_PDF_BASE64), (char) => char.charCodeAt(0));
@@ -108,6 +109,38 @@ describe("classroom project files", () => {
       undefined,
       { signal: controller.signal },
     )).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("round-trips canonical project calendar events and upgrades legacy manifests", async () => {
+    const event: ClassroomCalendarEventV1 = {
+      schemaVersion: 1,
+      id: "quiz-day",
+      date: "2026-09-03",
+      title: "Quiz",
+      note: "Chapter 2",
+      color: "#7C3AED",
+      allDay: true,
+      createdAt: "2026-08-21T12:00:00.000Z",
+      updatedAt: "2026-08-21T12:00:00.000Z",
+    };
+    const project = createBlankProject();
+    project.projectCalendar = { schemaVersion: 1, layer: "project", events: [event] };
+
+    const decoded = await decodeProjectFile(await encodeProjectFile(project, {}));
+    expect(decoded.project.projectCalendar).toEqual({
+      schemaVersion: 1,
+      layer: "project",
+      events: [event],
+    });
+
+    const legacy = createBlankProject();
+    delete legacy.projectCalendar;
+    const legacyDecoded = await decodeProjectFile(await encodeProjectFile(legacy, {}));
+    expect(legacyDecoded.project.projectCalendar).toEqual({
+      schemaVersion: 1,
+      layer: "project",
+      events: [],
+    });
   });
 
   it("round-trips project metadata and original PDF bytes", async () => {
