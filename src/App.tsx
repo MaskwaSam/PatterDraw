@@ -63,6 +63,7 @@ import { MermaidDialog } from "./components/MermaidDialog";
 import { ProjectFindPanel } from "./components/ProjectFindPanel";
 import { useModalDialog } from "./components/useModalDialog";
 import { ScreenshotCaptureOverlay } from "./components/ScreenshotCaptureOverlay";
+import { ObsCaptureGuide } from "./components/ObsCaptureGuide";
 import {
   SCREENSHOT_DRAG_MIME,
   SCREENSHOT_SIDEBAR_TAB,
@@ -4843,6 +4844,75 @@ export default function App() {
     return () => document.removeEventListener("fullscreenchange", stopWhenPresentationFullscreenEnds);
   }, [presentation, stopPresentation]);
 
+  useEffect(() => {
+    if (!featurePreferences.obsCaptureArea || !api || presentation) return;
+    pendingProjectSearchTargetRef.current = null;
+    resetTransientPointerTools();
+    if (slideFrameDrawingActiveRef.current) stopSlideFrameDrawing();
+    setExportOpen(false);
+    setPendingVisualPdfFallback(null);
+    setPendingPdfAnnotationClear(null);
+    setEquationEditor(null);
+    setMermaidEditor(null);
+    setIsMathToolsOpen(false);
+    setIsGeoGonOpen(false);
+    setMathToolEdit(null);
+    setMathInteraction(null);
+    setIsScreenshotCaptureActive(false);
+    setIsProjectFindOpen(false);
+    setIsSizePositionOpen(false);
+    setIsLibraryOpen(false);
+    libraryOpenRef.current = false;
+    const appState = api.getAppState();
+    api.updateScene({
+      appState: {
+        editingFrame: null,
+        editingGroupId: null,
+        openDialog: null,
+        openSidebar: null,
+        selectedElementIds: {},
+        selectedGroupIds: {},
+        stats: { ...appState.stats, open: false },
+      },
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
+    const refreshFrame = window.requestAnimationFrame(() => {
+      api.refresh();
+      editorHostRef.current?.querySelector<HTMLElement>(".excalidraw")?.focus();
+    });
+    return () => window.cancelAnimationFrame(refreshFrame);
+  }, [
+    api,
+    featurePreferences.obsCaptureArea,
+    presentation,
+    resetTransientPointerTools,
+    stopSlideFrameDrawing,
+  ]);
+
+  useEffect(() => {
+    if (!featurePreferences.obsCaptureArea || !api) return;
+    let focusFrame = 0;
+    const refreshFrame = window.requestAnimationFrame(() => {
+      api.refresh();
+      if (workspaceMode !== "slides" || !activeSlideId) return;
+      const slide = project?.slideOrder.find((candidate) => candidate.id === activeSlideId);
+      if (!project || !slide || slide.sceneId !== project.activeSceneId) return;
+      focusFrame = window.requestAnimationFrame(() => focusSlide(api, slide.frameId, false));
+    });
+    return () => {
+      window.cancelAnimationFrame(refreshFrame);
+      window.cancelAnimationFrame(focusFrame);
+    };
+  }, [
+    activeSlideId,
+    api,
+    featurePreferences.obsCaptureArea,
+    isFullscreen,
+    project?.activeSceneId,
+    project?.slideOrder,
+    workspaceMode,
+  ]);
+
   const toggleFullscreen = useCallback(async () => {
     const shell = shellRef.current;
     let requestIntent: { kind: "manual"; entered: boolean } | null = null;
@@ -7248,7 +7318,7 @@ export default function App() {
   return (
     <div
       ref={shellRef}
-      className={`app-shell ${workspaceModeClassName(workspaceMode)} ${workspaceMode === "slides" && !isSlideRailVisible ? "is-slide-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfRailVisible ? "is-pdf-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfToolbarVisible ? "is-pdf-toolbar-hidden" : ""} ${!isNavigationVisible ? "is-nav-hidden" : ""} ${!isFooterVisible ? "is-footer-hidden" : ""} ${!featurePreferences.projectFind ? "is-project-find-disabled" : ""} ${!featurePreferences.library ? "is-library-disabled" : ""} ${featurePreferences.iconOnlyControls ? "is-icon-only-controls" : ""} ${presentation ? "is-presenting" : ""}`}
+      className={`app-shell ${workspaceModeClassName(workspaceMode)} ${workspaceMode === "slides" && !isSlideRailVisible ? "is-slide-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfRailVisible ? "is-pdf-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfToolbarVisible ? "is-pdf-toolbar-hidden" : ""} ${!isNavigationVisible ? "is-nav-hidden" : ""} ${!isFooterVisible ? "is-footer-hidden" : ""} ${!featurePreferences.projectFind ? "is-project-find-disabled" : ""} ${!featurePreferences.library ? "is-library-disabled" : ""} ${featurePreferences.iconOnlyControls ? "is-icon-only-controls" : ""} ${featurePreferences.obsCaptureArea ? "is-obs-capture-enabled" : ""} ${featurePreferences.obsCaptureArea && featurePreferences.obsShowCursor ? "is-obs-cursor-visible" : ""} ${presentation ? "is-presenting" : ""}`}
       data-theme={editorTheme}
       style={{ "--pdf-rail-width": `${pdfRailWidth}px` } as CSSProperties}
     >
@@ -7468,7 +7538,16 @@ export default function App() {
           >
             {featurePreferences.library || featurePreferences.projectFind ? defaultSidebar : null}
           </Excalidraw>
-          {isSlideFrameDrawingActive && workspaceMode === "slides" && (
+          {featurePreferences.obsCaptureArea && !presentation ? (
+            <ObsCaptureGuide
+              layout={workspaceMode === "pdf"
+                ? "viewport"
+                : featurePreferences.obsRecordVisibleCanvas
+                  ? "visible"
+                  : "widescreen"}
+            />
+          ) : null}
+          {!featurePreferences.obsCaptureArea && isSlideFrameDrawingActive && workspaceMode === "slides" && (
             <div
               className="slide-frame-draw-overlay"
               data-testid="slide-frame-draw-overlay"
@@ -7486,16 +7565,16 @@ export default function App() {
             aria-hidden="true"
             hidden
           />
-          {isScreenshotCaptureActive && (
+          {!featurePreferences.obsCaptureArea && isScreenshotCaptureActive && (
             <ScreenshotCaptureOverlay
               onCancel={cancelScreenshotCapture}
               onCapture={finishScreenshotCapture}
             />
           )}
-          {spinnerPointerAnimations.length > 0 && (
+          {!featurePreferences.obsCaptureArea && spinnerPointerAnimations.length > 0 && (
             <SpinnerPointerOverlay durationMs={SPINNER_ANIMATION_DURATION_MS} spinners={spinnerPointerAnimations} />
           )}
-          {api && (
+          {api && !featurePreferences.obsCaptureArea && (
             <>
               <StrokeWidthExtensions
                 api={api}
@@ -7526,7 +7605,7 @@ export default function App() {
               ) : null}
             </>
           )}
-          {api && isLassoActive && lassoGeometryFactory && lassoInitialSelection && editorHostRef.current ? (
+          {api && !featurePreferences.obsCaptureArea && isLassoActive && lassoGeometryFactory && lassoInitialSelection && editorHostRef.current ? (
             <LassoOverlay
               api={api}
               createGeometrySnapshot={lassoGeometryFactory}
@@ -7535,7 +7614,7 @@ export default function App() {
               onExit={finishLasso}
             />
           ) : null}
-          {api && isBucketFillActive && editorHostRef.current ? (
+          {api && !featurePreferences.obsCaptureArea && isBucketFillActive && editorHostRef.current ? (
             <BucketFillOverlay
               api={api}
               editorHost={editorHostRef.current}
@@ -7543,7 +7622,7 @@ export default function App() {
               onFill={fillBucketRegion}
             />
           ) : null}
-          {mathInteraction && (
+          {!featurePreferences.obsCaptureArea && mathInteraction && (
             <MathInteractionOverlay
               kind={mathInteraction.kind}
               points={mathInteraction.points}

@@ -4933,6 +4933,133 @@ test("strips canvas links and blocks external navigation", async ({ page }) => {
   expect(consoleErrors).toEqual([]);
 });
 
+test("configures a same-window OBS crop area only from Settings", async ({ context, page }) => {
+  const shell = page.locator(".app-shell");
+  const editorHost = page.locator(".editor-host");
+  const editor = editorHost.locator(".excalidraw");
+  await expect(editor).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await editorHost.evaluate((element) => element.setAttribute("data-obs-editor-token", "live-editor"));
+  const pageCount = context.pages().length;
+  await expect(page.locator(".statusbar").getByText("OBS", { exact: true })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+  const captureArea = settings.getByRole("switch", { name: "OBS capture area", exact: true });
+  const recordVisibleCanvas = settings.getByRole("switch", { name: "Record all visible canvas", exact: true });
+  const showCursor = settings.getByRole("switch", { name: "Show cursor in OBS", exact: true });
+  await expect(captureArea).not.toBeChecked();
+  await expect(recordVisibleCanvas).not.toBeChecked();
+  await expect(recordVisibleCanvas).toBeDisabled();
+  await expect(showCursor).toBeChecked();
+  await expect(showCursor).toBeDisabled();
+  await captureArea.check();
+  await page.keyboard.press("Escape");
+  await expect(settings).toHaveCount(0);
+  await expect(shell).toHaveClass(/is-obs-capture-enabled/);
+  await expect(shell).toHaveClass(/is-obs-cursor-visible/);
+  expect(context.pages()).toHaveLength(pageCount);
+  await expect(editorHost).toHaveAttribute("data-obs-editor-token", "live-editor");
+  await expect(page.locator(".topbar")).toBeVisible();
+  await expect(page.locator(".statusbar")).toBeVisible();
+  const drawingTools = page.getByRole("region", { name: "Shapes", exact: true });
+  await expect(drawingTools).toBeVisible();
+
+  const guide = page.getByTestId("obs-capture-guide");
+  const guideFrame = guide.locator(".obs-capture-guide-frame");
+  await expect(guide).toHaveAccessibleName("OBS 16:9 capture area");
+  await expect(guide).toHaveAttribute("data-layout", "widescreen");
+  await expect(guideFrame).toBeVisible();
+  const boardGuide = await guideFrame.boundingBox();
+  const boardTools = await drawingTools.boundingBox();
+  expect(boardGuide).not.toBeNull();
+  expect(boardTools).not.toBeNull();
+  expect((boardGuide?.width || 0) / (boardGuide?.height || 1)).toBeCloseTo(16 / 9, 2);
+  expect((boardTools?.y || 0) + (boardTools?.height || 0)).toBeLessThanOrEqual((boardGuide?.y || 0) - 2);
+  expect(await editorHost.evaluate((element) => getComputedStyle(element).cursor)).not.toBe("none");
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(recordVisibleCanvas).toBeEnabled();
+  await expect(showCursor).toBeEnabled();
+  await recordVisibleCanvas.check();
+  await expect(guide).toHaveAttribute("data-layout", "visible");
+  await expect(guide).toHaveAccessibleName("OBS visible canvas capture area");
+  const visibleGuide = await guideFrame.boundingBox();
+  expect(visibleGuide).not.toBeNull();
+  expect(visibleGuide?.width || 0).toBeGreaterThan(boardGuide?.width || 0);
+  expect((boardTools?.y || 0) + (boardTools?.height || 0)).toBeLessThanOrEqual((visibleGuide?.y || 0) - 2);
+  await recordVisibleCanvas.uncheck();
+  await expect(guide).toHaveAttribute("data-layout", "widescreen");
+  await showCursor.uncheck();
+  await page.keyboard.press("Escape");
+  await expect(shell).not.toHaveClass(/is-obs-cursor-visible/);
+  await expect(editorHost).toHaveCSS("cursor", "none");
+
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.getByRole("button", { name: "Add slide", exact: true }).click();
+  await page.getByRole("button", { name: "Add slide", exact: true }).click();
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(2);
+  await expect(guide).toHaveAttribute("data-layout", "widescreen");
+  const slidesGuide = await guideFrame.boundingBox();
+  expect((slidesGuide?.width || 0) / (slidesGuide?.height || 1)).toBeCloseTo(16 / 9, 2);
+  await page.getByRole("button", { name: /Open slide 1:/ }).click();
+  await expect(guide).toHaveAttribute("data-layout", "widescreen");
+  await page.getByRole("button", { name: /Open slide 2:/ }).click();
+  await expect(guide).toHaveAttribute("data-layout", "widescreen");
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await recordVisibleCanvas.check();
+  await page.keyboard.press("Escape");
+  await expect(guide).toHaveAttribute("data-layout", "visible");
+  const visibleSlidesGuide = await guideFrame.boundingBox();
+  expect(visibleSlidesGuide).not.toBeNull();
+  expect((visibleSlidesGuide?.width || 0) * (visibleSlidesGuide?.height || 0))
+    .toBeGreaterThan((slidesGuide?.width || 0) * (slidesGuide?.height || 0));
+  await page.getByRole("button", { name: /Open slide 1:/ }).click();
+  await expect(guide).toHaveAttribute("data-layout", "visible");
+  await page.getByRole("button", { name: /Open slide 2:/ }).click();
+  await expect(guide).toHaveAttribute("data-layout", "visible");
+
+  await openTestPdf(page, 2);
+  const pdfGuide = page.getByRole("region", { name: "OBS full canvas capture area", exact: true });
+  await expect(pdfGuide).toHaveAttribute("data-layout", "viewport");
+  await expect(drawingTools).toBeHidden();
+  const pdfFrame = await pdfGuide.locator(".obs-capture-guide-frame").boundingBox();
+  const pdfEditor = await editorHost.boundingBox();
+  expect(pdfFrame).not.toBeNull();
+  expect(pdfEditor).not.toBeNull();
+  expect(Math.abs((pdfEditor?.width || 0) - (pdfFrame?.width || 0))).toBeLessThanOrEqual(10);
+  expect(Math.abs((pdfEditor?.height || 0) - (pdfFrame?.height || 0))).toBeLessThanOrEqual(10);
+
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await recordVisibleCanvas.uncheck();
+  await page.keyboard.press("Escape");
+  await expect(guide).toHaveAttribute("data-layout", "widescreen");
+  await page.getByRole("button", { name: "Enter fullscreen", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(true);
+  await expect(page.locator(".topbar")).toBeHidden();
+  await expect(page.locator(".statusbar")).toBeHidden();
+  await expect(page.locator("#slide-rail")).toBeHidden();
+  await expect(drawingTools).toBeHidden();
+  const fullscreenGuide = await guideFrame.boundingBox();
+  expect(fullscreenGuide).not.toBeNull();
+  expect((fullscreenGuide?.width || 0) / (fullscreenGuide?.height || 1)).toBeCloseTo(16 / 9, 2);
+  expect(fullscreenGuide?.width || 0).toBeGreaterThan(slidesGuide?.width || 0);
+  await page.evaluate(() => document.exitFullscreen());
+  await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true);
+  await expect(editorHost).toHaveAttribute("data-obs-editor-token", "live-editor");
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await recordVisibleCanvas.check();
+  await page.keyboard.press("Escape");
+  await page.reload();
+  await expect(shell).toHaveClass(/is-obs-capture-enabled/);
+  await expect(shell).not.toHaveClass(/is-obs-cursor-visible/);
+  await expect(guide).toHaveAttribute("data-layout", "visible");
+  await expect(guide).toHaveAccessibleName("OBS visible canvas capture area");
+  expect(context.pages()).toHaveLength(pageCount);
+});
+
 test("toggles fullscreen from the bottom-right status bar", async ({ page }) => {
   const fullscreenButton = page.getByRole("button", { name: "Enter fullscreen", exact: true });
   await expect(fullscreenButton).toBeVisible();

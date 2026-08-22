@@ -36,6 +36,7 @@ export interface SettingsMenuProps {
 interface SettingsToggleProps {
   checked: boolean;
   description: string;
+  disabled?: boolean;
   label: string;
   onChange: (enabled: boolean) => void;
 }
@@ -93,10 +94,16 @@ const PDF_TOGGLES: ReadonlyArray<{
   },
 ];
 
-function SettingsToggle({ checked, description, label, onChange }: SettingsToggleProps) {
+function SettingsToggle({
+  checked,
+  description,
+  disabled = false,
+  label,
+  onChange,
+}: SettingsToggleProps) {
   const descriptionId = useId();
   return (
-    <label className="settings-toggle">
+    <label className={`settings-toggle ${disabled ? "is-disabled" : ""}`}>
       <span>
         <strong>{label}</strong>
         <small id={descriptionId}>{description}</small>
@@ -107,6 +114,7 @@ function SettingsToggle({ checked, description, label, onChange }: SettingsToggl
         aria-label={label}
         aria-describedby={descriptionId}
         checked={checked}
+        disabled={disabled}
         onChange={(event) => onChange(event.target.checked)}
       />
     </label>
@@ -189,6 +197,10 @@ export function SettingsMenu({
     onRestoreDefaults();
     restorePdfDefaults();
     setExperimentalFeatures(false);
+  };
+
+  const setObsCaptureArea = (enabled: boolean) => {
+    onPreferenceChange("obsCaptureArea", enabled);
   };
 
   return (
@@ -308,6 +320,33 @@ export function SettingsMenu({
                 <option value="system">System</option>
               </select>
             </label>
+          </div>
+
+          <div className="settings-group" role="group" aria-labelledby="recording-settings-label">
+            <h3 id="recording-settings-label">Recording</h3>
+            <SettingsToggle
+              checked={preferences.obsCaptureArea}
+              description="Show a clean crop guide; Board and Slides use 16:9, while PDF uses the full canvas"
+              label="OBS capture area"
+              onChange={setObsCaptureArea}
+            />
+            <SettingsToggle
+              checked={preferences.obsRecordVisibleCanvas}
+              description="Fill the guide with all visible Board or Slides canvas instead of a 16:9 crop"
+              disabled={!preferences.obsCaptureArea}
+              label="Record all visible canvas"
+              onChange={(enabled) => onPreferenceChange("obsRecordVisibleCanvas", enabled)}
+            />
+            <SettingsToggle
+              checked={preferences.obsShowCursor}
+              description="Include the pointer while it is over the capture area"
+              disabled={!preferences.obsCaptureArea}
+              label="Show cursor in OBS"
+              onChange={(enabled) => onPreferenceChange("obsShowCursor", enabled)}
+            />
+            <p className="settings-recording-note">
+              Crop the OBS source to the inside edge of the light gray guide. PDF always uses the full canvas. Fullscreen maximizes the clean capture.
+            </p>
           </div>
 
           <div className="settings-group" role="group" aria-labelledby="advanced-settings-label">

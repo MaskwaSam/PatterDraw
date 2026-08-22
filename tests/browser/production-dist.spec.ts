@@ -373,6 +373,55 @@ test("opens Slides and adds a slide without remounting the production editor", a
   expect(requests.every((requestUrl) => new URL(requestUrl).origin === new URL(page.url()).origin)).toBe(true);
 });
 
+test("uses a Settings-only OBS crop guide around the mounted production editor", async ({ page }) => {
+  const { badResponses, consoleErrors, failedRequests, pageErrors, requests, unhandledRejections } = await captureBrowserProblems(page);
+
+  await page.goto(productionRoute, { waitUntil: "domcontentloaded" });
+  const editorHost = page.locator(".editor-host");
+  const editor = editorHost.locator(".excalidraw");
+  await expect(editor).toBeVisible({ timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
+  await editorHost.evaluate((element) => element.setAttribute("data-production-obs-token", "live-editor"));
+  const pageCount = page.context().pages().length;
+
+  await expect(page.locator(".statusbar").getByText("OBS", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+  await settings.getByRole("switch", { name: "OBS capture area", exact: true }).check();
+  await page.keyboard.press("Escape");
+  await expect(settings).toHaveCount(0);
+  await expect(page.locator(".app-shell")).toHaveClass(/is-obs-capture-enabled/);
+  expect(page.context().pages()).toHaveLength(pageCount);
+  await expect(editorHost).toHaveAttribute("data-production-obs-token", "live-editor");
+  await expect(page.locator(".topbar")).toBeVisible();
+  await expect(page.locator(".statusbar")).toBeVisible();
+  const drawingTools = page.getByRole("region", { name: "Shapes", exact: true });
+  await expect(drawingTools).toBeVisible();
+  const guide = page.getByRole("region", { name: "OBS 16:9 capture area", exact: true });
+  await expect(guide).toHaveAttribute("data-layout", "widescreen");
+  const guideFrame = await guide.locator(".obs-capture-guide-frame").boundingBox();
+  const toolsFrame = await drawingTools.boundingBox();
+  expect(guideFrame).not.toBeNull();
+  expect(toolsFrame).not.toBeNull();
+  expect((guideFrame?.width || 0) / (guideFrame?.height || 1)).toBeCloseTo(16 / 9, 2);
+  expect((toolsFrame?.y || 0) + (toolsFrame?.height || 0)).toBeLessThanOrEqual((guideFrame?.y || 0) - 2);
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await settings.getByRole("switch", { name: "OBS capture area", exact: true }).uncheck();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".app-shell")).not.toHaveClass(/is-obs-capture-enabled/);
+  await expect(guide).toHaveCount(0);
+  await expect(drawingTools).toBeVisible();
+  await expect(editorHost).toHaveAttribute("data-production-obs-token", "live-editor");
+
+  await settleBrowserProblems(page);
+  expect(failedRequests, failedRequests.join("\n")).toEqual([]);
+  expect(badResponses, badResponses.join("\n")).toEqual([]);
+  expect(consoleErrors, consoleErrors.join("\n")).toEqual([]);
+  expect(pageErrors, pageErrors.join("\n")).toEqual([]);
+  expect(unhandledRejections, unhandledRejections.join("\n")).toEqual([]);
+  expect(requests.every((requestUrl) => new URL(requestUrl).origin === new URL(page.url()).origin)).toBe(true);
+});
+
 test.describe("desktop Chromium production worker flows", () => {
   test.skip(
     ({ browserName, viewport }) => browserName !== "chromium" || viewport?.width !== 1440,
