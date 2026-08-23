@@ -194,12 +194,16 @@ describe("ClassroomTimeDialog", () => {
     expect(preview.style.background).toBe(followedBackground);
   });
 
-  it("customizes timer and alarm settings and tests the selected local tone", () => {
-    const { callbacks, container } = mount(timerMetadata());
+  it("customizes the text-only timer and alarm settings and tests the selected local tone", () => {
+    const metadata = timerMetadata();
+    if (metadata.kind !== "timer") throw new Error("Expected timer metadata.");
+    metadata.timer.progressStyle = "ring";
+    const { callbacks, container } = mount(metadata);
 
     act(() => button(container, "Timer").click());
     act(() => setControlValue(container.querySelector<HTMLInputElement>('[aria-label="Timer minutes"]')!, "7"));
-    act(() => setControlValue(controlInLabel(container, "Progress style"), "bar"));
+    expect(container.textContent).toContain("Countdown shown as time remaining.");
+    expect(container.textContent).not.toContain("Progress style");
 
     act(() => button(container, "Alarm").click());
     act(() => setControlValue(controlInLabel(container, "Tone"), "bright-marimba"));
@@ -211,15 +215,19 @@ describe("ClassroomTimeDialog", () => {
     const submitted = callbacks.onSubmit.mock.calls[0][0] as ClassroomTimeWidgetMetadataV1;
     expect(submitted.kind).toBe("timer");
     if (submitted.kind !== "timer") throw new Error("Expected timer metadata.");
-    expect(submitted.timer).toMatchObject({ durationMs: 7 * 60_000, progressStyle: "bar" });
+    expect(submitted.timer).toMatchObject({ durationMs: 7 * 60_000, progressStyle: "none" });
     expect(submitted.runtime).toMatchObject({ status: "idle", remainingMs: 7 * 60_000 });
     expect(submitted.alarm).toMatchObject({ tone: "bright-marimba", repeat: true });
   });
 
-  it("supports clock display, format, visibility, and timezone controls", () => {
-    const { callbacks, container } = mount(clockMetadata(), { mode: "update" });
+  it("keeps legacy clocks digital while supporting format, visibility, and timezone controls", () => {
+    const metadata = clockMetadata();
+    if (metadata.kind !== "clock") throw new Error("Expected clock metadata.");
+    metadata.clock.display = "analog";
+    const { callbacks, container } = mount(metadata, { mode: "update" });
     act(() => button(container, "Clock").click());
-    act(() => button(container, "Analog").click());
+    expect(container.textContent).toContain("Digital display");
+    expect([...container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Analog")).toBe(false);
     act(() => setControlValue(controlInLabel(container, "Time format"), "24"));
     act(() => controlInLabel<HTMLInputElement>(container, "Show seconds").click());
     act(() => controlInLabel<HTMLInputElement>(container, "Show timezone label").click());
@@ -229,7 +237,7 @@ describe("ClassroomTimeDialog", () => {
     const submitted = callbacks.onSubmit.mock.calls[0][0] as ClassroomTimeWidgetMetadataV1;
     expect(submitted.kind).toBe("clock");
     if (submitted.kind !== "clock") throw new Error("Expected clock metadata.");
-    expect(submitted.clock).toMatchObject({ display: "analog", hourCycle: 24, showSeconds: false, showTimezone: true, timeZone: "America/Edmonton" });
+    expect(submitted.clock).toMatchObject({ display: "digital", hourCycle: 24, showSeconds: false, showTimezone: true, timeZone: "America/Edmonton" });
   });
 
   it("adds a device-local timed calendar event and keeps event layers independently toggleable", async () => {

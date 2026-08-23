@@ -35,7 +35,7 @@ describe("classroom time preferences", () => {
       version: 1,
       masterVolume: 0.7,
       muted: false,
-      timer: { durationMs: 300_000, progressStyle: "ring" },
+      timer: { durationMs: 300_000, progressStyle: "none" },
       pomodoro: {
         focusDurationMs: 1_500_000,
         shortBreakDurationMs: 300_000,
@@ -43,9 +43,23 @@ describe("classroom time preferences", () => {
         cyclesBeforeLongBreak: 4,
         autoStartFocus: false,
         autoStartBreaks: false,
+        progressStyle: "none",
       },
       alarm: { enabled: true, tone: "warm-chime", repeat: false },
     });
+  });
+
+  it("shelves legacy analog and progress-display preferences without losing other settings", () => {
+    const normalized = normalizeClassroomTimePreferences({
+      ...DEFAULT_CLASSROOM_TIME_PREFERENCES,
+      clock: { ...DEFAULT_CLASSROOM_TIME_PREFERENCES.clock, display: "analog", hourCycle: 24 },
+      timer: { ...DEFAULT_CLASSROOM_TIME_PREFERENCES.timer, durationMs: 90_000, progressStyle: "ring" },
+      pomodoro: { ...DEFAULT_CLASSROOM_TIME_PREFERENCES.pomodoro, autoStartBreaks: true, progressStyle: "bar" },
+    });
+
+    expect(normalized.clock).toMatchObject({ display: "digital", hourCycle: 24 });
+    expect(normalized.timer).toEqual({ durationMs: 90_000, progressStyle: "none" });
+    expect(normalized.pomodoro).toMatchObject({ autoStartBreaks: true, progressStyle: "none" });
   });
 
   it("recovers malformed fields independently and drops unknown fields", () => {

@@ -53,7 +53,7 @@ export const CLASSROOM_TIME_TOOL_CARDS: readonly ClassroomTimeToolCardDefinition
     kind: "clock",
     category: "classroom",
     title: "Clock",
-    description: "Live digital or analog classroom clock",
+    description: "Live digital classroom clock",
     detail: "Show the time, date, weekday, seconds, and timezone on the board.",
     preview: "clock",
   },

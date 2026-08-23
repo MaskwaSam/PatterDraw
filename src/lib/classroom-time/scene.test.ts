@@ -185,6 +185,37 @@ describe("classroom time widget scene creation", () => {
     expect(svg.replace("http://www.w3.org/2000/svg", "")).not.toMatch(/https?:/i);
   });
 
+  it("canonicalizes archived path visuals and renders clocks and countdowns as text only", () => {
+    const dashboard = createDefaultClassroomTimeWidgetMetadata("dashboard", "legacy-path-visuals");
+    if (dashboard.kind !== "dashboard") throw new Error("Expected dashboard metadata.");
+    dashboard.clock.display = "analog";
+    dashboard.timer.progressStyle = "ring";
+    dashboard.pomodoro.progressStyle = "bar";
+
+    const created = createClassroomTimeWidgetScene({
+      metadata: dashboard,
+      x: 0,
+      y: 0,
+      now: Date.UTC(2026, 7, 19, 18, 5, 6),
+      createId: sequence("legacy-path-visuals"),
+    });
+    const canonical = metadata(anchor(created.elements));
+    expect(canonical.kind).toBe("dashboard");
+    if (canonical.kind !== "dashboard") throw new Error("Expected canonical dashboard metadata.");
+    expect(canonical.clock.display).toBe("digital");
+    expect(canonical.timer.progressStyle).toBe("none");
+    expect(canonical.pomodoro.progressStyle).toBe("none");
+    expect(created.elements
+      .filter((element) => !isClassroomTimeWidgetAnchor(element))
+      .every((element) => element.type === "text")).toBe(true);
+    expect(created.elements.some((element) => [
+      "hour-hand",
+      "minute-hand",
+      "second-hand",
+      "progress-ring",
+    ].includes(role(element) ?? ""))).toBe(false);
+  });
+
   it("applies explicit and follow-board themes to native parts and the SVG shell", () => {
     const base = createDefaultClassroomTimeWidgetMetadata("timer", "theme-owner");
     const light = createClassroomTimeWidgetScene({
@@ -438,7 +469,7 @@ describe("classroom time widget ticks", () => {
     }
   });
 
-  it("updates native timer text and progress without changing the shell", () => {
+  it("updates native timer text without changing the shell", () => {
     const created = createClassroomTimeWidgetScene({
       metadata: timerMetadata("timer-owner", 10_000, 60_000),
       x: 0,

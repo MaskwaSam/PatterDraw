@@ -10,6 +10,7 @@ import {
   ALARM_TONES,
   createIdlePomodoroRuntime,
   createIdleTimerRuntime,
+  sanitizeClassroomTimeWidgetMetadata,
   type ClassroomAlarmSettingsV1,
   type ClassroomAlarmTone,
   type ClassroomCalendarSettingsV1,
@@ -84,7 +85,7 @@ const TONE_LABELS: Readonly<Record<ClassroomAlarmTone, string>> = {
 };
 
 function cloneMetadata(metadata: ClassroomTimeWidgetMetadataV1): ClassroomTimeWidgetMetadataV1 {
-  return JSON.parse(JSON.stringify(metadata)) as ClassroomTimeWidgetMetadataV1;
+  return sanitizeClassroomTimeWidgetMetadata(JSON.parse(JSON.stringify(metadata)));
 }
 
 function localDateInputValue(date = new Date()): string {
@@ -438,7 +439,7 @@ export function ClassroomTimeDialog({
           {section === "clock" && clock ? (
             <div className="classroom-time-settings-section">
               <h3>Clock</h3>
-              <div className="classroom-time-segmented"><button type="button" aria-pressed={clock.display === "digital"} onClick={() => setMetadata(updateClock(metadata, { ...clock, display: "digital" }))}>Digital</button><button type="button" aria-pressed={clock.display === "analog"} onClick={() => setMetadata(updateClock(metadata, { ...clock, display: "analog" }))}>Analog</button></div>
+              <p className="classroom-time-quiet-help">Digital display</p>
               <label>Time format<select value={clock.hourCycle} onChange={(event) => setMetadata(updateClock(metadata, { ...clock, hourCycle: Number(event.target.value) as 12 | 24 }))}><option value="12">12-hour</option><option value="24">24-hour</option></select></label>
               <SwitchField checked={clock.showSeconds} onChange={(showSeconds) => setMetadata(updateClock(metadata, { ...clock, showSeconds }))}>Show seconds</SwitchField>
               <SwitchField checked={clock.showDate} onChange={(showDate) => setMetadata(updateClock(metadata, { ...clock, showDate }))}>Show date</SwitchField>
@@ -453,7 +454,7 @@ export function ClassroomTimeDialog({
             <div className="classroom-time-settings-section">
               <h3>Timer</h3>
               <DurationFields value={timer.durationMs} onChange={(durationMs) => setMetadata(updateTimer(metadata, { ...timer, durationMs }))} />
-              <label>Progress style<select value={timer.progressStyle} onChange={(event) => setMetadata(updateTimer(metadata, { ...timer, progressStyle: event.target.value as ClassroomTimerSettingsV1["progressStyle"] }))}><option value="ring">Ring</option><option value="bar">Bar</option><option value="none">None</option></select></label>
+              <p className="classroom-time-quiet-help">Countdown shown as time remaining.</p>
             </div>
           ) : null}
 
@@ -466,7 +467,7 @@ export function ClassroomTimeDialog({
                 <label>Long break<input type="number" min="1" max="5999" value={Math.round(pomodoro.longBreakDurationMs / 60_000)} onChange={(event) => setMetadata(updatePomodoro(metadata, { ...pomodoro, longBreakDurationMs: durationFromMinutes(event.target.valueAsNumber, pomodoro.longBreakDurationMs) }))} /></label>
                 <label>Sessions per cycle<input type="number" min="1" max="12" value={pomodoro.cyclesBeforeLongBreak} onChange={(event) => setMetadata(updatePomodoro(metadata, { ...pomodoro, cyclesBeforeLongBreak: clampInteger(event.target.valueAsNumber, 1, 12) }))} /></label>
               </div>
-              <label>Progress style<select value={pomodoro.progressStyle} onChange={(event) => setMetadata(updatePomodoro(metadata, { ...pomodoro, progressStyle: event.target.value as ClassroomPomodoroSettingsV1["progressStyle"] }))}><option value="ring">Ring</option><option value="bar">Bar</option><option value="none">None</option></select></label>
+              <p className="classroom-time-quiet-help">Countdown shown as time remaining.</p>
               <SwitchField checked={pomodoro.autoStartFocus} onChange={(autoStartFocus) => setMetadata(updatePomodoro(metadata, { ...pomodoro, autoStartFocus }))}>Auto-start focus sessions</SwitchField>
               <SwitchField checked={pomodoro.autoStartBreaks} onChange={(autoStartBreaks) => setMetadata(updatePomodoro(metadata, { ...pomodoro, autoStartBreaks }))}>Auto-start breaks</SwitchField>
             </div>

@@ -160,7 +160,7 @@ describe("timer and pomodoro validation bounds", () => {
     for (const durationMs of [MIN_TIMER_DURATION_MS, MAX_TIMER_DURATION_MS]) {
       expect(parseClassroomTimerSettings({ durationMs, progressStyle: "ring" })).toEqual({
         durationMs,
-        progressStyle: "ring",
+        progressStyle: "none",
       });
       expect(createIdleTimerRuntime(durationMs)).toEqual({
         status: "idle",
@@ -180,6 +180,18 @@ describe("timer and pomodoro validation bounds", () => {
       expect(parseClassroomTimerSettings({ durationMs, progressStyle: "ring" })).toBeNull();
       expect(() => createIdleTimerRuntime(durationMs)).toThrow(RangeError);
     }
+  });
+
+  it("normalizes archived analog clocks and visual progress styles to supported text-only modes", () => {
+    const dashboard = createDefaultClassroomTimeWidgetMetadata("dashboard", "legacy-visual-modes");
+    if (dashboard.kind !== "dashboard") throw new Error("Expected dashboard metadata.");
+
+    expect(parseClassroomClockSettings({ ...dashboard.clock, display: "analog" }))
+      .toMatchObject({ display: "digital" });
+    expect(parseClassroomTimerSettings({ ...dashboard.timer, progressStyle: "bar" }))
+      .toMatchObject({ progressStyle: "none" });
+    expect(parseClassroomPomodoroSettings({ ...dashboard.pomodoro, progressStyle: "ring" }))
+      .toMatchObject({ progressStyle: "none" });
   });
 
   it("applies duration and cycle bounds to pomodoro settings", () => {

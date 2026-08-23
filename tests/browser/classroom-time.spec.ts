@@ -850,7 +850,7 @@ test.afterEach(async ({ context, page }, testInfo: TestInfo) => {
   expect(state.pageErrors, "uncaught page errors").toEqual([]);
 });
 
-test("offers all Classroom cards and saves a recoloured, toggled Clock", async ({ page }) => {
+test("offers all Classroom cards and saves a recoloured digital Clock", async ({ page }) => {
   const tools = await openClassroomTools(page);
   for (const kind of ["clock", "timer", "pomodoro", "calendar", "dashboard"] as const) {
     await expect(tools.getByTestId(WIDGET_CARD_IDS[kind])).toBeVisible();
@@ -867,7 +867,8 @@ test("offers all Classroom cards and saves a recoloured, toggled Clock", async (
   await dialog.locator('input[type="range"]').fill("0.75");
   await expect(dialog.getByText("75%", { exact: true })).toBeVisible();
   await dialog.getByRole("button", { name: "Clock", exact: true }).click();
-  await dialog.getByRole("button", { name: "Analog", exact: true }).click();
+  await expect(dialog.getByText("Digital display", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Analog", exact: true })).toHaveCount(0);
   await dialog.getByRole("switch", { name: "Show seconds", exact: true }).uncheck();
   await dialog.getByRole("switch", { name: "Show timezone label", exact: true }).check();
   await dialog.getByLabel("Timezone", { exact: true }).fill("America/Edmonton");
@@ -887,7 +888,7 @@ test("offers all Classroom cards and saves a recoloured, toggled Clock", async (
       theme: "dark",
     },
     clock: {
-      display: "analog",
+      display: "digital",
       showSeconds: false,
       showTimezone: true,
       timeZone: "America/Edmonton",
@@ -904,6 +905,8 @@ test("runs the default Timer without an error and keeps ordinary ticks out of fi
   const dialog = await openWidgetDialog(page, "timer");
   await dialog.getByLabel("Widget label", { exact: true }).fill("Quick check");
   await dialog.getByRole("button", { name: "Timer", exact: true }).click();
+  await expect(dialog.getByText("Countdown shown as time remaining.", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Progress style", { exact: true })).toHaveCount(0);
   await dialog.getByLabel("Timer hours", { exact: true }).fill("0");
   await dialog.getByLabel("Timer minutes", { exact: true }).fill("0");
   await dialog.getByLabel("Timer seconds", { exact: true }).fill("30");
@@ -984,6 +987,8 @@ test("runs the default Timer without an error and keeps ordinary ticks out of fi
   await expect(completion).toBeVisible({ timeout: 12_000 });
   await expect(completion).toContainText("Quick check");
   await expect.poll(async () => (await waitForOnlyWidget(page, "timer")).runtime?.status).toBe("completed");
+  const completedScene = activeScene(await autosavedProject(page));
+  expect(completedScene?.elements.some((element) => widgetChild(element)?.role === "progress-ring")).toBe(false);
   await expect.poll(async () => (await audioProbe(page)).oscillatorStarts).toBeGreaterThan(testAlarmOscillatorStarts);
   await expect.poll(async () => {
     const registry = await localStorageJson<{

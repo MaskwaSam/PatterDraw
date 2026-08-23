@@ -237,7 +237,7 @@ export const DEFAULT_CLASSROOM_CLOCK_SETTINGS: Readonly<ClassroomClockSettingsV1
 
 export const DEFAULT_CLASSROOM_TIMER_SETTINGS: Readonly<ClassroomTimerSettingsV1> = Object.freeze({
   durationMs: 5 * 60 * 1_000,
-  progressStyle: "ring",
+  progressStyle: "none",
 });
 
 export const DEFAULT_CLASSROOM_POMODORO_SETTINGS: Readonly<ClassroomPomodoroSettingsV1> = Object.freeze({
@@ -247,7 +247,7 @@ export const DEFAULT_CLASSROOM_POMODORO_SETTINGS: Readonly<ClassroomPomodoroSett
   cyclesBeforeLongBreak: 4,
   autoStartFocus: false,
   autoStartBreaks: false,
-  progressStyle: "ring",
+  progressStyle: "none",
 });
 
 export const DEFAULT_CLASSROOM_CALENDAR_SETTINGS: Readonly<ClassroomCalendarSettingsV1> = Object.freeze({
@@ -387,7 +387,9 @@ export function parseClassroomClockSettings(value: unknown): ClassroomClockSetti
     || typeof value.showTimezone !== "boolean"
     || !validTimeZone(value.timeZone)) return null;
   return {
-    display: value.display,
+    // Keep accepting archived analog settings, but shelve the unsupported
+    // renderer by migrating every loaded clock to the safe digital display.
+    display: "digital",
     hourCycle: value.hourCycle,
     showSeconds: value.showSeconds,
     showDate: value.showDate,
@@ -401,7 +403,9 @@ export function parseClassroomTimerSettings(value: unknown): ClassroomTimerSetti
   if (!isRecord(value) || !hasOnlyKeys(value, ["durationMs", "progressStyle"])) return null;
   if (!isDuration(value.durationMs)
     || !isEnum(value.progressStyle, ["ring", "bar", "none"] as const)) return null;
-  return { durationMs: value.durationMs, progressStyle: value.progressStyle };
+  // Legacy ring and bar values remain importable. Dynamic path rendering is
+  // currently shelved, so countdown text is the only persisted presentation.
+  return { durationMs: value.durationMs, progressStyle: "none" };
 }
 
 export function parseClassroomTimerRuntime(value: unknown, durationMs: number): ClassroomTimerRuntimeV1 | null {
@@ -443,7 +447,9 @@ export function parseClassroomPomodoroSettings(value: unknown): ClassroomPomodor
     cyclesBeforeLongBreak: value.cyclesBeforeLongBreak,
     autoStartFocus: value.autoStartFocus,
     autoStartBreaks: value.autoStartBreaks,
-    progressStyle: value.progressStyle,
+    // Preserve compatibility with archived ring and bar settings while
+    // shelving dynamic progress paths until their geometry is reintroduced.
+    progressStyle: "none",
   };
 }
 

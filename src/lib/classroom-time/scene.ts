@@ -573,82 +573,25 @@ function text(
   };
 }
 
-function handPoints(cx: number, cy: number, radius: number, turns: number): readonly Point[] {
-  const angle = turns * Math.PI * 2 - Math.PI / 2;
-  return [{ x: cx, y: cy }, { x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius }];
-}
-
-function progressPoints(cx: number, cy: number, radius: number, progress: number): readonly Point[] {
-  const segments = Math.max(1, Math.round(clamp(progress, 0, 1) * 48));
-  return Array.from({ length: segments + 1 }, (_, index) => {
-    const angle = -Math.PI / 2 + Math.PI * 2 * index / 48;
-    return { x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius };
-  });
-}
-
-function path(
-  kind: "freedraw" | "line",
-  role: string,
-  points: readonly Point[],
-  width: number,
-  height: number,
-  color: string,
-  strokeWidth: number,
-): PathPartSpec {
-  return {
-    kind,
-    role: asRole(role),
-    points,
-    x: 0,
-    y: 0,
-    width,
-    height,
-    color,
-    strokeWidth,
-  };
-}
-
 function clockParts(
   display: DynamicDisplay,
   style: WidgetStyle,
   width: number,
   height: number,
-  mode: "analog" | "digital",
   showDate: boolean,
   showWeekday: boolean,
-  showSeconds: boolean,
   showTimezone: boolean,
 ): readonly PartSpec[] {
-  const clockCenter = { x: width - 108, y: height / 2 + 4 };
   const shared: PartSpec[] = [
     text("title", display.title, 32, 26, width - 174, 28, 20, style.muted, "left", "bold"),
     ...(showDate ? [text("date", display.date, 32, 148, width - 184, 25, 17, style.foreground, "left")] : []),
     ...(showWeekday ? [text("weekday", display.weekday, 32, 178, width - 184, 23, 15, style.muted, "left")] : []),
     ...(showTimezone ? [text("secondary-value", display.timezone, 32, 204, width - 64, 18, 12, style.accent, "left", "bold")] : []),
   ];
-  return mode === "digital" ? [
+  return [
     ...shared,
     text("primary-value", display.primary, 32, 78, width - 64, 58, 42, style.foreground, "left", "bold"),
-  ] : [
-    ...shared,
-    path("line", "hour-hand", handPoints(clockCenter.x, clockCenter.y, 37, display.hour / 12), width, height, style.foreground, 5),
-    path("line", "minute-hand", handPoints(clockCenter.x, clockCenter.y, 53, display.minute / 60), width, height, style.accent, 3),
-    ...(showSeconds ? [path("line", "second-hand", handPoints(clockCenter.x, clockCenter.y, 57, display.second / 60), width, height, style.purple, 1.5)] : []),
   ];
-}
-
-function progressPart(
-  display: DynamicDisplay,
-  style: WidgetStyle,
-  width: number,
-  height: number,
-  progressStyle: "bar" | "none" | "ring",
-  color = style.accent,
-): readonly PartSpec[] {
-  if (progressStyle === "none") return [];
-  return progressStyle === "bar"
-    ? [path("line", "progress-ring", [{ x: 42, y: height - 32 }, { x: 42 + (width - 84) * display.progress, y: height - 32 }], width, height, color, 9)]
-    : [path("freedraw", "progress-ring", progressPoints(width / 2, height / 2 + 10, Math.min(width, height) * 0.4, display.progress), width, height, color, 8)];
 }
 
 function timerParts(
@@ -656,13 +599,11 @@ function timerParts(
   style: WidgetStyle,
   width: number,
   height: number,
-  progressStyle: "bar" | "none" | "ring",
 ): readonly PartSpec[] {
   return [
     text("title", display.title, 32, 28, width - 64, 28, 20, style.muted, "left", "bold"),
     text("primary-value", display.primary, 34, 75, width - 68, 64, 52, style.foreground, "center", "bold"),
     text("secondary-value", display.secondary, 34, 151, width - 68, 24, 16, style.muted, "center"),
-    ...progressPart(display, style, width, height, progressStyle),
   ];
 }
 
@@ -671,14 +612,12 @@ function pomodoroParts(
   style: WidgetStyle,
   width: number,
   height: number,
-  progressStyle: "bar" | "none" | "ring",
 ): readonly PartSpec[] {
   return [
     text("title", display.title, 34, 26, width - 68, 28, 20, style.muted, "left", "bold"),
     text("phase-label", display.phase, 34, 61, width - 68, 26, 18, style.purple, "center", "bold"),
     text("primary-value", display.primary, 34, 91, width - 68, 63, 50, style.foreground, "center", "bold"),
     text("cycle-label", display.cycle, 34, 166, width - 68, 24, 15, style.muted, "center"),
-    ...progressPart(display, style, width, height + 4, progressStyle, style.purple),
   ];
 }
 
@@ -910,16 +849,7 @@ function dashboardParts(
 ): readonly PartSpec[] {
   const parts: PartSpec[] = [text("title", display.title, 34, 25, width - 68, 31, 22, style.foreground, "left", "bold")];
   if (panels.clock) {
-    if (clock.display === "digital") {
-      parts.push(text("dashboard-clock-primary", display.primary, 42, 99, 385, 62, 46, style.foreground, "center", "bold"));
-    } else {
-      const center = { x: 235, y: 145 };
-      parts.push(
-        path("line", "hour-hand", handPoints(center.x, center.y, 36, display.hour / 12), width, height, style.foreground, 5),
-        path("line", "minute-hand", handPoints(center.x, center.y, 51, display.minute / 60), width, height, style.accent, 3),
-      );
-      if (clock.showSeconds) parts.push(path("line", "second-hand", handPoints(center.x, center.y, 55, display.second / 60), width, height, style.purple, 1.5));
-    }
+    parts.push(text("dashboard-clock-primary", display.primary, 42, 99, 385, 62, 46, style.foreground, "center", "bold"));
     const secondary = dashboardClockSecondary(display, clock);
     if (secondary) parts.push(text("dashboard-clock-secondary", secondary, 42, 203, 385, 22, 13, style.muted, "center"));
   }
@@ -930,7 +860,6 @@ function dashboardParts(
   if (panels.pomodoro) parts.push(
     text("dashboard-pomodoro-primary", display.pomodoroPrimary, 42, 312, 385, 58, 44, style.foreground, "center", "bold"),
     text("dashboard-pomodoro-secondary", display.pomodoroSecondary, 42, 374, 385, 22, 15, style.purple, "center", "bold"),
-    path("freedraw", "progress-ring", progressPoints(235, 342, 84, display.pomodoroProgress), width, height, style.purple, 7),
   );
   if (panels.calendar) parts.push(...dashboardCalendarParts(display, style, calendar));
   return parts;
@@ -953,20 +882,18 @@ function layoutFor(
         width,
         height,
         opacity: style.opacity,
-        parts: clockParts(display, style, width, height, settings?.display ?? "digital", settings?.showDate ?? true, settings?.showWeekday ?? true, settings?.showSeconds ?? true, settings?.showTimezone ?? false),
+        parts: clockParts(display, style, width, height, settings?.showDate ?? true, settings?.showWeekday ?? true, settings?.showTimezone ?? false),
       };
     }
     case "timer": {
       const width = 420;
       const height = 240;
-      const progressStyle = metadata.kind === "timer" ? metadata.timer.progressStyle : "ring";
-      return { width, height, opacity: style.opacity, parts: timerParts(display, style, width, height, progressStyle) };
+      return { width, height, opacity: style.opacity, parts: timerParts(display, style, width, height) };
     }
     case "pomodoro": {
       const width = 460;
       const height = 260;
-      const progressStyle = metadata.kind === "pomodoro" ? metadata.pomodoro.progressStyle : "ring";
-      return { width, height, opacity: style.opacity, parts: pomodoroParts(display, style, width, height, progressStyle) };
+      return { width, height, opacity: style.opacity, parts: pomodoroParts(display, style, width, height) };
     }
     case "calendar": {
       const width = 560;
@@ -1001,15 +928,7 @@ function shellSvg(
   const height = layout.height;
   const common = `<rect x="2" y="2" width="${width - 4}" height="${height - 4}" rx="24" fill="${xmlColor(style.background)}" stroke="${xmlColor(style.accent)}" stroke-opacity=".24" stroke-width="3"/>`;
   let decoration = "";
-  if (kind === "clock" && metadata.kind === "clock" && metadata.clock.display === "analog") {
-    decoration = `<circle cx="${width - 108}" cy="${height / 2 + 4}" r="72" fill="${xmlColor(style.panel)}" stroke="${xmlColor(style.accent)}" stroke-width="3"/><circle cx="${width - 108}" cy="${height / 2 + 4}" r="5" fill="${xmlColor(style.purple)}"/>`;
-  } else if (kind === "timer" && metadata.kind === "timer") {
-    if (metadata.timer.progressStyle === "ring") decoration = `<circle cx="${width / 2}" cy="${height / 2 + 10}" r="96" fill="none" stroke="${xmlColor(style.track)}" stroke-width="8"/>`;
-    if (metadata.timer.progressStyle === "bar") decoration = `<line x1="42" y1="${height - 32}" x2="${width - 42}" y2="${height - 32}" stroke="${xmlColor(style.track)}" stroke-linecap="round" stroke-width="9"/>`;
-  } else if (kind === "pomodoro" && metadata.kind === "pomodoro") {
-    if (metadata.pomodoro.progressStyle === "ring") decoration = `<circle cx="${width / 2}" cy="${height / 2 + 12}" r="104" fill="none" stroke="${xmlColor(style.track)}" stroke-width="8"/>`;
-    if (metadata.pomodoro.progressStyle === "bar") decoration = `<line x1="42" y1="${height - 32}" x2="${width - 42}" y2="${height - 32}" stroke="${xmlColor(style.track)}" stroke-linecap="round" stroke-width="9"/>`;
-  } else if (kind === "calendar" && metadata.kind === "calendar") {
+  if (kind === "calendar" && metadata.kind === "calendar") {
     const gridY = 116;
     const gridHeight = height - gridY - 22;
     const columns = metadata.calendar.showWeekends ? 7 : 5;
@@ -1030,9 +949,9 @@ function shellSvg(
   } else if (kind === "dashboard" && metadata.kind === "dashboard") {
     decoration = [
       `<rect x="30" y="61" width="126" height="4" rx="2" fill="${xmlColor(style.purple)}"/>`,
-      metadata.panels.clock ? `<rect x="30" y="74" width="418" height="166" rx="18" fill="${xmlColor(style.panel)}" stroke="${xmlColor(style.grid)}"/>${metadata.clock.display === "analog" ? `<circle cx="235" cy="145" r="62" fill="${xmlColor(style.background)}" stroke="${xmlColor(style.accent)}" stroke-width="3"/><circle cx="235" cy="145" r="4" fill="${xmlColor(style.purple)}"/>` : ""}` : "",
+      metadata.panels.clock ? `<rect x="30" y="74" width="418" height="166" rx="18" fill="${xmlColor(style.panel)}" stroke="${xmlColor(style.grid)}"/>` : "",
       metadata.panels.timer ? `<rect x="482" y="74" width="448" height="166" rx="18" fill="${xmlColor(style.panel)}" stroke="${xmlColor(style.grid)}"/>` : "",
-      metadata.panels.pomodoro ? `<rect x="30" y="264" width="418" height="244" rx="18" fill="${xmlColor(style.panelAlternate)}" stroke="${xmlColor(style.grid)}"/><circle cx="235" cy="342" r="84" fill="none" stroke="${xmlColor(style.track)}" stroke-width="7"/>` : "",
+      metadata.panels.pomodoro ? `<rect x="30" y="264" width="418" height="244" rx="18" fill="${xmlColor(style.panelAlternate)}" stroke="${xmlColor(style.grid)}"/>` : "",
       metadata.panels.calendar ? `<rect x="482" y="264" width="448" height="244" rx="18" fill="${xmlColor(style.panel)}" stroke="${xmlColor(style.grid)}"/>` : "",
     ].join("");
   }
