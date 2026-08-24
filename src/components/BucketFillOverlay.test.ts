@@ -207,4 +207,23 @@ describe("BucketFillOverlay pointer lifecycle", () => {
     expect(setActiveTool).toHaveBeenCalledWith({ type: "selection", locked: false });
     expect(onExit).toHaveBeenCalledOnce();
   });
+
+  it("leaves Escape available to an editable field inside the editor", () => {
+    const { canvas, onExit, setActiveTool } = mountOverlay();
+    const input = document.createElement("input");
+    canvas.parentElement?.append(input);
+    input.focus();
+
+    const event = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "Escape",
+    });
+    input.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(input);
+    expect(setActiveTool).not.toHaveBeenCalled();
+    expect(onExit).not.toHaveBeenCalled();
+  });
 });

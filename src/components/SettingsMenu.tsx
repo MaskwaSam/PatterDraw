@@ -29,6 +29,7 @@ export interface SettingsMenuProps {
   onPreferenceChange: (key: FeaturePreferenceKey, enabled: boolean) => void;
   onPdfPreferenceChange?: (key: PdfPreferenceKey, enabled: boolean) => void;
   onThemePreferenceChange: (preference: ThemePreference) => void;
+  onOpenShortcutHelp: (returnFocusTarget?: HTMLElement | null) => void;
   onRestorePdfDefaults?: () => void;
   onRestoreDefaults: () => void;
 }
@@ -128,6 +129,7 @@ export function SettingsMenu({
   onPreferenceChange,
   onPdfPreferenceChange,
   onThemePreferenceChange,
+  onOpenShortcutHelp,
   onRestorePdfDefaults,
   onRestoreDefaults,
 }: SettingsMenuProps) {
@@ -138,9 +140,11 @@ export function SettingsMenu({
   );
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const restoreSettingsFocusRef = useRef(true);
   const dialogRef = useModalDialog<HTMLElement>({
     onClose: () => setOpen(false),
     open,
+    restoreFocus: () => restoreSettingsFocusRef.current,
     returnFocusRef: triggerRef,
   });
   const pdfPreferencesAreControlled = pdfPreferences !== undefined
@@ -214,7 +218,10 @@ export function SettingsMenu({
         aria-expanded={open}
         aria-controls="settings-popover"
         title="Settings"
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => {
+          restoreSettingsFocusRef.current = true;
+          setOpen((current) => !current);
+        }}
       >
         <SettingsIcon />
       </button>
@@ -357,6 +364,25 @@ export function SettingsMenu({
               label="Experimental math tools"
               onChange={setExperimentalFeatures}
             />
+          </div>
+
+          <div className="settings-group" role="group" aria-labelledby="help-settings-label">
+            <h3 id="help-settings-label">Help</h3>
+            <button
+              className="settings-help-link"
+              type="button"
+              onClick={() => {
+                restoreSettingsFocusRef.current = false;
+                setOpen(false);
+                onOpenShortcutHelp(triggerRef.current);
+              }}
+            >
+              <span>
+                <strong>Keyboard shortcuts</strong>
+                <small>Search every PatterDraw and drawing shortcut</small>
+              </span>
+              <kbd>?</kbd>
+            </button>
           </div>
 
           <div className="settings-footer">

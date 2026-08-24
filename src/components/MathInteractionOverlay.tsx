@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import type { MathInteractionKind } from "../lib/math-tools/catalogue";
 import type { AngleMeasurementOptions, CompassOptions, MathPoint, TransformationOptions } from "../lib/math-tools/interactive";
+import { isEditableKeyboardTarget } from "../lib/keyboard-targets";
 
 export interface CapturedMathPoint {
   scene: MathPoint;
@@ -42,6 +43,7 @@ export function MathInteractionOverlay({
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (isEditableKeyboardTarget(event.target)) return;
       event.preventDefault();
       event.stopPropagation();
       onCancel();

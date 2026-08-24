@@ -7,6 +7,7 @@ import type {
   ExcalidrawImperativeAPI,
 } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
+import { isEditableKeyboardTarget } from "../lib/keyboard-targets";
 import type { LassoGeometrySnapshot, LassoPoint } from "../lib/lasso/stable-element-adapter";
 import { resolveLassoSelection, type LassoSelection } from "../lib/lasso/selection";
 import { lassoViewportToScenePoint } from "../lib/lasso/coordinates";
@@ -226,6 +227,7 @@ export function LassoOverlay({ api, createGeometrySnapshot, editorHost, initialS
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (isEditableKeyboardTarget(event.target)) return;
       event.preventDefault();
       event.stopPropagation();
       finish(false);

@@ -4,6 +4,7 @@ import {
   type CapturePoint,
   type ViewportCaptureRect,
 } from "../lib/screenshots/capture";
+import { isEditableKeyboardTarget } from "../lib/keyboard-targets";
 
 interface ScreenshotCaptureOverlayProps {
   onCancel: () => void;
@@ -23,6 +24,7 @@ export function ScreenshotCaptureOverlay({
     overlayRef.current?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (isEditableKeyboardTarget(event.target)) return;
       event.preventDefault();
       event.stopPropagation();
       onCancel();

@@ -4562,6 +4562,12 @@ test("captures areas to the clipboard and persists Screenshot Library actions", 
     name: "Find text across project",
     exact: true,
   })).toHaveCount(0);
+  const projectTitle = page.getByRole("textbox", { name: "Project title", exact: true });
+  await projectTitle.focus();
+  await page.keyboard.press("Escape");
+  await expect(projectTitle).toBeFocused();
+  await expect(page.getByTestId("screenshot-capture-overlay")).toBeVisible();
+  await page.getByTestId("screenshot-capture-overlay").focus();
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("screenshot-capture-overlay")).toBeHidden();
   await trigger.click();
@@ -5092,6 +5098,184 @@ test("toggles fullscreen from the bottom-right status bar", async ({ page }) => 
   await page.evaluate(() => document.fullscreenElement ? document.exitFullscreen() : Promise.resolve());
   await expect(page.getByRole("button", { name: "Enter fullscreen", exact: true }))
     .toHaveAttribute("aria-pressed", "false");
+});
+
+test("opens the complete shortcut guide from Settings and the question-mark key", async ({ page }) => {
+  const settings = page.getByRole("button", { name: "Settings", exact: true });
+  await settings.click();
+  const settingsDialog = page.getByRole("dialog", { name: "Settings", exact: true });
+  await settingsDialog.getByRole("button", { name: /Keyboard shortcuts/ }).click();
+
+  const shortcuts = page.getByRole("dialog", { name: "Keyboard shortcuts", exact: true });
+  await expect(shortcuts).toBeVisible();
+  const search = shortcuts.getByRole("searchbox", { name: "Search shortcuts", exact: true });
+  await expect(search).toBeFocused();
+  await expect(shortcuts).toContainText("Toggle clean fullscreen");
+  await expect(shortcuts).toContainText("Download project");
+  await expect(shortcuts).toContainText("Export image");
+  await expect(shortcuts).toContainText("Collapse or expand presentation toolbar");
+  await search.fill("PDF page");
+  await expect(shortcuts.getByText("Previous PDF page", { exact: true })).toBeVisible();
+  await expect(shortcuts.getByText("Next PDF page", { exact: true })).toBeVisible();
+  await expect(shortcuts.getByText("Rectangle tool", { exact: true })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(shortcuts).toHaveCount(0);
+  await expect(settings).toBeFocused();
+
+  const title = page.getByRole("textbox", { name: "Project title", exact: true });
+  await title.focus();
+  await page.keyboard.type("?");
+  await expect(title).toHaveValue(/\?$/);
+  await expect(shortcuts).toHaveCount(0);
+
+  await page.locator(".editor-host .excalidraw").focus();
+  await page.keyboard.press("Shift+/");
+  await expect(shortcuts).toBeVisible();
+  await expect(shortcuts).toContainText("Search PatterDraw and canvas commands");
+
+  await page.keyboard.press("Escape");
+  await expect(shortcuts).toHaveCount(0);
+  await page.locator(".editor-host .excalidraw").focus();
+  await page.keyboard.press("ControlOrMeta+Shift+E");
+  const nativeImageExport = page.locator(".Modal").filter({ has: page.locator(".ImageExportModal") });
+  await expect(nativeImageExport).toBeVisible();
+  await expect(nativeImageExport.getByRole("heading", { name: "Export image", exact: true }).last())
+    .toBeVisible();
+});
+
+test("uses project open and download shortcuts instead of browser file actions", async ({ page }) => {
+  const downloadPromise = page.waitForEvent("download");
+  await page.keyboard.press("ControlOrMeta+S");
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toMatch(/\.patterdraw$/);
+
+  const chooserPromise = page.waitForEvent("filechooser");
+  await page.keyboard.press("ControlOrMeta+O");
+  const chooser = await chooserPromise;
+  expect(chooser.isMultiple()).toBe(false);
+  await chooser.setFiles([]);
+});
+
+test("keeps every wrapper shortcut inert while editing Excalidraw text", async ({ page }) => {
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.getByRole("button", { name: "Add slide", exact: true }).click();
+
+  await page.getByTestId("toolbar-text").check({ force: true });
+  const editor = await page.locator(".editor-host").boundingBox();
+  if (!editor) throw new Error("Editor host has no visible bounds in Slides mode.");
+  await page.mouse.click(editor.x + editor.width / 2, editor.y + editor.height / 2);
+
+  const textEditor = page.locator("textarea.excalidraw-wysiwyg");
+  await expect(textEditor).toBeVisible();
+  const exactText = "Shortcut letters b c f h k o s? stay as text";
+  await page.keyboard.type(exactText);
+  await expect(textEditor).toHaveValue(exactText);
+  await expect(textEditor).toBeFocused();
+
+  const shortcutEffects = await textEditor.evaluate(async (element) => {
+    const openInput = document.querySelector<HTMLInputElement>('input[aria-label="Open project file"]');
+    let openClicks = 0;
+    let downloadClicks = 0;
+    const countOpenClick = () => { openClicks += 1; };
+    const countDownloadClick = (event: MouseEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("a[download]")) downloadClicks += 1;
+    };
+    openInput?.addEventListener("click", countOpenClick);
+    document.addEventListener("click", countDownloadClick, true);
+
+    const dispatchShortcut = (key: string, options: KeyboardEventInit = {}) => {
+      const event = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key,
+        ...options,
+      });
+      element.dispatchEvent(event);
+    };
+
+    try {
+      dispatchShortcut("f", { ctrlKey: true });
+      dispatchShortcut("h", { ctrlKey: true, shiftKey: true });
+      dispatchShortcut("f", { ctrlKey: true, shiftKey: true });
+      dispatchShortcut("Enter", { ctrlKey: true, shiftKey: true });
+      dispatchShortcut("Enter", { altKey: true, ctrlKey: true });
+      dispatchShortcut("o", { ctrlKey: true });
+      dispatchShortcut("s", { ctrlKey: true });
+      dispatchShortcut("k", { ctrlKey: true });
+      dispatchShortcut("b");
+      dispatchShortcut("?", { code: "Slash", shiftKey: true });
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+      return {
+        downloadClicks,
+        focused: document.activeElement === element,
+        fullscreen: document.fullscreenElement !== null,
+        openClicks,
+      };
+    } finally {
+      openInput?.removeEventListener("click", countOpenClick);
+      document.removeEventListener("click", countDownloadClick, true);
+    }
+  });
+
+  expect(shortcutEffects).toEqual({
+    downloadClicks: 0,
+    focused: true,
+    fullscreen: false,
+    openClicks: 0,
+  });
+  await expect(textEditor).toHaveValue(exactText);
+  await expect(textEditor).toBeFocused();
+  await expect(page.locator(".topbar")).toBeVisible();
+  await expect(page.locator(".statusbar")).toBeVisible();
+  await expect(page.locator("#slide-rail")).toBeVisible();
+  await expect(page.locator(".app-shell")).not.toHaveClass(/is-clean-fullscreen|is-nav-hidden|is-footer-hidden/);
+  await expect(page.getByRole("toolbar", { name: "Presentation controls", exact: true })).toHaveCount(0);
+  await expect(page.locator(".project-find-panel")).toHaveCount(0);
+  await expect(page.getByRole("dialog", { name: "Keyboard shortcuts", exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("bucket-fill-settings")).toHaveCount(0);
+  await expect(page.getByText("External links are disabled in PatterDraw.", { exact: true })).toHaveCount(0);
+});
+
+test("toggles clean fullscreen without changing the restored toolbar and rail layout", async ({ page }) => {
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  const shell = page.locator(".app-shell");
+  const topbar = page.locator(".topbar");
+  const statusbar = page.locator(".statusbar");
+  const slideRail = page.locator("#slide-rail");
+  const nativeChrome = page.locator(".editor-host .excalidraw .layer-ui__wrapper");
+  await expect(topbar).toBeVisible();
+  await expect(statusbar).toBeVisible();
+  await expect(slideRail).toBeVisible();
+  await expect(nativeChrome).toBeVisible();
+
+  await page.keyboard.press("ControlOrMeta+Shift+Enter");
+  await expect(shell).toHaveClass(/is-clean-fullscreen/);
+  await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(true);
+  await expect(topbar).toBeHidden();
+  await expect(statusbar).toBeHidden();
+  await expect(slideRail).toBeHidden();
+  await expect(nativeChrome).toBeHidden();
+  const cleanBounds = await page.locator(".editor-host").boundingBox();
+  expect(cleanBounds).not.toBeNull();
+  expect(cleanBounds?.width || 0).toBeGreaterThanOrEqual(1_250);
+  expect(cleanBounds?.height || 0).toBeGreaterThanOrEqual(650);
+
+  await page.keyboard.press("ControlOrMeta+Shift+Enter");
+  await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true);
+  await expect(shell).not.toHaveClass(/is-clean-fullscreen/);
+  await expect(topbar).toBeVisible();
+  await expect(statusbar).toBeVisible();
+  await expect(slideRail).toBeVisible();
+  await expect(nativeChrome).toBeVisible();
+
+  await page.keyboard.press("ControlOrMeta+Shift+Enter");
+  await expect(shell).toHaveClass(/is-clean-fullscreen/);
+  await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(true);
+  await page.evaluate(() => document.exitFullscreen());
+  await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true);
+  await expect(shell).not.toHaveClass(/is-clean-fullscreen/);
+  await expect(slideRail).toBeVisible();
 });
 
 test("moves board zoom and history into the desktop footer without duplicating phone controls", async ({ page }) => {
@@ -6394,6 +6578,189 @@ test("keeps presentation navigation keys active after toolbar controls receive f
   await expect(page.locator(".presentation-count")).toHaveText("1 / 3");
 });
 
+test("starts presentation by shortcut and collapses its toolbar into the bottom-left", async ({ page }) => {
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  const shell = page.locator(".app-shell");
+  const addSlide = page.getByRole("button", { name: "Add slide", exact: true });
+  await addSlide.click();
+  await addSlide.click();
+  await page.locator(".slide-thumbnail").first().click();
+
+  const title = page.getByRole("textbox", { name: "Project title", exact: true });
+  await title.focus();
+  await expect(title).toBeFocused();
+  const guardedShortcutEffects = await title.evaluate(async (element) => {
+    const openInput = document.querySelector<HTMLInputElement>('input[aria-label="Open project file"]');
+    let openClicks = 0;
+    let downloadClicks = 0;
+    const countOpenClick = () => { openClicks += 1; };
+    const countDownloadClick = (event: MouseEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("a[download]")) downloadClicks += 1;
+    };
+    openInput?.addEventListener("click", countOpenClick);
+    document.addEventListener("click", countDownloadClick, true);
+
+    const dispatchShortcut = (key: string, options: KeyboardEventInit = {}) => {
+      const event = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        ctrlKey: true,
+        key,
+        ...options,
+      });
+      element.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+
+    try {
+      const defaultPrevented = [
+        dispatchShortcut("o"),
+        dispatchShortcut("s"),
+        dispatchShortcut("Enter", { shiftKey: true }),
+        dispatchShortcut("Enter", { altKey: true }),
+      ];
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+      return {
+        defaultPrevented,
+        downloadClicks,
+        focused: document.activeElement === element,
+        openClicks,
+      };
+    } finally {
+      openInput?.removeEventListener("click", countOpenClick);
+      document.removeEventListener("click", countDownloadClick, true);
+    }
+  });
+  expect(guardedShortcutEffects).toEqual({
+    defaultPrevented: [false, false, false, false],
+    downloadClicks: 0,
+    focused: true,
+    openClicks: 0,
+  });
+  await expect(shell).not.toHaveClass(/is-clean-fullscreen/);
+  await expect(page.getByRole("toolbar", { name: "Presentation controls", exact: true })).toHaveCount(0);
+
+  await page.locator(".editor-host .excalidraw").focus();
+  await page.keyboard.press("ControlOrMeta+Alt+Enter");
+  const controls = page.getByRole("toolbar", { name: "Presentation controls", exact: true });
+  const collapseControl = controls.getByRole("button", { name: "Collapse presentation controls", exact: true });
+  await expect(controls).toBeVisible();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 2");
+
+  const rapidToggleEvents = await page.evaluate(() => Array.from({ length: 4 }, () => {
+    const event = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      code: "KeyC",
+      key: "c",
+    });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  }));
+  expect(rapidToggleEvents).toEqual([true, true, true, true]);
+  const collapsed = page.getByRole("toolbar", { name: "Collapsed presentation controls", exact: true });
+  await expect(controls).toHaveCount(0);
+  await expect(collapsed).toBeVisible();
+  await expect(collapsed).toContainText("1 / 2");
+  await page.evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    code: "KeyC",
+    key: "c",
+    repeat: true,
+  })));
+  await expect(controls).toHaveCount(0);
+  await expect(collapsed).toBeVisible();
+  const collapsedBounds = await collapsed.boundingBox();
+  expect(collapsedBounds).not.toBeNull();
+  expect(collapsedBounds?.x || 0).toBeLessThanOrEqual(24);
+  expect((page.viewportSize()?.height || 0) - ((collapsedBounds?.y || 0) + (collapsedBounds?.height || 0)))
+    .toBeLessThanOrEqual(28);
+
+  await page.keyboard.press("ArrowRight");
+  await expect(collapsed).toContainText("2 / 2");
+  await page.waitForTimeout(400);
+  await page.keyboard.press("c");
+  await expect(controls).toBeVisible();
+  await expect(collapseControl).toBeFocused();
+
+  // A second discrete press during the settle window is consumed without
+  // immediately reversing the first change.
+  await page.keyboard.press("c");
+  await expect(controls).toBeVisible();
+  await page.waitForTimeout(400);
+  await page.keyboard.press("c");
+  await expect(collapsed).toBeVisible();
+  const expandControl = collapsed.getByRole("button", { name: "Expand presentation controls", exact: true });
+  await expandControl.click();
+  await expect(collapsed).toBeVisible();
+  await page.waitForTimeout(400);
+  await expandControl.click();
+  await expect(controls).toBeVisible();
+  await expect(collapseControl).toBeFocused();
+
+  await controls.getByRole("button", { name: "Exit", exact: true }).click();
+  await expect(controls).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true);
+  await expect(page.locator(".editor-host .excalidraw")).toBeFocused();
+  await page.keyboard.press("ControlOrMeta+Shift+Enter");
+  await expect(shell).toHaveClass(/is-clean-fullscreen/);
+  await page.keyboard.press("ControlOrMeta+Alt+Enter");
+  await expect(shell).not.toHaveClass(/is-clean-fullscreen/);
+  await expect(controls).toBeVisible();
+});
+
+test("pauses presentation shortcuts while keyboard help is open", async ({ page }) => {
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  const addSlide = page.getByRole("button", { name: "Add slide", exact: true });
+  await addSlide.click();
+  await addSlide.click();
+  await page.locator(".slide-thumbnail").first().click();
+
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  const controls = page.getByRole("toolbar", { name: "Presentation controls", exact: true });
+  await expect(controls).toBeVisible();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 2");
+
+  await page.keyboard.press("Shift+/");
+  const help = page.getByRole("dialog", { name: "Keyboard shortcuts", exact: true });
+  await expect(help).toBeVisible();
+  const done = help.getByRole("button", { name: "Done", exact: true });
+  await done.focus();
+  await expect(done).toBeFocused();
+
+  await page.keyboard.press("c");
+  await page.keyboard.press("ArrowRight");
+  await expect(controls).toBeVisible();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 2");
+
+  await page.keyboard.press("Escape");
+  await expect(help).toHaveCount(0);
+  await expect(controls).toBeVisible();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 2");
+
+  await page.keyboard.press("c");
+  await expect(page.getByRole("toolbar", { name: "Collapsed presentation controls", exact: true })).toBeVisible();
+});
+
+test("exits presentation atomically before replacing the project with a PDF", async ({ page }) => {
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.getByRole("button", { name: "Add slide", exact: true }).click();
+  const present = page.getByRole("button", { name: "Present", exact: true });
+  await present.click();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 1");
+
+  await openTestPdf(page, 2);
+
+  await expect(page.locator(".presentation-controls")).toHaveCount(0);
+  await expect(page.locator(".app-shell")).not.toHaveClass(/is-presenting/);
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/);
+  await expect(page.locator(".presentation-count")).toHaveCount(0);
+  await expect(page.locator(".editor-host .excalidraw")).toBeFocused();
+  await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true);
+});
+
 test("commits pending edits before presentation switches between project scenes", async ({ page }) => {
   test.setTimeout(60_000);
   await page.evaluate(() => {
@@ -6497,6 +6864,7 @@ test("exits presentation when Escape ends its native fullscreen session", async 
   await expect(page.locator(".presentation-controls")).toHaveCount(0);
   await expect(page.locator(".app-shell")).not.toHaveClass(/is-presenting/);
   await expect(page.locator("#slide-rail")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Present", exact: true })).toBeFocused();
 
   await page.waitForTimeout(300);
   await expect(page.locator(".presentation-controls")).toHaveCount(0);
@@ -6508,6 +6876,7 @@ test("exits presentation when Escape ends its native fullscreen session", async 
   await expect(page.locator(".presentation-controls")).toHaveCount(0);
   await expect(page.locator(".app-shell")).not.toHaveClass(/is-presenting/);
   await expect(page.locator("#slide-rail")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Present", exact: true })).toBeFocused();
   await page.waitForTimeout(300);
   await expect(page.locator(".presentation-controls")).toHaveCount(0);
 });
@@ -7335,6 +7704,12 @@ test("uses the experimental one-shot lasso for live, additive, and cancellable s
   await lasso.click();
   const overlay = page.getByTestId("lasso-overlay");
   await expect(overlay).toBeVisible();
+  const projectTitle = page.getByRole("textbox", { name: "Project title", exact: true });
+  await projectTitle.focus();
+  await page.keyboard.press("Escape");
+  await expect(projectTitle).toBeFocused();
+  await expect(overlay).toBeVisible();
+  await page.locator(".editor-host .excalidraw").focus();
   await page.keyboard.press("ControlOrMeta+f");
   await expect(overlay).toBeVisible();
   await expect(page.getByRole("searchbox", {
@@ -10643,15 +11018,43 @@ test("adds a blank slide with a live preview without remounting or covering the 
     await page.evaluate(() => document.exitFullscreen());
   }
   await expect(page.locator(".presentation-controls")).toHaveCount(0);
-  await page.setViewportSize({ width: 390, height: 844 });
+  await page.setViewportSize({ width: 320, height: 480 });
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty("--safe-area-left", "12px");
+    document.documentElement.style.setProperty("--safe-area-right", "12px");
+    document.documentElement.style.setProperty("--safe-area-bottom", "24px");
+  });
   await page.getByRole("button", { name: "Hide slide navigator", exact: true }).click();
   await page.locator(".present-button").click();
-  await expect(page.locator(".presentation-controls")).toHaveCSS("flex-direction", "column");
+  const mobileControls = page.locator(".presentation-controls");
+  await expect(mobileControls).toHaveCSS("flex-direction", "column");
   await expect(page.getByRole("group", { name: "Ink colours" })).toBeVisible();
   await expect(page.getByRole("group", { name: "Ink widths" })).toBeVisible();
   await expect(page.locator(".App-top-bar")).toBeHidden();
   await expect(page.locator(".App-bottom-bar")).toBeHidden();
   await expect(page.locator(".mobile-misc-tools-container")).toBeHidden();
   await expect(page.locator(".HintViewer")).toBeHidden();
+
+  await expect(page.getByRole("button", { name: "Collapse presentation controls", exact: true })).toBeVisible();
+  const shortViewportBounds = await mobileControls.boundingBox();
+  expect(shortViewportBounds).not.toBeNull();
+  expect(shortViewportBounds?.x || 0).toBeGreaterThanOrEqual(19);
+  expect((shortViewportBounds?.x || 0) + (shortViewportBounds?.width || 0)).toBeLessThanOrEqual(301);
+  expect(shortViewportBounds?.y || 0).toBeGreaterThanOrEqual(0);
+  expect(480 - ((shortViewportBounds?.y || 0) + (shortViewportBounds?.height || 0))).toBeGreaterThanOrEqual(31);
+
+  await page.keyboard.press("c");
+  const mobileCollapsed = page.getByRole("toolbar", { name: "Collapsed presentation controls", exact: true });
+  await expect(mobileCollapsed).toBeVisible();
+  const collapsedButton = mobileCollapsed.getByRole("button", { name: "Expand presentation controls", exact: true });
+  await expect(collapsedButton).toBeVisible();
+  const collapsedButtonBounds = await collapsedButton.boundingBox();
+  expect(collapsedButtonBounds).not.toBeNull();
+  expect(collapsedButtonBounds?.width || 0).toBeGreaterThanOrEqual(44);
+  expect(collapsedButtonBounds?.height || 0).toBeGreaterThanOrEqual(44);
+  expect(collapsedButtonBounds?.x || 0).toBeGreaterThanOrEqual(19);
+  expect(480 - ((collapsedButtonBounds?.y || 0) + (collapsedButtonBounds?.height || 0))).toBeGreaterThanOrEqual(31);
+  await collapsedButton.click();
+  await expect(mobileControls).toBeVisible();
   await page.getByRole("button", { name: "Exit", exact: true }).click();
 });

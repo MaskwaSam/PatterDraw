@@ -176,6 +176,39 @@ button { color: inherit; }
   font-weight: 650;
 }
 .settings-select select:focus-visible { outline: 3px solid #bdd1ff; outline-offset: 2px; }
+.settings-help-link {
+  width: 100%;
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.settings-help-link:hover { border-color: #cbd7ee; background: #f3f6fc; }
+.settings-help-link:focus-visible { outline: 3px solid #bdd1ff; outline-offset: 2px; }
+.settings-help-link > span { min-width: 0; display: grid; gap: 2px; }
+.settings-help-link strong { color: #2b3549; font-size: 12px; font-weight: 680; }
+.settings-help-link small { color: var(--muted); font-size: 10px; font-weight: 500; line-height: 1.35; }
+.settings-help-link kbd {
+  min-width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 1px solid #aeb9c9;
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  background: #fff;
+  color: #3d4b63;
+  font: 700 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 .settings-footer {
   display: flex;
   align-items: center;
@@ -1457,6 +1490,53 @@ button { color: inherit; }
 .fullscreen-button svg { width: 17px; height: 17px; }
 .fullscreen-button.is-active { border-color: #9db5ee; color: #204aa5; background: var(--accent-soft); }
 
+.is-clean-fullscreen {
+  display: block;
+  overflow: hidden;
+  background: var(--workspace);
+}
+.is-clean-fullscreen :is(
+  .topbar,
+  #slide-rail,
+  #pdf-page-rail,
+  .slide-rail-backdrop,
+  .statusbar,
+  .topbar-show,
+  .footer-show,
+  .slide-rail-show-floating,
+  .obs-capture-guide,
+  .classroom-time-overlay,
+  .probability-randomizer,
+  .math-interaction-overlay,
+  .slide-frame-draw-overlay,
+  .screenshot-capture-overlay,
+  .lasso-overlay,
+  .bucket-fill-settings,
+  .spinner-pointer-overlays
+) { display: none !important; }
+.is-clean-fullscreen .editor-region,
+.is-clean-fullscreen.is-slide-mode .editor-region,
+.is-clean-fullscreen.is-pdf-mode .editor-region {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.is-clean-fullscreen .editor-host,
+.is-clean-fullscreen .editor-host > .excalidraw {
+  width: 100%;
+  height: 100%;
+}
+.is-clean-fullscreen .editor-host .excalidraw :is(
+  .layer-ui__wrapper,
+  .App-top-bar,
+  .App-bottom-bar,
+  .mobile-misc-tools-container,
+  .HintViewer
+) { display: none !important; }
+body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-menu) {
+  display: none !important;
+}
+
 .is-presenting { display: block; background: #111827; }
 .is-presenting .editor-region { width: 100%; height: 100%; display: block; }
 .is-presenting .editor-host { width: 100%; height: 100%; }
@@ -1468,23 +1548,62 @@ button { color: inherit; }
 .presentation-controls {
   position: fixed;
   z-index: 100;
-  left: 50%;
-  bottom: 22px;
-  transform: translateX(-50%);
+  right: calc(12px + var(--safe-area-right));
+  bottom: calc(22px + var(--safe-area-bottom));
+  left: calc(12px + var(--safe-area-left));
+  width: fit-content;
+  max-width: calc(100vw - var(--safe-area-left) - var(--safe-area-right) - 24px);
+  max-height: calc(100dvh - var(--safe-area-top) - var(--safe-area-bottom) - 44px);
+  box-sizing: border-box;
   display: flex;
   align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
   gap: 5px;
+  margin-inline: auto;
   padding: 7px;
+  overflow: auto;
+  overscroll-behavior: contain;
   border: 1px solid #cbd2dd;
   border-radius: 9px;
   background: rgb(255 255 255 / 96%);
   box-shadow: 0 8px 28px rgb(15 23 42 / 22%);
 }
+.presentation-controls-collapsed {
+  position: fixed;
+  z-index: 100;
+  bottom: calc(16px + var(--safe-area-bottom));
+  left: calc(16px + var(--safe-area-left));
+  max-width: calc(100vw - var(--safe-area-left) - var(--safe-area-right) - 32px);
+  box-sizing: border-box;
+}
+.presentation-controls-collapsed button {
+  max-width: 100%;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid #cbd2dd;
+  border-radius: 9px;
+  background: rgb(255 255 255 / 96%);
+  color: #283449;
+  box-shadow: 0 8px 28px rgb(15 23 42 / 22%);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.presentation-controls-collapsed button:hover { border-color: #9db8f4; background: var(--accent-soft); color: #204aa5; }
+.presentation-controls-collapsed button:focus-visible { outline: 3px solid #9db8f4; outline-offset: 2px; }
+.presentation-controls-collapsed svg { width: 17px; height: 17px; }
 .presentation-main-controls,
 .presentation-ink-palette,
 .presentation-width-picker {
+  min-width: 0;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 5px;
 }
 .presentation-controls button {
@@ -2077,6 +2196,135 @@ button { color: inherit; }
 .dialog-preview:hover:not(:disabled) { border-color: #6f8fd8; background: #e6eeff; }
 .dialog-preview:disabled { opacity: .45; cursor: default; }
 
+.keyboard-shortcuts-backdrop { padding: 18px; }
+.keyboard-shortcuts-dialog {
+  width: min(980px, 100%);
+  max-height: calc(100dvh - 36px);
+  display: grid;
+  grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
+  padding: 22px;
+  border: 1px solid #cfd5df;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 18px 60px rgb(15 23 42 / 28%);
+}
+.keyboard-shortcuts-heading { margin-bottom: 8px; }
+.keyboard-shortcuts-description {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.keyboard-shortcuts-search-row { display: grid; gap: 6px; }
+.keyboard-shortcuts-search-row > label {
+  color: #4b5870;
+  font-size: 11px;
+  font-weight: 750;
+}
+.keyboard-shortcuts-search-control { position: relative; }
+.keyboard-shortcuts-search-control input {
+  width: 100%;
+  min-height: 42px;
+  padding: 8px 74px 8px 12px;
+  border: 1px solid #b9c4d3;
+  border-radius: 8px;
+  background: #fbfcfe;
+  color: #172033;
+  font-size: 13px;
+}
+.keyboard-shortcuts-search-control input:focus { border-color: var(--accent); outline: 3px solid #dbe7ff; background: #fff; }
+.keyboard-shortcuts-search-control button {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid #c5cedb;
+  border-radius: 6px;
+  background: #fff;
+  color: #40506a;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.keyboard-shortcuts-result-count {
+  min-height: 16px;
+  margin: 7px 1px 8px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+.keyboard-shortcuts-groups {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: start;
+  gap: 12px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 1px 5px 1px 1px;
+}
+.keyboard-shortcuts-group {
+  min-width: 0;
+  align-self: start;
+  overflow: hidden;
+  border: 1px solid #dbe1e9;
+  border-radius: 9px;
+  background: #fbfcfe;
+}
+.keyboard-shortcuts-group > header { padding: 11px 12px 9px; border-bottom: 1px solid #e2e7ee; background: #f4f7fb; }
+.keyboard-shortcuts-group h3 { margin: 0; color: #263249; font-size: 13px; }
+.keyboard-shortcuts-group header p { margin: 3px 0 0; color: var(--muted); font-size: 10px; line-height: 1.35; }
+.keyboard-shortcuts-group dl { margin: 0; }
+.keyboard-shortcut-row {
+  min-height: 53px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-top: 1px solid #e7ebf0;
+}
+.keyboard-shortcut-row:first-child { border-top: 0; }
+.keyboard-shortcut-row dt { min-width: 0; display: grid; gap: 2px; }
+.keyboard-shortcut-row dt strong { color: #2c384d; font-size: 11px; line-height: 1.25; }
+.keyboard-shortcut-row dt span { color: var(--muted); font-size: 9px; line-height: 1.35; }
+.keyboard-shortcut-row dd { flex: 0 0 auto; margin: 0; }
+.keyboard-shortcut-bindings { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px; }
+.keyboard-shortcut-binding,
+.keyboard-shortcut-chord { display: inline-flex; align-items: center; gap: 3px; }
+.keyboard-shortcut-or { color: var(--muted); font-size: 8px; font-weight: 700; }
+.keyboard-shortcut-chord > span { display: inline-flex; align-items: center; gap: 3px; }
+.keyboard-shortcut-plus { color: #7c879a; font-size: 9px; }
+.keyboard-shortcut-chord kbd {
+  min-width: 25px;
+  min-height: 25px;
+  display: inline-grid;
+  place-items: center;
+  padding: 3px 6px;
+  border: 1px solid #aeb9c9;
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: #fff;
+  color: #34415a;
+  font: 700 10px/1.1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+}
+.keyboard-shortcuts-empty {
+  grid-column: 1 / -1;
+  display: grid;
+  justify-items: center;
+  gap: 5px;
+  padding: 38px 18px;
+  border: 1px dashed #bdc7d5;
+  border-radius: 9px;
+  color: var(--muted);
+  text-align: center;
+}
+.keyboard-shortcuts-empty p { margin: 0 0 6px; font-size: 11px; }
+.keyboard-shortcuts-empty button { padding: 7px 10px; border: 1px solid #b9c4d3; border-radius: 6px; background: #fff; cursor: pointer; }
+.keyboard-shortcuts-actions { margin-top: 13px; }
+
 .mermaid-dialog {
   width: min(960px, 100%);
   max-height: min(760px, calc(100vh - 40px));
@@ -2327,13 +2575,15 @@ button { color: inherit; }
   .export-dialog,
   .pdf-clear-annotations-dialog,
   .pdf-insert-dialog,
+  .keyboard-shortcuts-dialog,
   .math-tools-dialog,
   .geogon-dialog,
   .equation-dialog,
   .mermaid-dialog,
   .math-interaction-panel,
   .screenshot-library,
-  .presentation-controls
+  .presentation-controls,
+  .presentation-controls-collapsed button
 ) {
   border-color: var(--border);
   background: var(--panel);
@@ -2344,6 +2594,7 @@ button { color: inherit; }
   .settings-heading > span,
   .settings-toggle strong,
   .settings-select strong,
+  .settings-help-link strong,
   .document-title,
   .slide-caption,
   .slide-number,
@@ -2357,12 +2608,39 @@ button { color: inherit; }
   .zoom-status,
   .math-tool-card h3,
   .dialog-heading h2,
+  .keyboard-shortcuts-group h3,
+  .keyboard-shortcut-row dt strong,
   .screenshot-library-heading h2
 ) { color: #e7edf7; }
 .app-shell[data-theme="dark"] .settings-recording-note {
   background: #111a28;
   color: #a8b3c6;
 }
+.app-shell[data-theme="dark"] .settings-help-link:hover { border-color: #52617a; background: #202b3e; }
+.app-shell[data-theme="dark"] .settings-help-link kbd,
+.app-shell[data-theme="dark"] .keyboard-shortcut-chord kbd {
+  border-color: #5f6e85;
+  background: #111a28;
+  color: #e7edf7;
+}
+.app-shell[data-theme="dark"] :is(
+  .keyboard-shortcuts-search-control input,
+  .keyboard-shortcuts-search-control button,
+  .keyboard-shortcuts-empty button
+) {
+  border-color: #52617a;
+  background: #111a28;
+  color: #e7edf7;
+}
+.app-shell[data-theme="dark"] .keyboard-shortcuts-search-control input:focus {
+  border-color: var(--accent);
+  outline-color: rgb(127 167 255 / 28%);
+  background: #101722;
+}
+.app-shell[data-theme="dark"] .keyboard-shortcuts-group { border-color: #45536b; background: #111a28; }
+.app-shell[data-theme="dark"] .keyboard-shortcuts-group > header { border-color: #45536b; background: #202b3e; }
+.app-shell[data-theme="dark"] .keyboard-shortcut-row { border-color: #354054; }
+.app-shell[data-theme="dark"] .keyboard-shortcuts-empty { border-color: #52617a; }
 .app-shell[data-theme="dark"] :is(
   .workspace-tabs,
   .slide-aspect-segments,
@@ -2637,7 +2915,8 @@ button { color: inherit; }
   color: #c7d6ff;
 }
 .app-shell[data-theme="dark"] .presentation-controls button:hover:not(:disabled),
-.app-shell[data-theme="dark"] .presentation-controls button.is-active {
+.app-shell[data-theme="dark"] .presentation-controls button.is-active,
+.app-shell[data-theme="dark"] .presentation-controls-collapsed button:hover {
   border-color: #7196eb;
   background: #29446f;
   color: #dbe7ff;
@@ -2839,7 +3118,10 @@ button { color: inherit; }
   .slide-preview { height: 70px; }
   .slide-settings-popover { right: 6px; left: 6px; padding: 9px; }
   .presentation-controls {
-    width: calc(100% - 16px);
+    right: calc(8px + var(--safe-area-right));
+    left: calc(8px + var(--safe-area-left));
+    width: auto;
+    max-width: none;
     flex-wrap: wrap;
     justify-content: center;
   }
@@ -2944,11 +3226,22 @@ button { color: inherit; }
   .is-slide-mode .page-status .slide-rail-show { width: 32px; padding: 0; }
   .is-slide-mode .page-status .slide-rail-show span { display: none; }
   .presentation-controls {
-    width: calc(100% - 16px);
-    bottom: 8px;
+    right: calc(8px + var(--safe-area-right));
+    bottom: calc(8px + var(--safe-area-bottom));
+    left: calc(8px + var(--safe-area-left));
+    width: auto;
+    max-width: none;
+    max-height: calc(100dvh - var(--safe-area-top) - var(--safe-area-bottom) - 16px);
     flex-direction: column;
-    justify-content: center;
+    justify-content: flex-start;
   }
+  .presentation-controls-collapsed {
+    bottom: calc(8px + var(--safe-area-bottom));
+    left: calc(8px + var(--safe-area-left));
+    max-width: calc(100vw - var(--safe-area-left) - var(--safe-area-right) - 16px);
+  }
+  .presentation-collapse-toggle,
+  .presentation-controls-collapsed button { min-width: 44px; min-height: 44px; }
   .presentation-main-controls { justify-content: center; }
   .presentation-main-controls button { padding: 0 7px; font-size: 0; }
   .presentation-ink-palette {
@@ -2966,6 +3259,18 @@ button { color: inherit; }
     justify-content: center;
   }
   .presentation-palette-label { display: none; }
+  .modal-backdrop.keyboard-shortcuts-backdrop {
+    padding: calc(8px + var(--safe-area-top)) calc(8px + var(--safe-area-right)) calc(8px + var(--safe-area-bottom)) calc(8px + var(--safe-area-left));
+  }
+  .keyboard-shortcuts-dialog {
+    max-height: calc(100dvh - var(--safe-area-top) - var(--safe-area-bottom) - 16px);
+    padding: 15px;
+  }
+  .keyboard-shortcuts-groups { grid-template-columns: 1fr; }
+  .keyboard-shortcut-row { align-items: flex-start; flex-direction: column; gap: 7px; }
+  .keyboard-shortcut-row dd { width: 100%; }
+  .keyboard-shortcut-bindings { justify-content: flex-start; }
+  .keyboard-shortcuts-actions .dialog-primary { width: 100%; min-height: 42px; }
   .modal-backdrop { padding: 10px; }
   :is(.pdf-insert-backdrop, .pdf-clear-annotations-backdrop) {
     padding: calc(8px + var(--safe-area-top)) calc(8px + var(--safe-area-right)) calc(8px + var(--safe-area-bottom)) calc(8px + var(--safe-area-left));

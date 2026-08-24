@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { CaptureUpdateAction } from "@excalidraw/excalidraw";
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
+import { isEditableKeyboardTarget } from "../lib/keyboard-targets";
 import {
   DEFAULT_BUCKET_FILL_COLOR,
   effectiveBucketFillColor,
@@ -163,6 +164,7 @@ export function BucketFillOverlay({ api, editorHost, onExit, onFill }: BucketFil
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (isEditableKeyboardTarget(event.target)) return;
       event.preventDefault();
       event.stopPropagation();
       api.setActiveTool({ type: "selection", locked: false });

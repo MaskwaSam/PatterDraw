@@ -20,6 +20,7 @@ import {
 } from "./Icons";
 import { SlidePreview } from "./SlidePreview";
 import { useModalDialog } from "./useModalDialog";
+import { isEditableKeyboardTarget } from "../lib/keyboard-targets";
 
 const SLIDE_DRAG_MIME = "application/x-patterdraw-slide";
 
@@ -126,6 +127,7 @@ export function SlideRail({
         if (actionSlideId) closeActionMenu(actionSlideId, true);
         return;
       }
+      if (isEditableKeyboardTarget(event.target)) return;
       if (window.matchMedia("(max-width: 640px)").matches) {
         event.preventDefault();
         onHide();

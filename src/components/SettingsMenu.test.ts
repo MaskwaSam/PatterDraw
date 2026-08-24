@@ -28,6 +28,7 @@ afterEach(() => {
 describe("SettingsMenu PDF preferences", () => {
   it("exposes the visual fallback as an offer with per-export confirmation", () => {
     const onPdfPreferenceChange = vi.fn();
+    const onOpenShortcutHelp = vi.fn();
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -39,6 +40,7 @@ describe("SettingsMenu PDF preferences", () => {
       onPreferenceChange: vi.fn(),
       onPdfPreferenceChange,
       onThemePreferenceChange: vi.fn(),
+      onOpenShortcutHelp,
       onRestorePdfDefaults: vi.fn(),
       onRestoreDefaults: vi.fn(),
     })));
@@ -67,5 +69,13 @@ describe("SettingsMenu PDF preferences", () => {
         "Sharper active PDF page",
         "Offer visual PDF fallback",
       ]);
+
+    const shortcutHelp = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.includes("Keyboard shortcuts"));
+    expect(shortcutHelp?.textContent).toContain("?");
+    act(() => shortcutHelp?.click());
+    expect(onOpenShortcutHelp).toHaveBeenCalledOnce();
+    expect(onOpenShortcutHelp).toHaveBeenCalledWith(settings);
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
 });

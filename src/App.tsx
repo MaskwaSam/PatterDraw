@@ -40,6 +40,7 @@ import {
 } from "./components/ClearPdfAnnotationsDialog";
 import { VisualPdfFallbackDialog } from "./components/VisualPdfFallbackDialog";
 import { PresentationOverlay } from "./components/PresentationOverlay";
+import { KeyboardShortcutsDialog } from "./components/KeyboardShortcutsDialog";
 import { StrokeWidthExtensions } from "./components/StrokeWidthExtensions";
 import { MathToolsMenuExtension } from "./components/MathToolsMenuExtension";
 import { MathToolsDialog } from "./components/MathToolsDialog";
@@ -127,6 +128,7 @@ import { bytesForBlob } from "./lib/blob-bytes";
 import { downloadBlob, safeFileStem } from "./lib/download";
 import { exportFullBoardPng } from "./lib/export-board";
 import { createLocalId } from "./lib/id";
+import { isEditableKeyboardTarget } from "./lib/keyboard-targets";
 import {
   beginPngClipboardWrite,
   downsamplePngToByteLimit,
@@ -797,6 +799,7 @@ function installProjectFindShortcutBridge(): ProjectFindShortcutBridge | null {
       || (!event.ctrlKey && !event.metaKey)
       || event.key.toLowerCase() !== "f"
     ) return;
+    if (isEditableKeyboardTarget(event.target)) return;
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
@@ -810,6 +813,46 @@ function installProjectFindShortcutBridge(): ProjectFindShortcutBridge | null {
 }
 
 const projectFindShortcutBridge = installProjectFindShortcutBridge();
+
+type ShortcutHelpBridge = {
+  open: (() => void) | null;
+};
+const SHORTCUT_HELP_BRIDGE_KEY = "__patterdrawShortcutHelpBridgeV1";
+
+function installShortcutHelpBridge(): ShortcutHelpBridge | null {
+  if (typeof window === "undefined") return null;
+  const browserWindow = window as Window & {
+    [SHORTCUT_HELP_BRIDGE_KEY]?: ShortcutHelpBridge;
+  };
+  const existing = browserWindow[SHORTCUT_HELP_BRIDGE_KEY];
+  if (existing) return existing;
+  const bridge: ShortcutHelpBridge = { open: null };
+  browserWindow[SHORTCUT_HELP_BRIDGE_KEY] = bridge;
+  // Own the question-mark shortcut before Excalidraw mounts so PatterDraw's
+  // complete wrapper and editor shortcut guide replaces the narrower native
+  // drawing-only help dialog.
+  window.addEventListener("keydown", (event) => {
+    const isQuestionMark = event.key === "?"
+      || (event.code === "Slash" && event.shiftKey);
+    if (
+      !bridge.open
+      || event.repeat
+      || event.altKey
+      || event.ctrlKey
+      || event.metaKey
+      || !isQuestionMark
+    ) return;
+    if (isEditableKeyboardTarget(event.target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    if (hasVisibleModalSurface()) return;
+    bridge.open();
+  }, true);
+  return bridge;
+}
+
+const shortcutHelpBridge = installShortcutHelpBridge();
 
 /**
  * Excalidraw's public-library URL importer is an optional consumer hook, not
@@ -2752,6 +2795,20 @@ export default function App() {
   const [presentation, setPresentation] = useState<PresentationState | null>(null);
   const presentationRef = useRef<PresentationState | null>(presentation);
   presentationRef.current = presentation;
+  const stopPresentationRef = useRef<(() => void) | null>(null);
+  const presentationReturnFocusRef = useRef<HTMLElement | null>(null);
+  const presentationReturnFocusWasTriggerRef = useRef(false);
+  const presentationFocusRestoreFrameRef = useRef<number | null>(null);
+  const [isShortcutHelpOpen, setIsShortcutHelpOpen] = useState(false);
+  const shortcutHelpReturnFocusRef = useRef<HTMLElement | null>(null);
+  const openShortcutHelp = useCallback((returnFocusTarget?: HTMLElement | null) => {
+    shortcutHelpReturnFocusRef.current = returnFocusTarget
+      ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    setIsShortcutHelpOpen(true);
+  }, []);
+  const [isCleanFullscreen, setIsCleanFullscreen] = useState(false);
+  const isCleanFullscreenRef = useRef(isCleanFullscreen);
+  isCleanFullscreenRef.current = isCleanFullscreen;
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("board");
   const [isSlideRailVisible, setIsSlideRailVisible] = useState(true);
@@ -2932,6 +2989,7 @@ export default function App() {
   const insertTriggerRef = useRef<HTMLButtonElement>(null);
   const exportOptionsTriggerRef = useRef<HTMLButtonElement>(null);
   const projectFindTriggerRef = useRef<HTMLButtonElement>(null);
+  const presentationTriggerRef = useRef<HTMLButtonElement>(null);
   const slideRailShowButtonRef = useRef<HTMLButtonElement>(null);
   const pdfRailShowButtonRef = useRef<HTMLButtonElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
@@ -3192,7 +3250,7 @@ export default function App() {
   const pendingProjectSearchTargetRef = useRef<PendingProjectSearchTarget | null>(null);
   const pendingPresentationTransitionRef = useRef<PendingPresentationTransition | null>(null);
   const fullscreenIntentRef = useRef<{
-    kind: "manual" | "presentation";
+    kind: "manual" | "presentation" | "clean";
     entered: boolean;
   } | null>(null);
   const pendingCreatedFrameIdRef = useRef<string | null>(null);
@@ -4271,6 +4329,10 @@ export default function App() {
         // toggleFullscreen. Retire that owner so a later stale request cannot
         // mistake it for a still-current fullscreen intent.
         fullscreenIntentRef.current = null;
+        if (intent.kind === "clean") {
+          isCleanFullscreenRef.current = false;
+          setIsCleanFullscreen(false);
+        }
       }
       setIsFullscreen(shellIsFullscreen);
     };
@@ -4285,6 +4347,7 @@ export default function App() {
       if (event.repeat || !event.shiftKey || (!event.ctrlKey && !event.metaKey)) return;
       const key = event.key.toLowerCase();
       if (key !== "h" && key !== "f") return;
+      if (isEditableKeyboardTarget(event.target)) return;
       if (hasVisibleModalSurface()) return;
       event.preventDefault();
       if (key === "h") setIsNavigationVisible((visible) => !visible);
@@ -5372,6 +5435,16 @@ export default function App() {
   }, [featurePreferences.projectFind, openProjectFind, presentation]);
 
   useEffect(() => {
+    if (!shortcutHelpBridge) return;
+    shortcutHelpBridge.open = openShortcutHelp;
+    return () => {
+      if (shortcutHelpBridge.open === openShortcutHelp) {
+        shortcutHelpBridge.open = null;
+      }
+    };
+  }, [openShortcutHelp]);
+
+  useEffect(() => {
     if (featurePreferences.insert) return;
     setEquationEditor(null);
     setMermaidEditor(null);
@@ -5583,6 +5656,7 @@ export default function App() {
     // Do not enter the hydration-suppression window until this operation is
     // still current and ready to commit. A superseded archive must not leave
     // the previous editor stuck with switchingSceneRef=true.
+    stopPresentationRef.current?.();
     beginSceneHydration();
     pdfBytesRef.current = loaded.pdfBytes;
     projectRef.current = startupProject;
@@ -5771,6 +5845,7 @@ export default function App() {
           setErrorMessage(null);
           setSaveStatus("saved");
         }
+        stopPresentationRef.current?.();
         beginSceneHydration();
         pendingFrameIdRef.current = null;
         pendingProjectSearchTargetRef.current = null;
@@ -8432,12 +8507,19 @@ export default function App() {
     });
   }, [beginSceneHydration, commitLiveScenePersistence, commitPendingScenePersistence]);
 
-  const startPresentation = useCallback(async () => {
+  const startPresentation = useCallback(async (returnFocusTarget?: HTMLElement | null) => {
     if (!project || !api || workspaceMode !== "slides") return;
     if (!project.slideOrder.length) {
       api.setToast({ message: "Add a slide first; each frame becomes a slide." });
       return;
     }
+    if (presentationFocusRestoreFrameRef.current !== null) {
+      window.cancelAnimationFrame(presentationFocusRestoreFrameRef.current);
+      presentationFocusRestoreFrameRef.current = null;
+    }
+    presentationReturnFocusRef.current = returnFocusTarget
+      ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    presentationReturnFocusWasTriggerRef.current = presentationReturnFocusRef.current === presentationTriggerRef.current;
     presentationInkGenerationRef.current += 1;
     presentationInkStartElementIdsRef.current = null;
     if (presentationInkFrameRef.current !== null) {
@@ -8478,6 +8560,8 @@ export default function App() {
       });
       api.setActiveTool({ type: "selection" });
       setAreSlideFramesVisible(slideFramesVisibleRef.current);
+      presentationReturnFocusRef.current = null;
+      presentationReturnFocusWasTriggerRef.current = false;
       api.setToast({ message: "Presentation mode could not be started." });
       if (error) console.error("Presentation mode could not be started.", error);
       return;
@@ -8554,6 +8638,11 @@ export default function App() {
       window.cancelAnimationFrame(presentationInkFrameRef.current);
       presentationInkFrameRef.current = null;
     }
+    const returnFocusTarget = presentationReturnFocusRef.current;
+    const returnFocusWasTrigger = presentationReturnFocusWasTriggerRef.current;
+    presentationReturnFocusRef.current = null;
+    presentationReturnFocusWasTriggerRef.current = false;
+    presentationRef.current = null;
     setPresentation(null);
     api?.updateFrameRendering({
       enabled: slideFramesVisibleRef.current,
@@ -8566,7 +8655,41 @@ export default function App() {
     if (document.fullscreenElement === shellRef.current) {
       void document.exitFullscreen().catch(() => undefined);
     }
+    if (returnFocusTarget) {
+      if (presentationFocusRestoreFrameRef.current !== null) {
+        window.cancelAnimationFrame(presentationFocusRestoreFrameRef.current);
+      }
+      presentationFocusRestoreFrameRef.current = window.requestAnimationFrame(() => {
+        presentationFocusRestoreFrameRef.current = null;
+        if (presentationRef.current) return;
+        const connectedReturnTarget = returnFocusTarget.isConnected
+          && returnFocusTarget.getClientRects().length > 0
+          ? returnFocusTarget
+          : null;
+        const replacementTrigger = returnFocusWasTrigger
+          && presentationTriggerRef.current?.getClientRects().length
+          ? presentationTriggerRef.current
+          : null;
+        const focusTarget = connectedReturnTarget
+          || replacementTrigger
+          || editorHostRef.current?.querySelector<HTMLElement>(".excalidraw");
+        focusTarget?.focus({ preventScroll: true });
+      });
+    }
   }, [api]);
+
+  stopPresentationRef.current = stopPresentation;
+
+  useEffect(() => () => {
+    if (presentationFocusRestoreFrameRef.current !== null) {
+      window.cancelAnimationFrame(presentationFocusRestoreFrameRef.current);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!presentation) return;
+    if (workspaceMode !== "slides" || !presentationSlide) stopPresentation();
+  }, [presentation, presentationSlide, stopPresentation, workspaceMode]);
 
   useEffect(() => {
     if (!presentation) return;
@@ -8683,6 +8806,131 @@ export default function App() {
       api?.setToast({ message: "Fullscreen mode is unavailable in this browser." });
     }
   }, [api]);
+
+  const exitCleanFullscreen = useCallback(async () => {
+    isCleanFullscreenRef.current = false;
+    setIsCleanFullscreen(false);
+    if (fullscreenIntentRef.current?.kind === "clean") {
+      fullscreenIntentRef.current = null;
+    }
+    if (document.fullscreenElement === shellRef.current) {
+      try {
+        await document.exitFullscreen();
+      } catch {
+        // The browser can finish a native Escape before this promise runs.
+      }
+    }
+    window.requestAnimationFrame(() => api?.refresh());
+  }, [api]);
+
+  const enterCleanFullscreen = useCallback(async () => {
+    const shell = shellRef.current;
+    if (!shell || presentationRef.current || hasVisibleModalSurface()) return;
+
+    isCleanFullscreenRef.current = true;
+    setIsCleanFullscreen(true);
+    pendingProjectSearchTargetRef.current = null;
+    resetTransientPointerTools();
+    setExportOpen(false);
+    setIsProjectFindOpen(false);
+    setIsSizePositionOpen(false);
+    setIsLibraryOpen(false);
+    libraryOpenRef.current = false;
+    const appState = api?.getAppState();
+    if (api && appState) {
+      api.updateScene({
+        appState: {
+          editingFrame: null,
+          editingGroupId: null,
+          openDialog: null,
+          openSidebar: null,
+          selectedElementIds: {},
+          selectedGroupIds: {},
+          stats: { ...appState.stats, open: false },
+        },
+        captureUpdate: CaptureUpdateAction.NEVER,
+      });
+    }
+    window.requestAnimationFrame(() => api?.refresh());
+
+    const intent = { kind: "clean" as const, entered: false };
+    fullscreenIntentRef.current = intent;
+    if (document.fullscreenElement === shell) {
+      intent.entered = true;
+      return;
+    }
+    try {
+      await shell.requestFullscreen();
+      intent.entered = document.fullscreenElement === shell;
+      if (fullscreenIntentRef.current === null && document.fullscreenElement === shell) {
+        await document.exitFullscreen();
+      }
+    } catch {
+      if (fullscreenIntentRef.current === intent) fullscreenIntentRef.current = null;
+      // Keep the chrome-free in-window mode available when native fullscreen
+      // is blocked. The same shortcut or Escape still restores the workspace.
+    }
+  }, [api, resetTransientPointerTools]);
+
+  const toggleCleanFullscreen = useCallback(() => {
+    if (isCleanFullscreenRef.current) {
+      void exitCleanFullscreen();
+    } else {
+      void enterCleanFullscreen();
+    }
+  }, [enterCleanFullscreen, exitCleanFullscreen]);
+
+  useEffect(() => {
+    if (!isCleanFullscreen) return;
+    const exitOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (isEditableKeyboardTarget(event.target)) return;
+      event.preventDefault();
+      void exitCleanFullscreen();
+    };
+    window.addEventListener("keydown", exitOnEscape, true);
+    return () => window.removeEventListener("keydown", exitOnEscape, true);
+  }, [exitCleanFullscreen, isCleanFullscreen]);
+
+  useLayoutEffect(() => {
+    if (!api) return;
+    const frame = window.requestAnimationFrame(() => api.refresh());
+    return () => window.cancelAnimationFrame(frame);
+  }, [api, isCleanFullscreen]);
+
+  useEffect(() => {
+    const handleAppShortcut = (event: KeyboardEvent) => {
+      if (event.repeat || (!event.ctrlKey && !event.metaKey)) return;
+      const key = event.key.toLowerCase();
+      const cleanFullscreenShortcut = event.shiftKey && !event.altKey && event.key === "Enter";
+      const saveShortcut = !event.shiftKey && !event.altKey && key === "s";
+      const openShortcut = !event.shiftKey && !event.altKey && key === "o";
+      const presentationShortcut = event.altKey && !event.shiftKey && event.key === "Enter";
+      if (!cleanFullscreenShortcut && !saveShortcut && !openShortcut && !presentationShortcut) return;
+      if (isEditableKeyboardTarget(event.target)) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      if (hasVisibleModalSurface()) return;
+
+      if (cleanFullscreenShortcut) {
+        toggleCleanFullscreen();
+      } else if (saveShortcut) {
+        void saveProjectFile();
+      } else if (openShortcut) {
+        inputRef.current?.click();
+      } else if (presentationShortcut && workspaceMode === "slides" && !presentationRef.current) {
+        if (isCleanFullscreenRef.current) {
+          void exitCleanFullscreen().then(() => startPresentation());
+        } else {
+          void startPresentation();
+        }
+      }
+    };
+    window.addEventListener("keydown", handleAppShortcut, true);
+    return () => window.removeEventListener("keydown", handleAppShortcut, true);
+  }, [exitCleanFullscreen, saveProjectFile, startPresentation, toggleCleanFullscreen, workspaceMode]);
 
   const clickEditorControl = useCallback((selector: string) => {
     const control = editorHostRef.current?.querySelector<HTMLButtonElement>(selector);
@@ -9592,9 +9840,10 @@ export default function App() {
         || hasVisibleModalSurface()
         || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")
       ) return;
+      if (isEditableKeyboardTarget(event.target)) return;
       const target = event.target instanceof Element ? event.target : null;
       if (target?.closest(
-        'input, textarea, select, button, [contenteditable="true"], [role="textbox"], [role="dialog"], [role="menu"], [role="listbox"], [role="separator"], .busy-overlay',
+        'button, [role="dialog"], [role="menu"], [role="listbox"], [role="separator"], .busy-overlay',
       )) return;
       const nextIndex = pageIndex + (event.key === "ArrowLeft" ? -1 : 1);
       const nextPage = pdfScenes[nextIndex];
@@ -10883,7 +11132,7 @@ export default function App() {
       if (
         !host
         || (!target || (!host.contains(target) && (!activeElement || !host.contains(activeElement))))
-        || target.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]')
+        || isEditableKeyboardTarget(target)
       ) return;
       const clipboard = event.clipboardData;
       try {
@@ -10930,7 +11179,7 @@ export default function App() {
   const handleEditorCopyCapture = useCallback((event: ReactClipboardEvent<HTMLDivElement>) => {
     if (!api || switchingSceneRef.current || !projectRef.current) return;
     const target = event.target instanceof Element ? event.target : null;
-    if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+    if (isEditableKeyboardTarget(target)) return;
     const appState = api.getAppState();
     const visibleElements = api.getSceneElements();
     const selectedOwners = new Set(visibleElements.flatMap((element) => {
@@ -11349,6 +11598,7 @@ export default function App() {
   );
 
   const handleEditorKeyDownCapture = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (isEditableKeyboardTarget(event.target)) return;
     const target = event.target instanceof HTMLElement ? event.target : null;
     // Project Find owns keyboard interaction inside its query/results. Keep
     // editor-level shortcuts from consuming a focused button's activation.
@@ -11360,8 +11610,7 @@ export default function App() {
       && !event.altKey
       && !event.shiftKey
       && event.key.toLowerCase() === "b"
-      && !target?.isContentEditable
-      && !target?.closest("input, textarea, select, [role='dialog']")
+      && !target?.closest("[role='dialog']")
     ) {
       event.preventDefault();
       event.stopPropagation();
@@ -11481,6 +11730,7 @@ export default function App() {
   useEffect(() => {
     const cancelOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape" && slideFrameDrawingActiveRef.current) {
+        if (isEditableKeyboardTarget(event.target)) return;
         event.preventDefault();
         event.stopPropagation();
         stopSlideFrameDrawing();
@@ -11560,6 +11810,7 @@ export default function App() {
     api
     && selectedClassroomTime
     && !presentation
+    && !isCleanFullscreen
     && !featurePreferences.obsCaptureArea
     && !classroomTimeDialog
     && !isMathToolsOpen
@@ -11576,7 +11827,7 @@ export default function App() {
   return (
     <div
       ref={shellRef}
-      className={`app-shell ${workspaceModeClassName(workspaceMode)} ${workspaceMode === "slides" && !isSlideRailVisible ? "is-slide-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfRailVisible ? "is-pdf-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfToolbarVisible ? "is-pdf-toolbar-hidden" : ""} ${!isNavigationVisible ? "is-nav-hidden" : ""} ${!isFooterVisible ? "is-footer-hidden" : ""} ${!featurePreferences.projectFind ? "is-project-find-disabled" : ""} ${!featurePreferences.library ? "is-library-disabled" : ""} ${featurePreferences.iconOnlyControls ? "is-icon-only-controls" : ""} ${featurePreferences.obsCaptureArea ? "is-obs-capture-enabled" : ""} ${featurePreferences.obsCaptureArea && featurePreferences.obsShowCursor ? "is-obs-cursor-visible" : ""} ${presentation ? "is-presenting" : ""}`}
+      className={`app-shell ${workspaceModeClassName(workspaceMode)} ${workspaceMode === "slides" && !isSlideRailVisible ? "is-slide-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfRailVisible ? "is-pdf-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfToolbarVisible ? "is-pdf-toolbar-hidden" : ""} ${!isNavigationVisible ? "is-nav-hidden" : ""} ${!isFooterVisible ? "is-footer-hidden" : ""} ${!featurePreferences.projectFind ? "is-project-find-disabled" : ""} ${!featurePreferences.library ? "is-library-disabled" : ""} ${featurePreferences.iconOnlyControls ? "is-icon-only-controls" : ""} ${featurePreferences.obsCaptureArea ? "is-obs-capture-enabled" : ""} ${featurePreferences.obsCaptureArea && featurePreferences.obsShowCursor ? "is-obs-cursor-visible" : ""} ${isCleanFullscreen ? "is-clean-fullscreen" : ""} ${presentation && presentationSlide && workspaceMode === "slides" ? "is-presenting" : ""}`}
       data-theme={editorTheme}
       style={{ "--pdf-rail-width": `${pdfRailWidth}px` } as CSSProperties}
     >
@@ -11596,6 +11847,7 @@ export default function App() {
           onFeaturePreferenceChange={setFeaturePreference}
           onPdfPreferenceChange={setPdfPreference}
           onThemePreferenceChange={setThemePreference}
+          onOpenShortcutHelp={openShortcutHelp}
           onRestoreFeaturePreferences={restoreFeaturePreferences}
           onRestorePdfPreferences={restorePdfPreferences}
           onOpen={() => inputRef.current?.click()}
@@ -11997,7 +12249,13 @@ export default function App() {
             <div className="statusbar-actions">
               {workspaceMode === "slides" && (
                 <>
-                  <button className="present-button" type="button" onClick={startPresentation} title="Start presentation">
+                  <button
+                    ref={presentationTriggerRef}
+                    className="present-button"
+                    type="button"
+                    onClick={(event) => void startPresentation(event.currentTarget)}
+                    title="Start presentation"
+                  >
                     <PresentIcon /><span className="icon-label">Present</span>
                   </button>
                   <button className="footer-history-button" type="button" aria-label="Undo" title="Undo" onClick={() => clickEditorControl('[data-testid="button-undo"]')}><UndoIcon /></button>
@@ -12040,7 +12298,7 @@ export default function App() {
           </footer>
         )}
       </main>
-      {presentation && (
+      {presentation && presentationSlide && workspaceMode === "slides" && (
         <PresentationOverlay
           slides={project.slideOrder}
           index={presentation.index}
@@ -12052,8 +12310,15 @@ export default function App() {
           onInkColourChange={setPresentationInkColour}
           onInkWidthChange={setPresentationInkWidth}
           onExit={stopPresentation}
+          shortcutsPaused={isShortcutHelpOpen}
         />
       )}
+      {isShortcutHelpOpen ? (
+        <KeyboardShortcutsDialog
+          onClose={() => setIsShortcutHelpOpen(false)}
+          returnFocusRef={shortcutHelpReturnFocusRef}
+        />
+      ) : null}
       <input
         ref={inputRef}
         className="visually-hidden"

@@ -36,6 +36,7 @@ interface TopBarProps {
   onFeaturePreferenceChange: (key: FeaturePreferenceKey, enabled: boolean) => void;
   onPdfPreferenceChange: (key: PdfPreferenceKey, enabled: boolean) => void;
   onThemePreferenceChange: (preference: ThemePreference) => void;
+  onOpenShortcutHelp: (returnFocusTarget?: HTMLElement | null) => void;
   onRestoreFeaturePreferences: () => void;
   onRestorePdfPreferences: () => void;
   onOpen: () => void;
@@ -124,6 +125,7 @@ export function TopBar({
   onFeaturePreferenceChange,
   onPdfPreferenceChange,
   onThemePreferenceChange,
+  onOpenShortcutHelp,
   onRestoreFeaturePreferences,
   onRestorePdfPreferences,
   onOpen,
@@ -157,6 +159,7 @@ export function TopBar({
           onPreferenceChange={onFeaturePreferenceChange}
           onPdfPreferenceChange={onPdfPreferenceChange}
           onThemePreferenceChange={onThemePreferenceChange}
+          onOpenShortcutHelp={onOpenShortcutHelp}
           onRestorePdfDefaults={onRestorePdfPreferences}
           onRestoreDefaults={onRestoreFeaturePreferences}
         />
