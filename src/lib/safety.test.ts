@@ -5,6 +5,7 @@ import {
   countProjectClassroomTimeWidgets,
   isPersistedWrapperTool,
   isSafeLocalImageSource,
+  MAX_PDF_PAGES,
   sanitizeProject,
   sanitizeScene,
 } from "./safety";
@@ -384,6 +385,42 @@ describe("student safety", () => {
     } satisfies ClassroomProject;
     expect(() => assertSafeProject(project)).toThrow(/duplicate/);
     expect(() => assertSafeProject({ ...project, pdfPageOrder: ["missing"] })).toThrow(/invalid page scene/);
+  });
+
+  it("accepts 500-page PDF metadata and rejects a source above that ceiling", () => {
+    const project = createBlankProject();
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "large-source.pdf",
+      mimeType: "application/pdf",
+      byteLength: 1,
+      pageCount: MAX_PDF_PAGES,
+      archivePath: "documents/pdf.pdf",
+    };
+    expect(() => assertSafeProject(project)).not.toThrow();
+    project.pdfDocuments.pdf.pageCount = MAX_PDF_PAGES + 1;
+    expect(() => assertSafeProject(project)).toThrow(/too many pages/i);
+  });
+
+  it("rejects more than 500 output PDF pages across otherwise valid sources", () => {
+    const project = createBlankProject();
+    const pageIds: string[] = [];
+    for (let index = 0; index <= MAX_PDF_PAGES; index += 1) {
+      const id = `page-${index}`;
+      pageIds.push(id);
+      project.scenes[id] = pdfScene(id, index % MAX_PDF_PAGES);
+    }
+    project.activeSceneId = pageIds[0];
+    project.pdfPageOrder = pageIds;
+    project.pdfDocuments.pdf = {
+      id: "pdf",
+      name: "large-source.pdf",
+      mimeType: "application/pdf",
+      byteLength: 1,
+      pageCount: MAX_PDF_PAGES,
+      archivePath: "documents/pdf.pdf",
+    };
+    expect(() => assertSafeProject(project)).toThrow(/more than 500 PDF pages/i);
   });
 
   it("rejects inherited scene names in the active scene and PDF page order", () => {

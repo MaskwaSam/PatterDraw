@@ -26,6 +26,7 @@ vi.mock("./embedded-image-limits", () => ({
 }));
 
 import { hasPdfByteSignature, importPdf, inspectPdfFile } from "./import-pdf";
+import { MAX_PDF_PAGES } from "../safety";
 
 const originalCreateElement = window.document.createElement.bind(window.document);
 const PDF_BYTES = new Uint8Array([
@@ -92,11 +93,11 @@ describe("PDF import PDF.js safety options", () => {
     expect(options).toEqual(expect.objectContaining({
       enableScripting: false,
       isEvalSupported: false,
-      maxImageSize: 16_000_000,
+      maxImageSize: 32_000_000,
       canvasMaxAreaInBytes: 64_000_000,
     }));
     expect(assertPdfEmbeddedImageLimitMock).toHaveBeenCalledOnce();
-    expect(assertPdfEmbeddedImageLimitMock.mock.calls[0]?.[1]).toBe(16_000_000);
+    expect(assertPdfEmbeddedImageLimitMock.mock.calls[0]?.[1]).toBe(32_000_000);
     expect(assertPdfEmbeddedImageLimitMock.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
       maxEdge: 8_192,
     }));
@@ -136,6 +137,36 @@ describe("PDF import PDF.js safety options", () => {
     await expect(importPdf(file, { maxEncodedBytesPerDocument: 0 }))
       .rejects.toThrow(/rendered pages are too large/i);
     expect(getDocumentMock).toHaveBeenCalledOnce();
+    expect(assertPdfEmbeddedImageLimitMock.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
+      maxTotalEncodedBytes: 75 * 1024 * 1024,
+    }));
+  });
+
+  it("uses remaining project pixels only for retained output, not source decoding", async () => {
+    const file = new File([PDF_BYTES], "remaining-budget.pdf", {
+      type: "application/pdf",
+    });
+    const imported = await importPdf(file, { maxRasterPixelsForImport: 100_000 });
+
+    expect(imported.rasterUsage.encodedBytes).toBe(1);
+    expect(imported.rasterUsage.pixels).toBeGreaterThan(0);
+    expect(imported.rasterUsage.pixels).toBeLessThanOrEqual(100_000);
+    expect(getDocumentMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      maxImageSize: 32_000_000,
+      canvasMaxAreaInBytes: 64_000_000,
+    }));
+    expect(assertPdfEmbeddedImageLimitMock.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
+      maxTotalPixels: 64_000_000,
+    }));
+  });
+
+  it("rejects an exhausted project raster budget before reading the PDF", async () => {
+    const file = new File([PDF_BYTES], "no-capacity.pdf", {
+      type: "application/pdf",
+    });
+    await expect(importPdf(file, { maxRasterPixelsForImport: 0 }))
+      .rejects.toThrow(/no remaining image capacity/i);
+    expect(getDocumentMock).not.toHaveBeenCalled();
   });
 
   it("destroys a pending PDF.js load when the import generation aborts", async () => {
@@ -249,6 +280,24 @@ describe("PDF import PDF.js safety options", () => {
       documentTotal: 4,
       phase: "loading",
     }));
+  });
+
+  it("accepts sources above the former 250-page cap through the 500-page ceiling", async () => {
+    expect(MAX_PDF_PAGES).toBe(500);
+    const file = new File([PDF_BYTES], "large-classroom-source.pdf", {
+      type: "application/pdf",
+    });
+
+    documentProxy.numPages = 251;
+    await expect(inspectPdfFile(file)).resolves.toMatchObject({ pageCount: 251 });
+    documentProxy.numPages = MAX_PDF_PAGES;
+    await expect(inspectPdfFile(file)).resolves.toMatchObject({ pageCount: MAX_PDF_PAGES });
+    documentProxy.numPages = MAX_PDF_PAGES + 1;
+    await expect(inspectPdfFile(file)).rejects.toThrow(
+      `The PDF has more than ${MAX_PDF_PAGES} pages.`,
+    );
+    expect(documentProxy.getPage).not.toHaveBeenCalled();
+    expect(page.render).not.toHaveBeenCalled();
   });
 
   it("optionally retains an independent verified byte snapshot during inspection", async () => {

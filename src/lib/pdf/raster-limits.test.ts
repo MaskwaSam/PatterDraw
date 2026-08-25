@@ -28,9 +28,9 @@ describe("PDF import raster limits", () => {
     expect(() => getPdfImportEncodedByteBudget(DEFAULT_PDF_RASTER_BUDGET, -1))
       .toThrow(/encoded-image byte limit/i);
   });
-  it("bounds PDF.js embedded images and worker canvases to the raster budget", () => {
+  it("lets PDF.js downsample source images inside the bounded worker canvas", () => {
     expect(getPdfJsRasterOptions(DEFAULT_PDF_RASTER_BUDGET)).toEqual({
-      maxImageSize: MAX_PDF_RASTER_PIXELS_PER_PAGE,
+      maxImageSize: MAX_PDF_RASTER_PIXELS_PER_PAGE * 2,
       canvasMaxAreaInBytes: MAX_PDF_RASTER_PIXELS_PER_PAGE * 4,
     });
     expect(getPdfJsRasterOptions({
@@ -40,6 +40,17 @@ describe("PDF import raster limits", () => {
     })).toEqual({
       maxImageSize: 1_000_000,
       canvasMaxAreaInBytes: 4_000_000,
+    });
+  });
+
+  it("keeps source-image and worker-canvas limits device-adaptive", () => {
+    expect(getPdfJsRasterOptions(getPdfRasterBudget({ deviceMemory: 4 }))).toEqual({
+      maxImageSize: 16_000_000,
+      canvasMaxAreaInBytes: 8_000_000 * 4,
+    });
+    expect(getPdfJsRasterOptions(getPdfRasterBudget({ deviceMemory: 2 }))).toEqual({
+      maxImageSize: 8_000_000,
+      canvasMaxAreaInBytes: 4_000_000 * 4,
     });
   });
 
@@ -107,7 +118,7 @@ describe("PDF import raster limits", () => {
   });
 
   it("caps every edge, page bitmap, and aggregate document bitmap", () => {
-    const pages = Array.from({ length: 250 }, () => ({ width: 612, height: 792 }));
+    const pages = Array.from({ length: 500 }, () => ({ width: 612, height: 792 }));
     const scale = getPdfImportRasterScale(pages, 2);
     const width = Math.ceil(612 * scale);
     const height = Math.ceil(792 * scale);
@@ -115,7 +126,7 @@ describe("PDF import raster limits", () => {
     expect(height).toBeLessThanOrEqual(MAX_PDF_RASTER_EDGE);
     expect(width * height).toBeLessThanOrEqual(MAX_PDF_RASTER_PIXELS_PER_PAGE);
     expect(width * height * pages.length).toBeLessThanOrEqual(
-      MAX_PDF_RASTER_PIXELS_PER_DOCUMENT + pages.length * (width + height + 1),
+      MAX_PDF_RASTER_PIXELS_PER_DOCUMENT,
     );
     expect(scale).toBeLessThan(1);
   });

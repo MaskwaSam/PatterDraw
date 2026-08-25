@@ -1356,6 +1356,14 @@ button { color: inherit; }
 .is-slide-mode .editor-host .layer-ui__wrapper__footer-left,
 .is-pdf-mode .editor-host .layer-ui__wrapper__footer-left { display: none !important; }
 
+/* Excalidraw keeps its Shapes island visible in native Zen mode and does not
+   expose its desktop Zen class on the mobile toolbar. Mirror that app-state on
+   the editor host and hide the complete labelled toolbar in both layouts. */
+.editor-host.is-native-zen-mode .excalidraw .shapes-section,
+.editor-host.is-native-zen-mode .excalidraw.excalidraw--mobile .App-top-bar {
+  display: none !important;
+}
+
 .editor-host .excalidraw .buttonList:has(input[name="stroke-width"]) {
   flex-wrap: nowrap;
   column-gap: 6px;

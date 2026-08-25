@@ -6,10 +6,8 @@ import {
   type SlideFrameAspectRatio,
 } from "../types";
 import {
-  assertLocalProjectRasterBudget,
   canonicalizeCanvasEncodedGifDataUrl,
-  inspectLocalImageDataUrl,
-  type LocalImageRasterInfo,
+  inspectLocalProjectRasterUsage,
 } from "./image-safety";
 import { sanitizeClassroomMathToolMetadata } from "./math-tools/types";
 import {
@@ -48,11 +46,12 @@ import { isBlockedEmbeddedElementType } from "./embedded-content-policy";
 import {
   assertProjectStructure,
   assertSceneStructure,
+  MAX_PDF_PAGES,
 } from "./structural-limits";
 
 export const MAX_PROJECT_BYTES = 150 * 1024 * 1024;
 export const MAX_PDF_BYTES = 75 * 1024 * 1024;
-export const MAX_PDF_PAGES = 250;
+export { MAX_PDF_PAGES };
 
 const embeddedImageDataUrl = /^data:image\/(?:png|jpe?g|gif|webp|svg\+xml);base64,([a-z\d+/]*={0,2})$/i;
 const MAX_EMBEDDED_IMAGE_SOURCE_LENGTH = Math.ceil(MAX_PROJECT_BYTES * 4 / 3) + 128;
@@ -442,6 +441,7 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
   const pdfSourceInstances = new Map<string, { documentId: string; sourceName: string }>();
   const classroomTimeAnchorOwners = new Set<string>();
   let classroomTimeAnchorCount = 0;
+  let pdfPageCount = 0;
   for (const [sceneKey, scene] of Object.entries(project.scenes)) {
     if (
       !scene
@@ -457,6 +457,12 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
       || Array.isArray(scene.files)
     ) {
       throw new Error("A scene is malformed.");
+    }
+    if (scene.pdfPage) {
+      pdfPageCount += 1;
+      if (pdfPageCount > MAX_PDF_PAGES) {
+        throw new Error(`A project cannot contain more than ${MAX_PDF_PAGES} PDF pages.`);
+      }
     }
     if (requireSanitized) {
       for (const [fileId, file] of Object.entries(scene.files)) {
@@ -773,31 +779,10 @@ export async function assertLoadedProjectRasterSafety(
   }
 
   const rasterBudget = options.rasterBudget ?? getBrowserPdfRasterBudget();
-  let rasterTotals = { encodedBytes: 0, pixels: 0 };
-  const inspectedImages = new Map<string, LocalImageRasterInfo>();
-  for (const scene of Object.values(project.scenes)) {
-    throwIfAborted(options.signal);
-    for (const file of Object.values(scene.files)) {
-      throwIfAborted(options.signal);
-      if (!file || typeof file.dataURL !== "string" || !isSafeLocalImageSource(file.dataURL)) {
-        throw new Error("A project image has missing or unsafe local data.");
-      }
-      // Counting duplicate file IDs separately is conservative because each
-      // Excalidraw file can be decoded independently by a restored scene. The
-      // content hash set only avoids repeated work for exact duplicate data
-      // URLs while retaining the per-file cumulative budget charge.
-      const cacheKey = file.dataURL;
-      let info = inspectedImages.get(cacheKey);
-      if (!info) {
-        info = await inspectLocalImageDataUrl(file.dataURL, {
-          signal: options.signal,
-          rasterBudget,
-        });
-        inspectedImages.set(cacheKey, info);
-      }
-      rasterTotals = assertLocalProjectRasterBudget(info, rasterTotals, rasterBudget);
-    }
-  }
+  await inspectLocalProjectRasterUsage(project, {
+    signal: options.signal,
+    rasterBudget,
+  });
 
   const rasterOptions = getPdfJsRasterOptions(rasterBudget);
   const encodedRasterBudget = getPdfImportEncodedByteBudget(rasterBudget);

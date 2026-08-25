@@ -245,7 +245,7 @@ describe("light active PDF page rendering", () => {
     expect(documentProxy.getPage).toHaveBeenCalledWith(3);
     expect(assertPdfEmbeddedImageLimitMock).toHaveBeenCalledWith(
       sourceBytes,
-      16_000_000,
+      32_000_000,
       expect.objectContaining({ immutableSha256: "ab".repeat(32) }),
     );
     expect(page.cleanup).toHaveBeenCalledOnce();

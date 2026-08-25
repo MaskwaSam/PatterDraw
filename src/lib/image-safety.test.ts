@@ -1,15 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  addLocalProjectRasterUsage,
   assertLocalProjectRasterBudget,
   clearLocalImageSafetyCache,
   generateSafeLocalImageFileId,
   inspectLocalImageDataUrl,
   inspectLocalImageBlob,
+  inspectLocalProjectRasterUsage,
   getLocalImageRasterBudget,
   MAX_LOCAL_IMAGE_PIXELS,
   MAX_LOCAL_SVG_COMPLEXITY,
   hasExcalidrawPngSceneMetadata,
   isWrapperOwnedImageDrop,
+  remainingLocalProjectRasterCapacity,
   stripExcalidrawSvgSceneMetadata,
 } from "./image-safety";
 
@@ -288,6 +291,35 @@ describe("offline persisted image safety", () => {
     expect(() => assertLocalProjectRasterBudget(
       { ...first, pixels: MAX_LOCAL_IMAGE_PIXELS, decodedBytes: MAX_LOCAL_IMAGE_PIXELS * 4 },
       { encodedBytes: 0, pixels: 64 * 1024 * 1024 },
+    )).toThrow(/too large/i);
+  });
+
+  it("measures every retained scene file and exposes only the remaining project budget", async () => {
+    const value = `data:image/png;base64,${PNG_1X1}`;
+    const info = await inspectLocalImageDataUrl(value);
+    const project = {
+      scenes: {
+        first: { id: "first", name: "First", elements: [], appState: {}, files: {
+          a: { id: "a", dataURL: value },
+        } },
+        second: { id: "second", name: "Second", elements: [], appState: {}, files: {
+          b: { id: "b", dataURL: value },
+        } },
+      },
+    };
+    const usage = await inspectLocalProjectRasterUsage(project);
+    expect(usage).toEqual({
+      encodedBytes: info.encodedBytes * 2,
+      pixels: info.pixels * 2,
+    });
+    const remaining = remainingLocalProjectRasterCapacity(usage);
+    expect(addLocalProjectRasterUsage(usage, remaining)).toEqual({
+      encodedBytes: getLocalImageRasterBudget().maxEncodedBytesPerProject,
+      pixels: getLocalImageRasterBudget().maxPixelsPerProject,
+    });
+    expect(() => addLocalProjectRasterUsage(
+      usage,
+      { ...remaining, pixels: remaining.pixels + 1 },
     )).toThrow(/too large/i);
   });
 

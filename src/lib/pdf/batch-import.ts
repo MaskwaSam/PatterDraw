@@ -13,8 +13,17 @@ import {
   assertProjectFitsContentBudget,
 } from "../project-budget";
 import {
+  addLocalProjectRasterUsage,
+  inspectLocalProjectRasterUsage,
+  remainingLocalProjectRasterCapacity,
+} from "../image-safety";
+import {
+  getBrowserPdfRasterBudget,
+  type PdfRasterBudget,
+} from "./raster-limits";
+import {
   assertProjectCanAcceptPdfPages,
-  remainingProjectSceneCapacity,
+  remainingProjectPdfPageCapacity,
 } from "./capacity";
 import {
   buildPdfPageOrderAfterInsertion,
@@ -35,6 +44,8 @@ export interface AtomicPdfBatchImportOptions {
   onProgress?: PdfOperationProgressCallback;
   /** Allows deterministic lower-budget tests without changing production limits. */
   maxProjectBytes?: number;
+  /** Allows deterministic device-raster tests without changing production limits. */
+  rasterBudget?: Readonly<PdfRasterBudget>;
   /** Test seam for proving failure atomicity without a browser PDF renderer. */
   importOne?: (file: File, options: ImportPdfOptions) => Promise<ImportedPdf>;
   now?: () => string;
@@ -105,6 +116,12 @@ export async function importPdfBatchAtomically(
   throwIfPdfOperationAborted(options.signal);
 
   const maxProjectBytes = options.maxProjectBytes ?? MAX_PROJECT_BYTES;
+  const rasterBudget = options.rasterBudget ?? getBrowserPdfRasterBudget();
+  let rasterUsage = await inspectLocalProjectRasterUsage(project, {
+    rasterBudget,
+    signal: options.signal,
+  });
+  let remainingRaster = remainingLocalProjectRasterCapacity(rasterUsage, rasterBudget);
   const importOne = options.importOne
     ?? (await import("./import-pdf")).importPdf;
   const knownDocumentIds = documentIdBySha(project);
@@ -115,6 +132,9 @@ export async function importPdfBatchAtomically(
 
   for (let index = 0; index < selections.length; index += 1) {
     const selection = selections[index];
+    if (remainingRaster.pixels < 1 || remainingRaster.encodedBytes < 1) {
+      throw new Error("This project has no remaining image capacity for another PDF page.");
+    }
     const reusedDocumentId = knownDocumentIds.get(selection.sha256);
     if (reusedDocumentId) {
       assertMatchingDeduplicatedSource(stagedProject, reusedDocumentId, selection);
@@ -126,11 +146,11 @@ export async function importPdfBatchAtomically(
       additionalSourceBytes,
       maxProjectBytes,
     );
-    const maxEncodedBytesPerDocument = Math.max(
-      0,
-      Math.floor(
+    const maxEncodedBytesPerDocument = Math.min(
+      remainingRaster.encodedBytes,
+      Math.max(0, Math.floor(
         (maxProjectBytes - currentSize.totalBytes - additionalSourceBytes) * 3 / 4,
-      ),
+      )),
     );
     const imported = await importOne(selection.file, {
       documentId: reusedDocumentId,
@@ -141,8 +161,10 @@ export async function importPdfBatchAtomically(
         sha256: selection.sha256,
       },
       maxEncodedBytesPerDocument,
-      maxPages: remainingProjectSceneCapacity(stagedProject),
+      maxPages: remainingProjectPdfPageCapacity(stagedProject),
+      maxRasterPixelsForImport: remainingRaster.pixels,
       onProgress: options.onProgress,
+      rasterBudget,
       signal: options.signal,
       sourceInstanceId: selection.sourceInstanceId,
       sourceName: selection.file.name,
@@ -155,6 +177,8 @@ export async function importPdfBatchAtomically(
     if (imported.scenes.length !== selection.sourcePageIndices.length) {
       throw new Error(`Not every selected page from ${selection.file.name} was imported.`);
     }
+    rasterUsage = addLocalProjectRasterUsage(rasterUsage, imported.rasterUsage, rasterBudget);
+    remainingRaster = remainingLocalProjectRasterCapacity(rasterUsage, rasterBudget);
 
     const documentId = reusedDocumentId ?? imported.source.id;
     if (reusedDocumentId && imported.source.id !== reusedDocumentId) {

@@ -1,8 +1,20 @@
 import type { ClassroomProject } from "../../types";
-import { MAX_PROJECT_SCENES } from "../structural-limits";
+import { MAX_PDF_PAGES, MAX_PROJECT_SCENES } from "../structural-limits";
 
 export function remainingProjectSceneCapacity(project: ClassroomProject): number {
   return Math.max(0, MAX_PROJECT_SCENES - Object.keys(project.scenes).length);
+}
+
+export function remainingProjectPdfPageCapacity(project: ClassroomProject): number {
+  const currentPdfPages = Object.values(project.scenes)
+    .reduce((count, scene) => count + (scene?.pdfPage ? 1 : 0), 0);
+  return Math.max(
+    0,
+    Math.min(
+      remainingProjectSceneCapacity(project),
+      MAX_PDF_PAGES - currentPdfPages,
+    ),
+  );
 }
 
 export function assertProjectCanAcceptPdfPages(
@@ -12,7 +24,7 @@ export function assertProjectCanAcceptPdfPages(
   if (!Number.isSafeInteger(additionalPages) || additionalPages < 0) {
     throw new Error("The PDF page capacity request is invalid.");
   }
-  const remaining = remainingProjectSceneCapacity(project);
+  const remaining = remainingProjectPdfPageCapacity(project);
   if (additionalPages > remaining) {
     throw new Error(
       remaining === 0

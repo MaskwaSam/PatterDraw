@@ -56,10 +56,17 @@ function localPdfStandardFontDataUrl(): string {
   return new URL("./pdfjs/standard_fonts/", window.location.href).toString();
 }
 
+export interface PdfImportRasterUsage {
+  encodedBytes: number;
+  pixels: number;
+}
+
 export interface ImportedPdf {
   source: PdfDocumentSource;
   bytes: Uint8Array;
   scenes: SerializedScene[];
+  /** Generated page-image resources retained by these scenes. */
+  rasterUsage: Readonly<PdfImportRasterUsage>;
 }
 
 interface ParsedPdfPages {
@@ -68,6 +75,7 @@ interface ParsedPdfPages {
   selectedPageCount: number;
   scenes: SerializedScene[];
   sourceSha256: string;
+  rasterUsage: Readonly<PdfImportRasterUsage>;
 }
 
 export interface InspectedPdfFile {
@@ -102,6 +110,8 @@ export interface ImportPdfOptions extends PdfDocumentProgressOptions {
   maxPages?: number;
   /** Override the device-sensitive raster envelope in focused callers/tests. */
   rasterBudget?: Readonly<PdfRasterBudget>;
+  /** Remaining project-wide pixel capacity available to generated page PNGs. */
+  maxRasterPixelsForImport?: number;
   /** Remaining project-content budget available for generated page PNGs. */
   maxEncodedBytesPerDocument?: number;
   /** Existing immutable-document identity when identical source bytes are reused. */
@@ -116,10 +126,7 @@ export interface ImportPdfOptions extends PdfDocumentProgressOptions {
   inspection?: Readonly<Pick<InspectedPdfFile, "sha256" | "pageCount">>;
 }
 
-interface PdfImportRasterState {
-  encodedBytes: number;
-  rasterPixels: number;
-}
+type PdfImportRasterState = PdfImportRasterUsage;
 
 const PDF_HEADER = [0x25, 0x50, 0x44, 0x46, 0x2d] as const;
 const PDF_HEADER_SCAN_BYTES = 1_024;
@@ -294,7 +301,7 @@ function assertRenderedPageBudget(
 ): void {
   const pixels = canvasWidth * canvasHeight;
   const encodedBytes = encodedDataUrlByteLength(dataURL);
-  const nextPixels = state.rasterPixels + pixels;
+  const nextPixels = state.pixels + pixels;
   const nextEncodedBytes = state.encodedBytes + encodedBytes;
   if (
     !Number.isSafeInteger(pixels)
@@ -310,7 +317,7 @@ function assertRenderedPageBudget(
   ) {
     throw new Error("The PDF's rendered pages are too large to retain safely.");
   }
-  state.rasterPixels = nextPixels;
+  state.pixels = nextPixels;
   state.encodedBytes = nextEncodedBytes;
 }
 
@@ -440,10 +447,18 @@ async function renderPageScene(
 async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promise<ParsedPdfPages> {
   throwIfPdfOperationAborted(options.signal);
   const rasterBudget = options.rasterBudget ?? getBrowserPdfRasterBudget();
-  const encodedBudget = getPdfImportEncodedByteBudget(
+  const outputRasterBudget: Readonly<PdfRasterBudget> = {
+    ...rasterBudget,
+    maxPixelsPerDocument: Math.min(
+      rasterBudget.maxPixelsPerDocument,
+      options.maxRasterPixelsForImport ?? rasterBudget.maxPixelsPerDocument,
+    ),
+  };
+  const outputEncodedBudget = getPdfImportEncodedByteBudget(
     rasterBudget,
     options.maxEncodedBytesPerDocument,
   );
+  const sourceEncodedBudget = getPdfImportEncodedByteBudget(rasterBudget);
   const rasterOptions = getPdfJsRasterOptions(rasterBudget);
   reportImportProgress(file, options, "reading");
   const parseBytes = new Uint8Array(await awaitPdfOperation(file.arrayBuffer(), options.signal));
@@ -461,7 +476,7 @@ async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promis
     immutableSha256: sourceSha256,
     maxEdge: rasterBudget.maxEdge,
     maxTotalPixels: rasterBudget.maxPixelsPerDocument,
-    maxTotalEncodedBytes: encodedBudget.maxBytesPerDocument,
+    maxTotalEncodedBytes: sourceEncodedBudget.maxBytesPerDocument,
     signal: options.signal,
   }), options.signal);
   throwIfPdfOperationAborted(options.signal);
@@ -522,10 +537,10 @@ async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promis
     const rasterScale = getPdfImportRasterScale(
       pageSizes,
       window.devicePixelRatio || 1,
-      rasterBudget,
+      outputRasterBudget,
     );
     const scenes: SerializedScene[] = [];
-    const rasterState: PdfImportRasterState = { encodedBytes: 0, rasterPixels: 0 };
+    const rasterState: PdfImportRasterState = { encodedBytes: 0, pixels: 0 };
     for (let selectionIndex = 0; selectionIndex < selectedPageIndices.length; selectionIndex += 1) {
       const pageIndex = selectedPageIndices[selectionIndex];
       reportImportProgress(file, options, "rendering", selectionIndex + 1, selectedPageIndices.length);
@@ -536,8 +551,8 @@ async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promis
         pageIndex,
         sourceName,
         rasterScale,
-        rasterBudget,
-        encodedBudget,
+        outputRasterBudget,
+        outputEncodedBudget,
         rasterState,
         options.signal,
       ));
@@ -549,6 +564,7 @@ async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promis
       selectedPageCount: selectedPageIndices.length,
       scenes,
       sourceSha256,
+      rasterUsage: { ...rasterState },
     };
   } catch (error) {
     if (options.signal?.aborted) {
@@ -570,6 +586,16 @@ export async function importPdf(file: File, options: ImportPdfOptions = {}): Pro
     && (!Number.isSafeInteger(options.maxPages) || options.maxPages < 0)
   ) {
     throw new Error("The remaining PDF page capacity is invalid.");
+  }
+  if (
+    options.maxRasterPixelsForImport !== undefined
+    && (!Number.isSafeInteger(options.maxRasterPixelsForImport)
+      || options.maxRasterPixelsForImport < 0)
+  ) {
+    throw new Error("The remaining PDF raster capacity is invalid.");
+  }
+  if (options.maxRasterPixelsForImport === 0) {
+    throw new Error("This project has no remaining image capacity for another PDF page.");
   }
   if (
     options.maxEncodedBytesPerDocument !== undefined
@@ -629,5 +655,6 @@ export async function importPdf(file: File, options: ImportPdfOptions = {}): Pro
     },
     bytes,
     scenes: parsed.scenes,
+    rasterUsage: parsed.rasterUsage,
   };
 }

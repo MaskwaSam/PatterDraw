@@ -544,21 +544,64 @@ async function autosavedPdfAnnotationCounts(
   });
 }
 
-async function oversizedEmbeddedImagePdfBytes(painted = true): Promise<Uint8Array> {
+async function autosavedPdfBackgroundCenterRgb(
+  page: import("@playwright/test").Page,
+): Promise<[number, number, number] | null> {
+  const project = await keyvalValue<{
+    activeSceneId: string;
+    scenes: Record<string, {
+      elements: Array<{ fileId?: string; id: string }>;
+      files: Record<string, { dataURL?: string }>;
+      pdfPage?: { backgroundElementId: string };
+    }>;
+  }>(page, "patterdraw:autosave:project:v1");
+  const scene = project?.scenes[project.activeSceneId];
+  const backgroundId = scene?.pdfPage?.backgroundElementId;
+  const fileId = scene?.elements.find((element) => element.id === backgroundId)?.fileId;
+  const dataURL = fileId ? scene?.files[fileId]?.dataURL : undefined;
+  if (!dataURL) return null;
+  return page.evaluate(async (url) => {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.drawImage(image, 0, 0);
+    const pixel = context.getImageData(
+      Math.floor(canvas.width / 2),
+      Math.floor(canvas.height / 2),
+      1,
+      1,
+    ).data;
+    return [pixel[0], pixel[1], pixel[2]] as [number, number, number];
+  }, dataURL);
+}
+
+async function largeEmbeddedImagePdfBytes(
+  painted = true,
+  width = 4_097,
+  height = 4_097,
+  rgbImage = false,
+): Promise<Uint8Array> {
   const document = await PDFDocument.create();
   const page = document.addPage([612, 792]);
-  const width = 4_097;
-  const height = 4_097;
-  // A valid one-bit image needs only about 2 MB before compression, while its
-  // decoded pixel area crosses the 16-million-pixel PDF.js safety boundary.
-  const samples = new Uint8Array(Math.ceil(width / 8) * height);
+  const components = rgbImage ? 3 : 1;
+  const bitsPerComponent = rgbImage ? 8 : 1;
+  // The RGB path represents a normal colour scan and forces PDF.js to handle
+  // the full decoded source buffer before retaining the smaller page raster.
+  const samples = new Uint8Array(
+    Math.ceil(width * components * bitsPerComponent / 8) * height,
+  );
   const image = document.context.flateStream(samples, {
     Type: PDFName.of("XObject"),
     Subtype: PDFName.of("Image"),
     Width: width,
     Height: height,
-    ColorSpace: PDFName.of("DeviceGray"),
-    BitsPerComponent: 1,
+    ColorSpace: PDFName.of(rgbImage ? "DeviceRGB" : "DeviceGray"),
+    BitsPerComponent: bitsPerComponent,
   });
   const imageRef = document.context.register(image);
   if (painted) {
@@ -571,11 +614,12 @@ async function oversizedEmbeddedImagePdfBytes(painted = true): Promise<Uint8Arra
   return document.save({ useObjectStreams: false });
 }
 
-async function oversizedInlineImagePdfBytes(): Promise<Uint8Array> {
+async function largeInlineImagePdfBytes(
+  width = 4_097,
+  height = 4_097,
+): Promise<Uint8Array> {
   const document = await PDFDocument.create();
   const page = document.addPage([612, 792]);
-  const width = 4_097;
-  const height = 4_097;
   const compressed = zlibSync(new Uint8Array(Math.ceil(width / 8) * height));
   const header = new TextEncoder().encode(
     `q 612 0 0 792 0 0 cm BI /W ${width} /H ${height} /CS /G /BPC 1 /F /Fl ID\n`,
@@ -3312,15 +3356,35 @@ test("keeps native image export light when a dark PDF render is still pending", 
   await expect(nativeDialog).toHaveCount(0);
 });
 
-test("rejects an oversized embedded PDF image instead of importing a blank page", async ({ page }) => {
+test("downsamples a large RGB PDF image instead of importing a blank page", async ({ page }) => {
   const warnings: string[] = [];
   page.on("console", (message) => {
     if (message.type() === "warning") warnings.push(message.text());
   });
   await page.getByLabel("Open project file").setInputFiles({
-    name: "oversized-embedded-image.pdf",
+    name: "large-embedded-image.pdf",
     mimeType: "application/pdf",
-    buffer: Buffer.from(await oversizedEmbeddedImagePdfBytes()),
+    buffer: Buffer.from(await largeEmbeddedImagePdfBytes(true, 4_097, 4_097, true)),
+  });
+
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect.poll(() => autosavedPdfBackgroundCenterRgb(page), {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  }).toEqual([0, 0, 0]);
+  expect(warnings.some((warning) => warning.includes("Image exceeded maximum allowed size"))).toBe(false);
+});
+
+test("rejects a PDF image above the bounded source-image budget atomically", async ({ page }) => {
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "source-image-over-budget.pdf",
+    mimeType: "application/pdf",
+    // 5,657² = 32,001,649 pixels: just above the standard-tier source cap,
+    // but still below the independent 8,192-pixel edge guard.
+    buffer: Buffer.from(await largeEmbeddedImagePdfBytes(true, 5_657, 5_657)),
   });
 
   await expect(page.getByRole("alert")).toContainText(
@@ -3328,7 +3392,60 @@ test("rejects an oversized embedded PDF image instead of importing a blank page"
   );
   await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
   await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
-  expect(warnings.some((warning) => warning.includes("Image exceeded maximum allowed size"))).toBe(false);
+});
+
+test("imports, saves, restores, and exports a PDF at the 500-page ceiling", async ({ page }) => {
+  test.setTimeout(180_000);
+  const pageCount = 500;
+  const document = await PDFDocument.create();
+  for (let index = 0; index < pageCount; index += 1) document.addPage([612, 792]);
+  const sourceBytes = await document.save();
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "500-page-classroom-document.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(sourceBytes),
+  });
+
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, {
+    timeout: 180_000,
+  });
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(pageCount, {
+    timeout: 180_000,
+  });
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect.poll(async () => {
+    const saved = await keyvalValue<{
+      pdfDocuments: Record<string, { pageCount: number }>;
+      pdfPageOrder: string[];
+    }>(page, "patterdraw:autosave:project:v1");
+    return {
+      pageCount: Object.values(saved?.pdfDocuments || {})[0]?.pageCount,
+      orderLength: saved?.pdfPageOrder.length,
+    };
+  }, { timeout: 180_000 }).toEqual({ pageCount, orderLength: pageCount });
+
+  const saveDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  const archive = unzipSync(new Uint8Array(await downloadBytes(await saveDownload)));
+  const manifest = JSON.parse(strFromU8(archive["project.json"])) as {
+    pdfDocuments: Record<string, { archivePath: string; pageCount: number }>;
+  };
+  const [savedSource] = Object.values(manifest.pdfDocuments);
+  expect(savedSource?.pageCount).toBe(pageCount);
+  expect(archive[savedSource.archivePath]).toEqual(sourceBytes);
+
+  await page.reload();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(pageCount, {
+    timeout: 180_000,
+  });
+
+  await page.getByRole("button", { name: "More export options", exact: true }).click();
+  const pdfDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: /Annotated PDF — expand pages/ }).click();
+  const exported = await PDFDocument.load(await downloadBytes(await pdfDownload));
+  expect(exported.getPageCount()).toBe(pageCount);
 });
 
 test("detects PDF content when the browser reports a generic MIME type", async ({ page }) => {
@@ -3387,25 +3504,28 @@ test("cancels an in-progress PDF import without committing partial pages", async
   await page.unrouteAll({ behavior: "wait" });
 });
 
-test("rejects an oversized inline PDF image instead of importing a blank page", async ({ page }) => {
+test("downsamples a large inline PDF image instead of importing a blank page", async ({ page }) => {
   await page.getByLabel("Open project file").setInputFiles({
-    name: "oversized-inline-image.pdf",
+    name: "large-inline-image.pdf",
     mimeType: "application/pdf",
-    buffer: Buffer.from(await oversizedInlineImagePdfBytes()),
+    buffer: Buffer.from(await largeInlineImagePdfBytes()),
   });
 
-  await expect(page.getByRole("alert")).toContainText(
-    "This PDF contains an embedded image that is too large to import safely.",
-  );
-  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
-  await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect.poll(() => autosavedPdfBackgroundCenterRgb(page), {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  }).toEqual([0, 0, 0]);
 });
 
-test("allows an unpainted oversized PDF image resource", async ({ page }) => {
+test("allows an unpainted large PDF image resource", async ({ page }) => {
   await page.getByLabel("Open project file").setInputFiles({
     name: "unused-oversized-image.pdf",
     mimeType: "application/pdf",
-    buffer: Buffer.from(await oversizedEmbeddedImagePdfBytes(false)),
+    buffer: Buffer.from(await largeEmbeddedImagePdfBytes(false)),
   });
 
   await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, { timeout: 15_000 });
@@ -5276,6 +5396,56 @@ test("toggles clean fullscreen without changing the restored toolbar and rail la
   await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true);
   await expect(shell).not.toHaveClass(/is-clean-fullscreen/);
   await expect(slideRail).toBeVisible();
+});
+
+test("hides the Shapes bar in native Zen mode and restores it on exit", async ({ page }) => {
+  const editorHost = page.locator(".editor-host");
+  const editor = page.locator(".editor-host .excalidraw.excalidraw-container");
+  const shapesSection = page.locator(".editor-host .excalidraw .shapes-section");
+  const toolbar = shapesSection.locator(".App-toolbar-container");
+  await expect(page.getByRole("region", { name: "Shapes", exact: true })).toBeVisible();
+  await expect(toolbar).not.toHaveClass(/zen-mode/);
+
+  await editor.focus();
+  await expect(editor).toBeFocused();
+  await page.keyboard.press("Alt+z");
+  await expect(toolbar).toHaveClass(/zen-mode/);
+  await expect(editorHost).toHaveClass(/is-native-zen-mode/);
+  await expect(shapesSection).toBeHidden();
+  await expect(page.getByRole("region", { name: "Shapes", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Exit zen mode", exact: true })).toBeVisible();
+
+  await editor.focus();
+  await page.keyboard.press("Alt+z");
+  await expect(toolbar).not.toHaveClass(/zen-mode/);
+  await expect(editorHost).not.toHaveClass(/is-native-zen-mode/);
+  await expect(shapesSection).toBeVisible();
+  await expect(page.getByRole("region", { name: "Shapes", exact: true })).toBeVisible();
+});
+
+test("hides and restores the mobile Shapes bar in native Zen mode", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload({ waitUntil: "domcontentloaded" });
+
+  const editorHost = page.locator(".editor-host");
+  const editor = page.locator(".editor-host .excalidraw.excalidraw-container");
+  const mobileToolbar = page.locator(".editor-host .excalidraw .App-top-bar");
+  await expect(editor).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect(editor).toHaveClass(/excalidraw--mobile/);
+  await expect(mobileToolbar).toBeVisible();
+  await expect(page.getByRole("region", { name: "Shapes", exact: true })).toBeVisible();
+
+  await editor.focus();
+  await page.keyboard.press("Alt+z");
+  await expect(editorHost).toHaveClass(/is-native-zen-mode/);
+  await expect(mobileToolbar).toBeHidden();
+  await expect(page.getByRole("region", { name: "Shapes", exact: true })).toHaveCount(0);
+
+  await editor.focus();
+  await page.keyboard.press("Alt+z");
+  await expect(editorHost).not.toHaveClass(/is-native-zen-mode/);
+  await expect(mobileToolbar).toBeVisible();
+  await expect(page.getByRole("region", { name: "Shapes", exact: true })).toBeVisible();
 });
 
 test("moves board zoom and history into the desktop footer without duplicating phone controls", async ({ page }) => {
@@ -9665,6 +9835,50 @@ test("rejects an impossible multi-file selection before opening the insertion di
   await expect(page.getByRole("alert")).toContainText("at most 1 more PDF page", { timeout: 10_000 });
   await expect(page.getByRole("dialog", { name: "Insert PDF pages", exact: true })).toHaveCount(0);
   await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1);
+});
+
+test("inserts a selected page from a supplemental PDF above 250 pages", async ({ page }) => {
+  test.setTimeout(120_000);
+  await openTestPdf(page);
+  const supplement = await PDFDocument.create();
+  for (let index = 0; index < 251; index += 1) supplement.addPage([612, 792]);
+
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
+  await page.getByLabel("Select PDFs to insert").setInputFiles({
+    name: "251-page-supplement.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await supplement.save()),
+  });
+
+  const dialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(dialog).toBeVisible({ timeout: 60_000 });
+  const row = dialog.locator(".pdf-insert-file-row").filter({
+    hasText: "251-page-supplement.pdf",
+  });
+  await row.getByLabel("Pages").fill("251");
+  await expect(dialog.getByText("1 page selected from 1 PDF.", { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Insert 1 page", exact: true }).click();
+
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await expect(dialog).toHaveCount(0, { timeout: 60_000 });
+  await expect(pages).toHaveCount(2, { timeout: 60_000 });
+  await expect(pages.nth(1)).toContainText("251-page-supplement.pdf");
+  await expect(pages.nth(1)).toContainText("Original page 251");
+  await expect.poll(async () => {
+    const saved = await keyvalValue<{
+      pdfDocuments: Record<string, { name: string; pageCount: number }>;
+      pdfPageOrder: string[];
+      scenes: Record<string, { pdfPage?: { pageIndex: number } }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    const source = Object.values(saved?.pdfDocuments || {})
+      .find((candidate) => candidate.name === "251-page-supplement.pdf");
+    const insertedSceneId = saved?.pdfPageOrder[1] || "";
+    return {
+      pageCount: source?.pageCount,
+      pageIndex: saved?.scenes[insertedSceneId]?.pdfPage?.pageIndex,
+    };
+  }, { timeout: 60_000 }).toEqual({ pageCount: 251, pageIndex: 250 });
 });
 
 test("inserts ordered pages from multiple PDFs atomically and deduplicates identical sources", async ({ page }) => {

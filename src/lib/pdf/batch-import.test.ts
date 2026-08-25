@@ -90,6 +90,7 @@ function importer() {
       source: source(documentId, sha256, file.size, options.inspection?.pageCount || 1),
       bytes: new Uint8Array(file.size),
       scenes,
+      rasterUsage: { encodedBytes: scenes.length, pixels: scenes.length },
     };
     call += 1;
     return result;
@@ -268,5 +269,96 @@ describe("atomic multi-PDF insertion", () => {
       { importOne },
     )).rejects.toThrow("reached its page and scene limit");
     expect(importOne).not.toHaveBeenCalled();
+  });
+
+  it("rejects a 501st output PDF page before rendering despite spare scene slots", async () => {
+    const { project, pdfBytes } = baseProject();
+    for (let index = 1; index < 499; index += 1) {
+      const page = pdfScene(`existing-${index}`, "main-document", 0);
+      project.scenes[page.id] = page;
+      project.pdfPageOrder?.push(page.id);
+    }
+    const importOne = importer();
+    const file = new File([new Uint8Array(5)], "two-more.pdf", { type: "application/pdf" });
+
+    await expect(importPdfBatchAtomically(
+      project,
+      pdfBytes,
+      [selection("overflow", file, SHA_B, 2, [0, 1])],
+      "after",
+      "main-page",
+      { importOne },
+    )).rejects.toThrow("at most 1 more PDF page");
+    expect(Object.keys(project.scenes).length).toBeLessThan(512);
+    expect(importOne).not.toHaveBeenCalled();
+  });
+
+  it("carries the remaining raster ledger across sequential source imports", async () => {
+    const { project, pdfBytes } = baseProject();
+    const files = [
+      new File([new Uint8Array(5)], "one.pdf", { type: "application/pdf" }),
+      new File([new Uint8Array(5)], "two.pdf", { type: "application/pdf" }),
+    ];
+    const render = importer();
+    let call = 0;
+    const importOne = vi.fn(async (file: File, options: ImportPdfOptions) => {
+      const imported = await render(file, options);
+      const pixels = call++ === 0 ? 6 : 4;
+      return { ...imported, rasterUsage: { encodedBytes: pixels, pixels } };
+    });
+    const rasterBudget = {
+      maxEdge: 100,
+      maxPixelsPerPage: 10,
+      maxPixelsPerDocument: 10,
+    } as const;
+
+    await expect(importPdfBatchAtomically(
+      project,
+      pdfBytes,
+      [
+        selection("one", files[0], SHA_B, 1, [0]),
+        selection("two", files[1], "c".repeat(64), 1, [0]),
+      ],
+      "after",
+      "main-page",
+      { importOne, rasterBudget },
+    )).resolves.toMatchObject({ insertedSceneIds: ["inserted-0-0", "inserted-1-0"] });
+    expect(importOne.mock.calls.map(([, options]) => options.maxRasterPixelsForImport))
+      .toEqual([10, 4]);
+    expect(importOne.mock.calls.map(([, options]) => options.maxEncodedBytesPerDocument))
+      .toEqual([40, 34]);
+  });
+
+  it("rejects a staged raster overflow atomically", async () => {
+    const { project, pdfBytes } = baseProject();
+    const projectBefore = structuredClone(project);
+    const files = [
+      new File([new Uint8Array(5)], "one.pdf", { type: "application/pdf" }),
+      new File([new Uint8Array(5)], "too-much.pdf", { type: "application/pdf" }),
+    ];
+    const render = importer();
+    let call = 0;
+    const importOne = vi.fn(async (file: File, options: ImportPdfOptions) => {
+      const imported = await render(file, options);
+      const pixels = call++ === 0 ? 6 : 5;
+      return { ...imported, rasterUsage: { encodedBytes: pixels, pixels } };
+    });
+
+    await expect(importPdfBatchAtomically(
+      project,
+      pdfBytes,
+      [
+        selection("one", files[0], SHA_B, 1, [0]),
+        selection("too-much", files[1], "c".repeat(64), 1, [0]),
+      ],
+      "after",
+      "main-page",
+      {
+        importOne,
+        rasterBudget: { maxEdge: 100, maxPixelsPerPage: 10, maxPixelsPerDocument: 10 },
+      },
+    )).rejects.toThrow(/persisted images are too large/i);
+    expect(project).toEqual(projectBefore);
+    expect(Object.keys(pdfBytes)).toEqual(["main-document"]);
   });
 });

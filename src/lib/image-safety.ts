@@ -7,6 +7,7 @@ import {
   type PdfRasterBudget,
 } from "./pdf/raster-limits";
 import { sha256Hex } from "./sha256";
+import type { ClassroomProject } from "../types";
 
 /**
  * A persisted image is decoded by the browser when Excalidraw hydrates a
@@ -961,20 +962,94 @@ export async function generateSafeLocalImageFileId(
 
 export function assertLocalProjectRasterBudget(
   info: LocalImageRasterInfo,
-  totals: { encodedBytes: number; pixels: number },
+  totals: LocalProjectRasterUsage,
   rasterBudget: Readonly<PdfRasterBudget> = getBrowserPdfRasterBudget(),
-): { encodedBytes: number; pixels: number } {
+): LocalProjectRasterUsage {
   const budget = getLocalImageRasterBudget(rasterBudget);
   assertLocalImageRasterInfoWithinBudget(info, budget);
-  const encodedBytes = totals.encodedBytes + info.encodedBytes;
-  const pixels = totals.pixels + info.pixels;
+  return addLocalProjectRasterUsage(
+    totals,
+    { encodedBytes: info.encodedBytes, pixels: info.pixels },
+    rasterBudget,
+  );
+}
+
+export interface LocalProjectRasterUsage {
+  encodedBytes: number;
+  pixels: number;
+}
+
+export function assertLocalProjectRasterUsageWithinBudget(
+  usage: Readonly<LocalProjectRasterUsage>,
+  rasterBudget: Readonly<PdfRasterBudget> = getBrowserPdfRasterBudget(),
+): void {
+  const budget = getLocalImageRasterBudget(rasterBudget);
   if (
-    !Number.isSafeInteger(encodedBytes)
-    || !Number.isSafeInteger(pixels)
-    || encodedBytes > budget.maxEncodedBytesPerProject
-    || pixels > budget.maxPixelsPerProject
+    !Number.isSafeInteger(usage.encodedBytes)
+    || usage.encodedBytes < 0
+    || !Number.isSafeInteger(usage.pixels)
+    || usage.pixels < 0
+    || usage.encodedBytes > budget.maxEncodedBytesPerProject
+    || usage.pixels > budget.maxPixelsPerProject
   ) {
     throw new Error("The project's persisted images are too large to decode safely.");
   }
-  return { encodedBytes, pixels };
+}
+
+export function addLocalProjectRasterUsage(
+  current: Readonly<LocalProjectRasterUsage>,
+  additional: Readonly<LocalProjectRasterUsage>,
+  rasterBudget: Readonly<PdfRasterBudget> = getBrowserPdfRasterBudget(),
+): LocalProjectRasterUsage {
+  const combined = {
+    encodedBytes: current.encodedBytes + additional.encodedBytes,
+    pixels: current.pixels + additional.pixels,
+  };
+  assertLocalProjectRasterUsageWithinBudget(combined, rasterBudget);
+  return combined;
+}
+
+export function remainingLocalProjectRasterCapacity(
+  usage: Readonly<LocalProjectRasterUsage>,
+  rasterBudget: Readonly<PdfRasterBudget> = getBrowserPdfRasterBudget(),
+): LocalProjectRasterUsage {
+  assertLocalProjectRasterUsageWithinBudget(usage, rasterBudget);
+  const budget = getLocalImageRasterBudget(rasterBudget);
+  return {
+    encodedBytes: budget.maxEncodedBytesPerProject - usage.encodedBytes,
+    pixels: budget.maxPixelsPerProject - usage.pixels,
+  };
+}
+
+/**
+ * Inspect and charge every persisted local image already retained by a
+ * project. Exact duplicate data URLs reuse inspection work but are still
+ * charged once per scene file because each file can be decoded independently.
+ */
+export async function inspectLocalProjectRasterUsage(
+  project: Pick<ClassroomProject, "scenes">,
+  options: LocalImageInspectionOptions = {},
+): Promise<LocalProjectRasterUsage> {
+  if (!project?.scenes || typeof project.scenes !== "object" || Array.isArray(project.scenes)) {
+    throw new Error("Project scenes must be an object.");
+  }
+  const rasterBudget = options.rasterBudget ?? getBrowserPdfRasterBudget();
+  let totals: LocalProjectRasterUsage = { encodedBytes: 0, pixels: 0 };
+  const inspectedImages = new Map<string, LocalImageRasterInfo>();
+  for (const scene of Object.values(project.scenes)) {
+    throwIfAborted(options.signal);
+    for (const file of Object.values(scene.files)) {
+      throwIfAborted(options.signal);
+      if (!file || typeof file.dataURL !== "string") {
+        throw new Error("A project image has missing or unsafe local data.");
+      }
+      let info = inspectedImages.get(file.dataURL);
+      if (!info) {
+        info = await inspectLocalImageDataUrl(file.dataURL, options);
+        inspectedImages.set(file.dataURL, info);
+      }
+      totals = assertLocalProjectRasterBudget(info, totals, rasterBudget);
+    }
+  }
+  return totals;
 }

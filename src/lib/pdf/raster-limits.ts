@@ -122,10 +122,22 @@ export function getPdfJsRasterOptions(
   rasterBudget: Readonly<PdfRasterBudget> = DEFAULT_PDF_RASTER_BUDGET,
 ): PdfJsRasterOptions {
   // PDF.js otherwise leaves maxImageSize and canvasMaxAreaInBytes unlimited.
-  // Keep one source image within the same conservative envelope as a page
-  // raster, and express the canvas bound in the four-bytes-per-pixel unit that
-  // PDF.js converts back to an area internally.
+  // A source image can legitimately be larger than the page raster it paints.
+  // PDF.js can still allocate a four-byte buffer for the full source before
+  // resizing it, so permit only two page rasters of device-adaptive headroom.
+  // This fixes common high-resolution scans without treating the smaller
+  // retained worker canvas as a bound on transient source-image decoding.
   const maxImageSize = Math.max(
+    1,
+    Math.floor(Math.min(
+      rasterBudget.maxPixelsPerPage * 2,
+      rasterBudget.maxPixelsPerDocument,
+      rasterBudget.maxEdge * rasterBudget.maxEdge,
+    )),
+  );
+  // PDF.js expects this canvas bound in bytes, then converts it back to a
+  // four-bytes-per-pixel area for image resizing.
+  const maxCanvasPixels = Math.max(
     1,
     Math.floor(Math.min(
       rasterBudget.maxPixelsPerPage,
@@ -135,7 +147,7 @@ export function getPdfJsRasterOptions(
   );
   return {
     maxImageSize,
-    canvasMaxAreaInBytes: maxImageSize * 4,
+    canvasMaxAreaInBytes: maxCanvasPixels * 4,
   };
 }
 
@@ -302,6 +314,41 @@ export function getPdfImportRasterScale(
     scale,
     Math.sqrt(rasterBudget.maxPixelsPerDocument) / Math.sqrt(totalArea),
   );
+  const fitsRoundedCanvasBudget = (candidate: number): boolean => {
+    let roundedPixels = 0;
+    for (const page of pages) {
+      const width = Math.ceil(page.width * candidate);
+      const height = Math.ceil(page.height * candidate);
+      const pixels = width * height;
+      if (
+        width <= 0
+        || height <= 0
+        || width > rasterBudget.maxEdge
+        || height > rasterBudget.maxEdge
+        || !Number.isSafeInteger(pixels)
+        || pixels > rasterBudget.maxPixelsPerPage
+      ) return false;
+      roundedPixels += pixels;
+      if (
+        !Number.isSafeInteger(roundedPixels)
+        || roundedPixels > rasterBudget.maxPixelsPerDocument
+      ) return false;
+    }
+    return true;
+  };
+  if (!fitsRoundedCanvasBudget(scale)) {
+    // The area formula uses fractional dimensions, while real canvases round
+    // every page edge up. Find the largest scale whose actual allocations stay
+    // inside the same unchanged raster budget.
+    let lower = 0;
+    let upper = scale;
+    for (let iteration = 0; iteration < 48; iteration += 1) {
+      const candidate = (lower + upper) / 2;
+      if (fitsRoundedCanvasBudget(candidate)) lower = candidate;
+      else upper = candidate;
+    }
+    scale = lower;
+  }
   if (!Number.isFinite(scale) || scale <= 0) {
     throw new Error("The PDF is too large to rasterize safely.");
   }

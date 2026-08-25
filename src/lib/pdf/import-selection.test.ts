@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MAX_PDF_PAGES } from "../safety";
 import {
   buildPdfPageOrderAfterInsertion,
   estimatePdfImportCapacity,
@@ -40,6 +41,15 @@ describe("PDF import page ranges", () => {
 
   it("bounds repeated output expansion", () => {
     expect(() => parsePdfPageRange("1,1,1", 2, 2)).toThrow(/at most 2 selected pages/i);
+  });
+
+  it("selects all pages through the expanded PDF ceiling", () => {
+    const selected = parsePdfPageRange("all", MAX_PDF_PAGES);
+    expect(selected).toHaveLength(500);
+    expect(selected.at(0)).toBe(0);
+    expect(selected.at(-1)).toBe(499);
+    expect(() => parsePdfPageRange("all", MAX_PDF_PAGES + 1))
+      .toThrow(/at most 500 selected pages/i);
   });
 });
 describe("PDF import placement", () => {

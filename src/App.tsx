@@ -162,6 +162,7 @@ import {
   renderDarkPdfPreview,
 } from "./lib/pdf/dark-preview";
 import {
+  getBrowserPdfRasterBudget,
   getBrowserPdfRasterDeviceTier,
   type PdfRasterDeviceTier,
 } from "./lib/pdf/raster-limits";
@@ -181,7 +182,7 @@ import {
 } from "./lib/pdf/page-order";
 import {
   assertProjectCanAcceptPdfPages,
-  remainingProjectSceneCapacity,
+  remainingProjectPdfPageCapacity,
 } from "./lib/pdf/capacity";
 import {
   clearPdfAnnotations,
@@ -230,11 +231,14 @@ import {
   sanitizeScene,
 } from "./lib/safety";
 import {
+  addLocalProjectRasterUsage,
   generateSafeLocalImageFileId,
+  inspectLocalProjectRasterUsage,
   inspectLocalImageDataUrl,
   inspectLocalImageBlob,
   rasterizeLocalImageToPngForInsertion,
   rasterizeLocalPngForInsertion,
+  remainingLocalProjectRasterCapacity,
   stripExcalidrawSvgSceneMetadata,
 } from "./lib/image-safety";
 import { geoGonSvgFromClipboardText } from "./lib/geogon";
@@ -619,6 +623,33 @@ export function assertPdfAdditionPreservesPendingUndo(
       pending.transaction,
       { now },
     )) throw new Error(PDF_UNDO_RESERVATION_ERROR);
+  } catch {
+    throw new Error(PDF_UNDO_RESERVATION_ERROR);
+  }
+}
+
+async function assertPdfAdditionPreservesPendingUndoRaster(
+  project: ClassroomProject,
+  pdfData: Record<PdfDocumentId, Uint8Array>,
+  pending: PendingPdfUndo | null,
+  now = Date.now(),
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!pending || now >= pending.transaction.expiresAt) return;
+  try {
+    const restoredProject = pending.kind === "clear-annotations"
+      ? undoPdfAnnotationClear(project, pending.transaction, {
+        now,
+        updatedAt: project.updatedAt,
+      }).project
+      : undoPdfPageDelete(project, pdfData, pending.transaction, {
+        now,
+        updatedAt: project.updatedAt,
+      }).project;
+    await inspectLocalProjectRasterUsage(restoredProject, {
+      rasterBudget: getBrowserPdfRasterBudget(),
+      signal,
+    });
   } catch {
     throw new Error(PDF_UNDO_RESERVATION_ERROR);
   }
@@ -2809,6 +2840,8 @@ export default function App() {
   const [isCleanFullscreen, setIsCleanFullscreen] = useState(false);
   const isCleanFullscreenRef = useRef(isCleanFullscreen);
   isCleanFullscreenRef.current = isCleanFullscreen;
+  const [isNativeZenMode, setIsNativeZenMode] = useState(false);
+  const nativeZenModeRef = useRef(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("board");
   const [isSlideRailVisible, setIsSlideRailVisible] = useState(true);
@@ -4814,6 +4847,10 @@ export default function App() {
 
   const handleChange = useCallback<NonNullable<ExcalidrawProps["onChange"]>>((elements, appState, files) => {
     if (autosavePageExitRef.current) return;
+    if (nativeZenModeRef.current !== appState.zenModeEnabled) {
+      nativeZenModeRef.current = appState.zenModeEnabled;
+      setIsNativeZenMode(appState.zenModeEnabled);
+    }
     const isNativeImageExportOpen = appState.openDialog?.name === "imageExport";
     if (nativeImageExportOpenRef.current && !isNativeImageExportOpen) {
       if (restoreExportOptionsFocusRef.current) {
@@ -5776,23 +5813,41 @@ export default function App() {
             || "",
         ) || createBlankProject();
         assertProjectCanAcceptPdfPages(preflightProject, 1);
-        const maxPages = remainingProjectSceneCapacity(preflightProject);
+        const maxPages = remainingProjectPdfPageCapacity(preflightProject);
+        const rasterBudget = getBrowserPdfRasterBudget();
+        const preflightRasterUsage = await inspectLocalProjectRasterUsage(preflightProject, {
+          rasterBudget,
+          signal: operation.signal,
+        });
+        if (!isCurrentOperation()) return;
+        const remainingRaster = remainingLocalProjectRasterCapacity(
+          preflightRasterUsage,
+          rasterBudget,
+        );
+        if (remainingRaster.pixels < 1 || remainingRaster.encodedBytes < 1) {
+          throw new Error("This project has no remaining image capacity for another PDF page.");
+        }
         const preflightSize = assertProjectCanAcceptAdditionalBytes(
           preflightProject,
           pdfBytesRef.current,
           file.size,
         );
-        const maxEncodedBytesPerDocument = Math.max(
-          0,
-          Math.floor((MAX_PROJECT_BYTES - preflightSize.totalBytes - file.size) * 3 / 4),
+        const maxEncodedBytesPerDocument = Math.min(
+          remainingRaster.encodedBytes,
+          Math.max(
+            0,
+            Math.floor((MAX_PROJECT_BYTES - preflightSize.totalBytes - file.size) * 3 / 4),
+          ),
         );
         const { importPdf } = await import("./lib/pdf/import-pdf");
         const imported = await importPdf(file, {
           maxEncodedBytesPerDocument,
           maxPages,
+          maxRasterPixelsForImport: remainingRaster.pixels,
           onProgress: (progress) => {
             if (isCurrentOperation()) setBusyMessage(pdfOperationProgressMessage(progress));
           },
+          rasterBudget,
           signal: operation.signal,
         });
         if (!isCurrentOperation()) return;
@@ -5807,6 +5862,15 @@ export default function App() {
             || projectRef.current?.activeSceneId
             || "",
         ) || createBlankProject();
+        assertProjectCanAcceptPdfPages(base, imported.scenes.length);
+        const baseRasterUsage = base === preflightProject
+          ? preflightRasterUsage
+          : await inspectLocalProjectRasterUsage(base, {
+            rasterBudget,
+            signal: operation.signal,
+          });
+        if (!isCurrentOperation()) return;
+        addLocalProjectRasterUsage(baseRasterUsage, imported.rasterUsage, rasterBudget);
         const nextPdfBytes = {
           ...pdfBytesRef.current,
           [imported.source.id]: imported.bytes,
@@ -5825,6 +5889,14 @@ export default function App() {
           nextPdfBytes,
           pendingPdfUndoRef.current,
         );
+        await assertPdfAdditionPreservesPendingUndoRaster(
+          nextProject,
+          nextPdfBytes,
+          pendingPdfUndoRef.current,
+          Date.now(),
+          operation.signal,
+        );
+        if (!isCurrentOperation()) return;
         if (replaceProtectedAutosave) {
           setBusyMessage(`Saving ${file.name} locally…`);
           const contentSize = await saveAutosave(nextProject, nextPdfBytes, {
@@ -10577,7 +10649,8 @@ export default function App() {
   }, [pendingPdfAnnotationClear, project?.activeSceneId, project?.id]);
 
   const duplicatePdfPageAction = useCallback((sceneId: string) => {
-    try {
+    void (async () => {
+      try {
       abortSceneOperations(true);
       cancelFileOpenOperations(true);
       const currentProject = commitLiveScenePersistence(sceneId, true);
@@ -10599,6 +10672,18 @@ export default function App() {
           },
         },
       );
+      await inspectLocalProjectRasterUsage(duplicated.project, {
+        rasterBudget: getBrowserPdfRasterBudget(),
+      });
+      await assertPdfAdditionPreservesPendingUndoRaster(
+        duplicated.project,
+        duplicated.pdfBytes,
+        pendingPdfUndoRef.current,
+      );
+      const latestProject = commitLiveScenePersistence(sceneId, true);
+      if (latestProject !== currentProject) {
+        throw new Error("The PDF page changed while it was being duplicated. Review the page and try again.");
+      }
       beginSceneHydration();
       pendingFrameIdRef.current = null;
       pendingProjectSearchTargetRef.current = null;
@@ -10609,9 +10694,10 @@ export default function App() {
       setProject(duplicated.project);
       setWorkspaceMode("pdf");
       setErrorMessage(null);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-    }
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
   }, [
     abortSceneOperations,
     beginSceneHydration,
@@ -10789,6 +10875,19 @@ export default function App() {
       const sourceProject = projectRef.current;
       if (!sourceProject) return;
       assertProjectCanAcceptPdfPages(sourceProject, 1);
+      const rasterBudget = getBrowserPdfRasterBudget();
+      const sourceRasterUsage = await inspectLocalProjectRasterUsage(sourceProject, {
+        rasterBudget,
+        signal: operation.signal,
+      });
+      if (!isCurrentOperation()) return;
+      const remainingRaster = remainingLocalProjectRasterCapacity(
+        sourceRasterUsage,
+        rasterBudget,
+      );
+      if (remainingRaster.pixels < 1 || remainingRaster.encodedBytes < 1) {
+        throw new Error("This project has no remaining image capacity for another PDF page.");
+      }
       const [{ importPdf }, { createBlankPdfFile }] = await Promise.all([
         import("./lib/pdf/import-pdf"),
         import("./lib/pdf/create-blank-page"),
@@ -10801,16 +10900,21 @@ export default function App() {
         pdfBytesRef.current,
         blankPdf.size,
       );
-      const maxEncodedBytesPerDocument = Math.max(
-        0,
-        Math.floor((MAX_PROJECT_BYTES - sourceSize.totalBytes - blankPdf.size) * 3 / 4),
+      const maxEncodedBytesPerDocument = Math.min(
+        remainingRaster.encodedBytes,
+        Math.max(
+          0,
+          Math.floor((MAX_PROJECT_BYTES - sourceSize.totalBytes - blankPdf.size) * 3 / 4),
+        ),
       );
       const imported = await importPdf(blankPdf, {
         maxEncodedBytesPerDocument,
-        maxPages: remainingProjectSceneCapacity(sourceProject),
+        maxPages: remainingProjectPdfPageCapacity(sourceProject),
+        maxRasterPixelsForImport: remainingRaster.pixels,
         onProgress: (progress) => {
           if (isCurrentOperation()) setBusyMessage(pdfOperationProgressMessage(progress));
         },
+        rasterBudget,
         signal: operation.signal,
       });
       if (!isCurrentOperation()) return;
@@ -10825,6 +10929,15 @@ export default function App() {
       const source = { ...imported.source, name: "Blank page" };
       const current = commitLiveScenePersistence(sourceSceneId);
       if (!current || !isCurrentOperation()) return;
+      assertProjectCanAcceptPdfPages(current, 1);
+      const currentRasterUsage = current === sourceProject
+        ? sourceRasterUsage
+        : await inspectLocalProjectRasterUsage(current, {
+          rasterBudget,
+          signal: operation.signal,
+        });
+      if (!isCurrentOperation()) return;
+      addLocalProjectRasterUsage(currentRasterUsage, imported.rasterUsage, rasterBudget);
       const order = reconcilePdfPageOrder(current);
       const currentIndex = order.indexOf(insertAfterId);
       const insertAt = currentIndex < 0 ? order.length : currentIndex + 1;
@@ -10843,6 +10956,14 @@ export default function App() {
         nextPdfBytes,
         pendingPdfUndoRef.current,
       );
+      await assertPdfAdditionPreservesPendingUndoRaster(
+        nextProject,
+        nextPdfBytes,
+        pendingPdfUndoRef.current,
+        Date.now(),
+        operation.signal,
+      );
+      if (!isCurrentOperation()) return;
       beginSceneHydration();
       pendingFrameIdRef.current = null;
       pendingCreatedFrameIdRef.current = null;
@@ -10881,7 +11002,7 @@ export default function App() {
       setErrorMessage("Select a PDF page before inserting more PDF pages.");
       return;
     }
-    if (remainingProjectSceneCapacity(currentProject) < 1) {
+    if (remainingProjectPdfPageCapacity(currentProject) < 1) {
       setErrorMessage("This project has reached its page and scene limit.");
       return;
     }
@@ -11091,6 +11212,14 @@ export default function App() {
         imported.pdfBytes,
         pendingPdfUndoRef.current,
       );
+      await assertPdfAdditionPreservesPendingUndoRaster(
+        imported.project,
+        imported.pdfBytes,
+        pendingPdfUndoRef.current,
+        Date.now(),
+        operation.signal,
+      );
+      if (!isCurrentOperation()) return;
       beginSceneHydration();
       pendingFrameIdRef.current = null;
       pendingProjectSearchTargetRef.current = null;
@@ -12023,7 +12152,7 @@ export default function App() {
         )}
         <div
           ref={editorHostRef}
-          className={`editor-host ${isScreenshotCaptureActive ? "is-screenshot-capture-active" : ""} ${isSlideFrameDrawingActive ? "is-slide-frame-drawing-active" : ""}`}
+          className={`editor-host ${isNativeZenMode ? "is-native-zen-mode" : ""} ${isScreenshotCaptureActive ? "is-screenshot-capture-active" : ""} ${isSlideFrameDrawingActive ? "is-slide-frame-drawing-active" : ""}`}
           onClickCapture={handleEditorClickCapture}
           onKeyDownCapture={handleEditorKeyDownCapture}
           onPointerDownCapture={handleEditorPointerDownCapture}
@@ -12355,7 +12484,7 @@ export default function App() {
       {pendingPdfInsert ? (
         <PdfInsertDialog
           files={pendingPdfInsert.files}
-          remainingPageCapacity={project ? remainingProjectSceneCapacity(project) : 0}
+          remainingPageCapacity={project ? remainingProjectPdfPageCapacity(project) : 0}
           processing={pdfInsertProcessing}
           cancelling={pdfInsertCancelling}
           progress={pdfInsertProgress}

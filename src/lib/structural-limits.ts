@@ -32,7 +32,8 @@ export const MAX_STRUCTURAL_TOTAL_POINTS = 1_000_000;
 /** Clipboard strings are transient selections, not full project archives. */
 export const MAX_CLIPBOARD_TEXT_BYTES = 8 * MEBIBYTE;
 
-/** A board plus up to 250 imported PDF pages, with migration headroom. */
+/** A board plus up to 500 imported PDF pages, with migration headroom. */
+export const MAX_PDF_PAGES = 500;
 export const MAX_PROJECT_SCENES = 512;
 export const MAX_PROJECT_ELEMENTS_PER_SCENE = 100_000;
 export const MAX_PROJECT_TOTAL_ELEMENTS = 250_000;
@@ -432,9 +433,16 @@ export function assertProjectStructure(
   let totalElements = 0;
   let totalFiles = 0;
   let totalClassroomTimeWidgets = 0;
+  let totalPdfPages = 0;
   for (const sceneId of sceneIds) {
     const scene = scenes[sceneId];
     requirePlainRecord(scene, label, `scenes.${sceneId}`);
+    if (scene.pdfPage !== undefined) {
+      totalPdfPages += 1;
+      if (totalPdfPages > MAX_PDF_PAGES) {
+        throw structuralError(label, "scenes", `contains more than ${MAX_PDF_PAGES} PDF pages`);
+      }
+    }
     const elements = scene.elements;
     requireArray(elements, label, `scenes.${sceneId}.elements`);
     if (elements.length > MAX_PROJECT_ELEMENTS_PER_SCENE) {
@@ -475,8 +483,8 @@ export function assertProjectStructure(
   const pdfPageOrder = project.pdfPageOrder;
   if (pdfPageOrder !== undefined) {
     requireArray(pdfPageOrder, label, "pdfPageOrder");
-    if (pdfPageOrder.length > MAX_PROJECT_SCENES) {
-      throw structuralError(label, "pdfPageOrder", `contains more than ${MAX_PROJECT_SCENES} pages`);
+    if (pdfPageOrder.length > MAX_PDF_PAGES) {
+      throw structuralError(label, "pdfPageOrder", `contains more than ${MAX_PDF_PAGES} PDF pages`);
     }
   }
   requirePlainRecord(project.pdfDocuments, label, "pdfDocuments");
