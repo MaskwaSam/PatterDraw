@@ -5,6 +5,7 @@ import {
   MAX_PDF_RASTER_EDGE,
   MAX_PDF_RASTER_PIXELS_PER_DOCUMENT,
   MAX_PDF_RASTER_PIXELS_PER_PAGE,
+  getPdfEmbeddedImagePixelBudget,
   getPdfJsRasterOptions,
   getPdfImportEncodedByteBudget,
   getPdfImportRasterScale,
@@ -28,7 +29,7 @@ describe("PDF import raster limits", () => {
   });
   it("bounds PDF.js embedded images and worker canvases to the raster budget", () => {
     expect(getPdfJsRasterOptions(DEFAULT_PDF_RASTER_BUDGET)).toEqual({
-      maxImageSize: MAX_PDF_RASTER_PIXELS_PER_PAGE,
+      maxImageSize: MAX_PDF_RASTER_PIXELS_PER_DOCUMENT,
       canvasMaxAreaInBytes: MAX_PDF_RASTER_PIXELS_PER_PAGE * 4,
     });
     expect(getPdfJsRasterOptions({
@@ -39,6 +40,13 @@ describe("PDF import raster limits", () => {
       maxImageSize: 1_000_000,
       canvasMaxAreaInBytes: 4_000_000,
     });
+    expect(getPdfEmbeddedImagePixelBudget(DEFAULT_PDF_RASTER_BUDGET))
+      .toBe(256_000_000);
+    expect(getPdfEmbeddedImagePixelBudget({
+      maxEdge: 4_096,
+      maxPixelsPerPage: 4_000_000,
+      maxPixelsPerDocument: 16_000_000,
+    })).toBe(128_000_000);
   });
 
   it("keeps the preferred high-resolution scale for an ordinary worksheet", () => {
@@ -93,7 +101,7 @@ describe("PDF import raster limits", () => {
   });
 
   it("caps every edge, page bitmap, and aggregate document bitmap", () => {
-    const pages = Array.from({ length: 250 }, () => ({ width: 612, height: 792 }));
+    const pages = Array.from({ length: 287 }, () => ({ width: 612, height: 792 }));
     const scale = getPdfImportRasterScale(pages, 2);
     const width = Math.ceil(612 * scale);
     const height = Math.ceil(792 * scale);
@@ -101,7 +109,7 @@ describe("PDF import raster limits", () => {
     expect(height).toBeLessThanOrEqual(MAX_PDF_RASTER_EDGE);
     expect(width * height).toBeLessThanOrEqual(MAX_PDF_RASTER_PIXELS_PER_PAGE);
     expect(width * height * pages.length).toBeLessThanOrEqual(
-      MAX_PDF_RASTER_PIXELS_PER_DOCUMENT + pages.length * (width + height + 1),
+      MAX_PDF_RASTER_PIXELS_PER_DOCUMENT,
     );
     expect(scale).toBeLessThan(1);
   });

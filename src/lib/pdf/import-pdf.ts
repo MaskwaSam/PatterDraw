@@ -20,6 +20,7 @@ import { sha256Hex } from "../sha256";
 import {
   getBrowserPdfRasterBudget,
   encodedDataUrlByteLength,
+  getPdfEmbeddedImagePixelBudget,
   getPdfImportEncodedByteBudget,
   getPdfJsRasterOptions,
   getPdfImportRasterScale,
@@ -29,8 +30,9 @@ import {
   type PdfRasterBudget,
   type PdfPageRasterSize,
 } from "./raster-limits";
+import { withPdfWorkerCacheRevision } from "./worker-url";
 
-GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+GlobalWorkerOptions.workerSrc = withPdfWorkerCacheRevision(pdfWorkerUrl);
 
 // PDF.js 6.2.108 still consumes these legacy hardening flags at runtime, but
 // its public DocumentInitParameters type no longer declares them. Keep the
@@ -67,6 +69,8 @@ export interface ImportPdfOptions {
   rasterBudget?: Readonly<PdfRasterBudget>;
   /** Remaining project-content budget available for generated page PNGs. */
   maxEncodedBytesPerDocument?: number;
+  /** Remaining scene capacity in the destination project. */
+  maxPages?: number;
 }
 
 interface PdfImportRasterState {
@@ -263,7 +267,7 @@ async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promis
   await assertPdfEmbeddedImageLimit(parseBytes, rasterOptions.maxImageSize, {
     immutableSha256: sourceSha256,
     maxEdge: rasterBudget.maxEdge,
-    maxTotalPixels: rasterBudget.maxPixelsPerDocument,
+    maxTotalPixels: getPdfEmbeddedImagePixelBudget(rasterBudget),
     maxTotalEncodedBytes: encodedBudget.maxBytesPerDocument,
     signal: options.signal,
   });
@@ -292,8 +296,9 @@ async function parsePdfPages(file: File, options: ImportPdfOptions = {}): Promis
   try {
     const document = await awaitWithAbort(loadingTask.promise, options.signal);
     throwIfAborted(options.signal);
-    if (document.numPages > MAX_PDF_PAGES) {
-      throw new Error(`The PDF has more than ${MAX_PDF_PAGES} pages.`);
+    const maxPages = options.maxPages ?? MAX_PDF_PAGES;
+    if (document.numPages > maxPages) {
+      throw new Error(`The PDF has more than the ${maxPages}-page capacity remaining in this project.`);
     }
     const documentId = createLocalId();
     const pageSizes: PdfPageRasterSize[] = [];
@@ -354,6 +359,14 @@ export async function importPdf(file: File, options: ImportPdfOptions = {}): Pro
       || options.maxEncodedBytesPerDocument < 0)
   ) {
     throw new Error("The PDF encoded-image byte limit is invalid.");
+  }
+  if (
+    options.maxPages !== undefined
+    && (!Number.isSafeInteger(options.maxPages)
+      || options.maxPages <= 0
+      || options.maxPages > MAX_PDF_PAGES)
+  ) {
+    throw new Error("The PDF page limit is invalid.");
   }
 
   const parsed = await parsePdfPages(file, options);

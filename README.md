@@ -18,6 +18,8 @@ This repository is intentionally independent from PolyPad. Nothing here patches 
 - One-click **Export all** downloads every object on the current board as a shareable PNG, including off-screen and off-page content. Editable Excalidraw scene data is embedded when the receiving image workflow preserves PNG metadata.
 - A device-wide, locally persisted Excalidraw library supports adding and reusing canvas objects plus importing and exporting standard `.excalidrawlib` files without enabling public-library browsing or publishing.
 - A separate device-wide **Screenshot Library** captures exact canvas regions, copies PNGs when browser clipboard access permits, and keeps the newest 50 captures available for click or drag insertion without adding them to project files.
+- **Canvas capture for OBS** adds a clean crop target to the current live canvas without a popup or synchronized renderer. Board and Slides can use either a 16:9 guide or all visible canvas, PDF uses the full canvas viewport, and fullscreen removes the surrounding PatterDraw chrome.
+- An optional, device-local **Settings → Display → Bottom interface** moves project, workspace, file, zoom, history, and fullscreen controls to a responsive bottom dock. The native drawing palette sits just above it, and toggling the preference never replaces the live canvas.
 - Tagged, detached slide windows with explicit ordering, one-shot freeform/16:9/4:3 drawing, native grouping, optional Morph transitions, fullscreen presentation, keyboard navigation, transient laser, and persistent live ink. Ordinary Excalidraw frames remain available for content ownership.
 - One-workspace-per-page PDF import using a bundled PDF.js worker.
 - Toggleable **PDF** mode with real local page thumbnails, drag reordering, accessible move-up/down controls, mixed-document ordering, and Previous/Next navigation that follows the chosen output order.
@@ -29,6 +31,15 @@ This repository is intentionally independent from PolyPad. Nothing here patches 
 - Source tests for import safety, project round trips, LaTeX validation, full-board export sizing, slide ordering, PDF page ordering, reordered PDF export, PowerPoint deck structure, and expanded PDF bounds.
 
 The Moodle activity is designed but not yet implemented. See [the Moodle boundary](moodle/mod_patterdraw/README.md) and [roadmap](docs/ROADMAP.md).
+
+## Record a lesson with OBS
+
+1. Open PatterDraw **Settings → Recording** and turn on **OBS capture area**. A light gray capture guide appears without a popup or second renderer. On Board and Slides, the drawing toolbar stays visible above the guide for teaching but remains outside the OBS crop.
+2. Choose the final layout before cropping in OBS. Board and Slides show a 16:9 capture area below the drawing toolbar by default. Turn on **Record all visible canvas** to fill the guide with the entire clean canvas region instead. PDF always uses the complete canvas viewport and hides overlay tools. Use the bottom-right fullscreen control first if you want to maximize the clean capture and hide all surrounding PatterDraw chrome.
+3. In OBS Studio on macOS 13 or newer, add **macOS Screen Capture**, choose **Window**, and select the browser window containing PatterDraw. Crop the source to the inside edge of the guide. Grant OBS **Screen Recording** permission if macOS asks.
+4. Use **Settings → Recording → Show cursor in OBS** to include or hide the pointer over the canvas. Turn off **OBS capture area** when ordinary Excalidraw controls should return.
+
+OBS **Browser Source** embeds an independent page rather than the active lesson. Use Window capture for the live PatterDraw canvas. See OBS's official [macOS Screen Capture](https://obsproject.com/kb/macos-screen-capture-source) and [macOS permissions](https://obsproject.com/kb/macos-permissions-guide) guides.
 
 ## Run locally
 

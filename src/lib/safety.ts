@@ -16,6 +16,7 @@ import { canonicalizePdfBackground } from "./pdf/background";
 import { reconcilePdfPageOrder } from "./pdf/page-order";
 import {
   getBrowserPdfRasterBudget,
+  getPdfEmbeddedImagePixelBudget,
   getPdfImportEncodedByteBudget,
   getPdfJsRasterOptions,
   MAX_PDF_PAGE_EDGE_POINTS,
@@ -41,7 +42,7 @@ import {
 
 export const MAX_PROJECT_BYTES = 150 * 1024 * 1024;
 export const MAX_PDF_BYTES = 75 * 1024 * 1024;
-export const MAX_PDF_PAGES = 250;
+export const MAX_PDF_PAGES = 500;
 
 const embeddedImageDataUrl = /^data:image\/(?:png|jpe?g|gif|webp|svg\+xml);base64,([a-z\d+/]*={0,2})$/i;
 const MAX_EMBEDDED_IMAGE_SOURCE_LENGTH = Math.ceil(MAX_PROJECT_BYTES * 4 / 3) + 128;
@@ -272,6 +273,7 @@ export function sanitizeProject(project: ClassroomProject): ClassroomProject {
     safe.slideWidescreenFrames,
   );
   delete safe.slideWidescreenFrames;
+  safe.slideQuickDrawEnabled = safe.slideQuickDrawEnabled === true;
   safe.slideMorphEnabled = safe.slideMorphEnabled === true;
   safe.slideMorphDurationMs = normalizeSlideMorphDurationMs(safe.slideMorphDurationMs);
   return safe;
@@ -315,6 +317,9 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
   }
   if (project.slideWidescreenFrames !== undefined && typeof project.slideWidescreenFrames !== "boolean") {
     throw new Error("Slide widescreen frame preference must be a boolean.");
+  }
+  if (project.slideQuickDrawEnabled !== undefined && typeof project.slideQuickDrawEnabled !== "boolean") {
+    throw new Error("Slide Quick draw preference must be a boolean.");
   }
   if (project.slideMorphEnabled !== undefined && typeof project.slideMorphEnabled !== "boolean") {
     throw new Error("Slide Morph preference must be a boolean.");
@@ -642,7 +647,7 @@ export async function assertLoadedProjectRasterSafety(
     await assertPdfEmbeddedImageLimit(bytes, rasterOptions.maxImageSize, {
       immutableSha256: source.sha256,
       maxEdge: rasterBudget.maxEdge,
-      maxTotalPixels: rasterBudget.maxPixelsPerDocument,
+      maxTotalPixels: getPdfEmbeddedImagePixelBudget(rasterBudget),
       maxTotalEncodedBytes: encodedRasterBudget.maxBytesPerDocument,
       signal: options.signal,
     });

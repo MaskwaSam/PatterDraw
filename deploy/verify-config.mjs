@@ -136,6 +136,11 @@ requireMatch(dockerfile, /"dirty"/, "The image build must reject dirty release p
 requireMatch(nginx, /listen 8080 default_server;/, "NGINX must have a rejecting default server.");
 requireMatch(nginx, /server_name draw\.spatterson\.ca;/, "NGINX must recognize only the draw hostname.");
 requireMatch(nginx, /return 444;/, "NGINX must reject unknown Host headers.");
+requireMatch(
+  nginx,
+  /types\s*\{\s*application\/javascript\s+mjs;\s*\}/,
+  "NGINX must serve bundled .mjs workers with a JavaScript MIME type.",
+);
 for (const [routeName, routePattern] of [
   ["root", /location = \/ \{[^}]*add_header Cache-Control "no-store, no-transform" always;[^}]*\}/],
   ["direct index", /location = \/index\.html \{[^}]*add_header Cache-Control "no-store, no-transform" always;[^}]*\}/],

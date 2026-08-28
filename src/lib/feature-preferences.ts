@@ -15,6 +15,10 @@ export const FEATURE_PREFERENCE_KEYS = [
   "sizePosition",
   "projectFind",
   "iconOnlyControls",
+  "bottomInterface",
+  "obsCaptureArea",
+  "obsRecordVisibleCanvas",
+  "obsShowCursor",
 ] as const;
 
 export type FeaturePreferenceKey = typeof FEATURE_PREFERENCE_KEYS[number];
@@ -34,6 +38,10 @@ export const DEFAULT_FEATURE_PREFERENCES: Readonly<FeaturePreferences> = Object.
   sizePosition: true,
   projectFind: true,
   iconOnlyControls: false,
+  bottomInterface: false,
+  obsCaptureArea: false,
+  obsRecordVisibleCanvas: false,
+  obsShowCursor: true,
 });
 
 type PreferenceStorage = Pick<Storage, "getItem" | "setItem">

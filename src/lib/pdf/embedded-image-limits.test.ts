@@ -740,6 +740,53 @@ describe("PDF embedded-image limits", () => {
     )).rejects.toThrow(/could not be checked/i);
   });
 
+  it("accepts bounded CCITT images using the dimensions consumed by PDF.js", async () => {
+    const safe = await PDFDocument.create();
+    const safePage = safe.addPage([100, 100]);
+    const safeImage = registerFilteredImage(
+      safe,
+      1_000,
+      1_000,
+      new Uint8Array([0]),
+      PDFName.of("CCITTFaxDecode"),
+    );
+    paintImage(safe, safePage, safeImage);
+    await expect(assertPdfEmbeddedImageLimit(
+      await safe.save({ useObjectStreams: false }),
+      IMAGE_LIMIT,
+    )).resolves.toBeUndefined();
+
+    const oversized = await PDFDocument.create();
+    const oversizedPage = oversized.addPage([100, 100]);
+    const oversizedImage = registerFilteredImage(
+      oversized,
+      5_000,
+      4_000,
+      new Uint8Array([0]),
+      PDFName.of("CCITTFaxDecode"),
+    );
+    paintImage(oversized, oversizedPage, oversizedImage);
+    await expect(assertPdfEmbeddedImageLimit(
+      await oversized.save({ useObjectStreams: false }),
+      IMAGE_LIMIT,
+    )).rejects.toThrow(/too large to import safely/i);
+  });
+
+  it("defers permission-encrypted content streams to bounded PDF.js import", async () => {
+    const loadSpy = vi.spyOn(PDFDocument, "load").mockResolvedValue({
+      getPageCount: () => 1,
+      isEncrypted: true,
+    } as PDFDocument);
+    try {
+      await expect(assertPdfEmbeddedImageLimit(
+        new TextEncoder().encode("permission-encrypted PDF"),
+        IMAGE_LIMIT,
+      )).resolves.toBeUndefined();
+    } finally {
+      loadSpy.mockRestore();
+    }
+  });
+
   it("finds inline JPEG EOI after marker metadata containing FF D9", async () => {
     const document = await PDFDocument.create();
     const page = document.addPage([100, 100]);
@@ -922,6 +969,23 @@ describe("PDF embedded-image limits", () => {
       .rejects.toThrow(/too large to import safely/i);
   });
 
+  it("accepts marked-content dictionaries without losing image-limit enforcement", async () => {
+    const safe = await PDFDocument.create();
+    const safePage = safe.addPage([100, 100]);
+    addContent(safe, safePage, "/Span <</MCID 0/Lang (en-CA)>> BDC EMC");
+    await expect(assertPdfEmbeddedImageLimit(
+      await safe.save({ useObjectStreams: false }),
+      IMAGE_LIMIT,
+    )).resolves.toBeUndefined();
+
+    const oversized = await saveDocumentWithOversizedImage((document, page, imageRef) => {
+      page.node.setXObject(PDFName.of("Im1"), imageRef);
+      addContent(document, page, "/Span <</MCID 0/Lang (en-CA)>> BDC /Im1 Do EMC");
+    });
+    await expect(assertPdfEmbeddedImageLimit(oversized, IMAGE_LIMIT))
+      .rejects.toThrow(/too large to import safely/i);
+  });
+
   it("checks an operator token split across page content streams", async () => {
     const bytes = await saveDocumentWithOversizedImage((document, page, imageRef) => {
       page.node.setXObject(PDFName.of("Im1"), imageRef);
@@ -1045,6 +1109,31 @@ describe("PDF embedded-image limits", () => {
       page.node.set(PDFName.of("Contents"), contentRef);
     });
     await expect(assertPdfEmbeddedImageLimit(bytes, IMAGE_LIMIT))
+      .rejects.toThrow(/too large to import safely/i);
+  });
+
+  it("accepts legacy Flate streams without a checksum while retaining image enforcement", async () => {
+    const safe = await PDFDocument.create();
+    const safePage = safe.addPage([100, 100]);
+    const safeEncoded = zlibSync(new TextEncoder().encode("0 0 m"));
+    safePage.node.addContentStream(safe.context.register(safe.context.stream(
+      safeEncoded.slice(0, -4),
+      { Filter: PDFName.of("FlateDecode") },
+    )));
+    await expect(assertPdfEmbeddedImageLimit(
+      await safe.save({ useObjectStreams: false }),
+      IMAGE_LIMIT,
+    )).resolves.toBeUndefined();
+
+    const oversized = await saveDocumentWithOversizedImage((document, page, imageRef) => {
+      page.node.setXObject(PDFName.of("Im1"), imageRef);
+      const encoded = zlibSync(new TextEncoder().encode("/Im1 Do"));
+      page.node.addContentStream(document.context.register(document.context.stream(
+        encoded.slice(0, -4),
+        { Filter: PDFName.of("FlateDecode") },
+      )));
+    });
+    await expect(assertPdfEmbeddedImageLimit(oversized, IMAGE_LIMIT))
       .rejects.toThrow(/too large to import safely/i);
   });
 

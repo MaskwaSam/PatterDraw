@@ -4,8 +4,12 @@ export const MAX_PDF_RASTER_PIXELS_PER_DOCUMENT = 64_000_000;
 export const MAX_PDF_PAGE_EDGE_POINTS = 14_400;
 /** Encoded page PNG output is charged before it is retained in a scene. */
 export const MAX_PDF_ENCODED_PNG_BYTES_PER_PAGE = 64 * 1024 * 1024;
-/** Keep source PDF bytes plus generated page rasters inside MAX_PROJECT_BYTES. */
-export const MAX_PDF_ENCODED_PNG_BYTES_PER_DOCUMENT = 75 * 1024 * 1024;
+/**
+ * Large, text-heavy PDFs can produce more PNG data than their compact source
+ * bytes suggest. Callers still clamp this ceiling to the destination
+ * project's remaining 150 MiB content budget before rasterization.
+ */
+export const MAX_PDF_ENCODED_PNG_BYTES_PER_DOCUMENT = 110 * 1024 * 1024;
 
 export interface PdfRasterBudget {
   maxEdge: number;
@@ -78,10 +82,17 @@ export function getPdfJsRasterOptions(
   rasterBudget: Readonly<PdfRasterBudget> = DEFAULT_PDF_RASTER_BUDGET,
 ): PdfJsRasterOptions {
   // PDF.js otherwise leaves maxImageSize and canvasMaxAreaInBytes unlimited.
-  // Keep one source image within the same conservative envelope as a page
-  // raster, and express the canvas bound in the four-bytes-per-pixel unit that
-  // PDF.js converts back to an area internally.
+  // A high-resolution source image can safely be larger than its downscaled
+  // page canvas. Keep that decoder allocation device-sensitive while retaining
+  // the stricter page-canvas bound.
   const maxImageSize = Math.max(
+    1,
+    Math.floor(Math.min(
+      rasterBudget.maxPixelsPerDocument,
+      rasterBudget.maxEdge * rasterBudget.maxEdge,
+    )),
+  );
+  const maxCanvasPixels = Math.max(
     1,
     Math.floor(Math.min(
       rasterBudget.maxPixelsPerPage,
@@ -91,8 +102,21 @@ export function getPdfJsRasterOptions(
   );
   return {
     maxImageSize,
-    canvasMaxAreaInBytes: maxImageSize * 4,
+    canvasMaxAreaInBytes: maxCanvasPixels * 4,
   };
+}
+
+export function getPdfEmbeddedImagePixelBudget(
+  rasterBudget: Readonly<PdfRasterBudget> = DEFAULT_PDF_RASTER_BUDGET,
+): number {
+  // PDF pages and their source images are decoded and cleaned up sequentially,
+  // so cumulative source pixels are a work limit rather than a peak-memory
+  // allocation. Keep enough headroom for ordinary image-based books even on a
+  // low-memory device, while retaining a firm document-wide ceiling.
+  return Math.min(
+    256 * 1024 * 1024,
+    Math.max(128_000_000, rasterBudget.maxPixelsPerDocument * 4),
+  );
 }
 
 const LOW_MEMORY_PDF_RASTER_BUDGET: Readonly<PdfRasterBudget> = Object.freeze({
@@ -239,6 +263,41 @@ export function getPdfImportRasterScale(
     scale,
     Math.sqrt(rasterBudget.maxPixelsPerDocument) / Math.sqrt(totalArea),
   );
+  const fitsRoundedCanvasBudget = (candidate: number): boolean => {
+    let roundedPixels = 0;
+    for (const page of pages) {
+      const width = Math.ceil(page.width * candidate);
+      const height = Math.ceil(page.height * candidate);
+      const pixels = width * height;
+      if (
+        width <= 0
+        || height <= 0
+        || width > rasterBudget.maxEdge
+        || height > rasterBudget.maxEdge
+        || !Number.isSafeInteger(pixels)
+        || pixels > rasterBudget.maxPixelsPerPage
+      ) return false;
+      roundedPixels += pixels;
+      if (
+        !Number.isSafeInteger(roundedPixels)
+        || roundedPixels > rasterBudget.maxPixelsPerDocument
+      ) return false;
+    }
+    return true;
+  };
+  if (!fitsRoundedCanvasBudget(scale)) {
+    // The area formula uses fractional dimensions, while real canvases round
+    // every page edge up. Binary-search the largest scale whose actual canvas
+    // allocations remain inside the same unchanged budget.
+    let lower = 0;
+    let upper = scale;
+    for (let iteration = 0; iteration < 48; iteration += 1) {
+      const candidate = (lower + upper) / 2;
+      if (fitsRoundedCanvasBudget(candidate)) lower = candidate;
+      else upper = candidate;
+    }
+    scale = lower;
+  }
   if (!Number.isFinite(scale) || scale <= 0) {
     throw new Error("The PDF is too large to rasterize safely.");
   }

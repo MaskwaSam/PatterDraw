@@ -26,6 +26,7 @@ import type { ExcalidrawElement, FileId } from "@excalidraw/excalidraw/element/t
 import type { LassoGeometrySnapshot } from "./lib/lasso/stable-element-adapter";
 import { TopBar } from "./components/TopBar";
 import { SlideRail } from "./components/SlideRail";
+import { SlideRotationDialog } from "./components/SlideRotationDialog";
 import { PDF_RAIL_DEFAULT_WIDTH, PdfPageRail } from "./components/PdfPageRail";
 import { PresentationOverlay } from "./components/PresentationOverlay";
 import { StrokeWidthExtensions } from "./components/StrokeWidthExtensions";
@@ -50,28 +51,19 @@ import { MermaidDialog } from "./components/MermaidDialog";
 import { ProjectFindPanel } from "./components/ProjectFindPanel";
 import { useModalDialog } from "./components/useModalDialog";
 import { ScreenshotCaptureOverlay } from "./components/ScreenshotCaptureOverlay";
+import { ObsCaptureGuide } from "./components/ObsCaptureGuide";
+import { WorkspaceStatusControls } from "./components/WorkspaceStatusControls";
 import {
   SCREENSHOT_DRAG_MIME,
   SCREENSHOT_SIDEBAR_TAB,
   ScreenshotLibrary,
 } from "./components/ScreenshotLibrary";
 import {
-  EnterFullscreenIcon,
-  ExitFullscreenIcon,
-  HideBottomBarIcon,
-  InkIcon,
-  MinusIcon,
-  NextIcon,
-  PlusIcon,
-  PresentIcon,
-  PreviousIcon,
-  RedoIcon,
   ScreenshotIcon,
   SearchIcon,
   ShowBottomBarIcon,
   ShowPanelIcon,
   ShowTopBarIcon,
-  UndoIcon,
 } from "./components/Icons";
 import type {
   ClassroomProject,
@@ -151,6 +143,7 @@ import {
   removeSlide,
   syncSlideFrameNames,
 } from "./lib/slides";
+import { rotateSlideContent } from "./lib/slide-content-rotation";
 import {
   DEFAULT_SLIDE_MORPH_DURATION_MS,
   normalizeSlideMorphDurationMs,
@@ -159,6 +152,7 @@ import {
   assertLoadedProjectRasterSafety,
   canonicalizePersistedWrapperTool,
   isPersistedWrapperTool,
+  MAX_PDF_PAGES,
   MAX_PROJECT_BYTES,
   sanitizeProject,
   sanitizeScene,
@@ -187,6 +181,7 @@ import {
 } from "./lib/project-budget";
 import {
   MAX_NATIVE_SCENE_BLOB_BYTES,
+  MAX_PROJECT_SCENES,
   assertImportBlobBytes,
   assertSceneStructure,
   parseBoundedImportJson,
@@ -285,6 +280,13 @@ type SlideFrameAction =
 type PendingSlideFrameAction = {
   action: SlideFrameAction;
   sceneId: string;
+};
+type PendingSlideRotationAction = {
+  degrees: number;
+  frameId: string;
+  sceneId: string;
+  slideId: string;
+  title: string;
 };
 type SlideFrameGesture = {
   current: SlideFramePoint;
@@ -970,6 +972,7 @@ export default function App() {
   const [strokeWidth, setStrokeWidth] = useState(2);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("saving");
   const [activeSlideId, setActiveSlideId] = useState<string | null>(null);
+  const [slideRotationTargetId, setSlideRotationTargetId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(100);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -1036,8 +1039,14 @@ export default function App() {
   const [isProbabilitySpinning, setIsProbabilitySpinning] = useState(false);
   const [spinnerPointerAnimations, setSpinnerPointerAnimations] = useState<SpinnerPointerAnimation[]>([]);
   const pendingSlideFrameActionRef = useRef<PendingSlideFrameAction | null>(null);
+  const pendingSlideRotationActionRef = useRef<PendingSlideRotationAction | null>(null);
+  const slideRotationReturnFocusRef = useRef<HTMLElement | null>(null);
   const setFeaturePreference = useCallback((key: FeaturePreferenceKey, enabled: boolean) => {
-    if (key === "slides" && !enabled) pendingSlideFrameActionRef.current = null;
+    if (key === "slides" && !enabled) {
+      pendingSlideFrameActionRef.current = null;
+      pendingSlideRotationActionRef.current = null;
+      setSlideRotationTargetId(null);
+    }
     if (featurePreferencesRef.current[key] === enabled) return;
     const next = persistFeaturePreference(featurePreferencesRef.current, key, enabled);
     featurePreferencesRef.current = next;
@@ -1072,7 +1081,11 @@ export default function App() {
     setThemePreferenceState(DEFAULT_THEME_PREFERENCE);
   }, []);
   useEffect(() => subscribeToFeaturePreferences((nextPreferences) => {
-    if (!nextPreferences.slides) pendingSlideFrameActionRef.current = null;
+    if (!nextPreferences.slides) {
+      pendingSlideFrameActionRef.current = null;
+      pendingSlideRotationActionRef.current = null;
+      setSlideRotationTargetId(null);
+    }
     applyingEditorPreferencesRef.current = {
       penOnly: nextPreferences.penOnly,
       showGrid: nextPreferences.showGrid,
@@ -1284,6 +1297,7 @@ export default function App() {
   const pendingCreatedFrameIdRef = useRef<string | null>(null);
   const slideFramesVisibleRef = useRef(true);
   const slideFrameDrawingActiveRef = useRef(false);
+  const slideQuickDrawEnabledRef = useRef(false);
   const slideFrameAspectRatioRef = useRef<SlideFrameAspectRatio>("freeform");
   const slideFrameGestureRef = useRef<SlideFrameGesture | null>(null);
   const slideDetachmentFrameRef = useRef(0);
@@ -1299,6 +1313,7 @@ export default function App() {
   const roughnessBeforeLineRef = useRef<number | null>(null);
   const focusAfterMathToolsRef = useRef<"editor" | "trigger" | null>(null);
   const nativeImageExportOpenRef = useRef(false);
+  const nativeImageExportRequestGenerationRef = useRef(0);
   const libraryOpenRef = useRef(false);
   const nativeCanvasSearchOpenRef = useRef(false);
   const lastLibraryTabRef = useRef<LibrarySidebarTab>(PERSONAL_LIBRARY_SIDEBAR_TAB);
@@ -1922,6 +1937,10 @@ export default function App() {
   }, [project?.slideFrameAspectRatio]);
 
   useEffect(() => {
+    slideQuickDrawEnabledRef.current = project?.slideQuickDrawEnabled === true;
+  }, [project?.slideQuickDrawEnabled]);
+
+  useEffect(() => {
     setMathInteraction(null);
     setIsScreenshotCaptureActive(false);
     setIsProbabilitySpinning(false);
@@ -2201,6 +2220,51 @@ export default function App() {
     addBlankSlideFrame(api, action.title, action.frameId);
   }, [api]);
 
+  const runSlideRotationAction = useCallback((action: PendingSlideRotationAction): boolean => {
+    if (
+      !api
+      || switchingSceneRef.current
+      || activeSceneIdRef.current !== action.sceneId
+      || hydratedSceneIdRef.current !== action.sceneId
+    ) return false;
+
+    const currentProject = projectRef.current;
+    const currentSlide = currentProject?.slideOrder.find((slide) => slide.id === action.slideId);
+    if (
+      !currentSlide
+      || currentSlide.sceneId !== action.sceneId
+      || currentSlide.frameId !== action.frameId
+    ) {
+      api.setToast({ message: "That slide is no longer available." });
+      return true;
+    }
+
+    try {
+      const result = rotateSlideContent(api.getSceneElements(), action.frameId, action.degrees);
+      if (result.status === "no-content") {
+        api.setToast({ message: "This slide has no content to rotate." });
+        return true;
+      }
+      if (result.status === "no-op") {
+        api.setToast({ message: "Choose an angle that changes the slide." });
+        return true;
+      }
+      api.updateScene({
+        elements: result.elements,
+        captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+      });
+      const direction = action.degrees < 0 ? "left" : "right";
+      const amount = Number(Math.abs(action.degrees).toFixed(2));
+      api.setToast({
+        message: `Rotated ${action.title} ${direction} ${amount}°. Undo is available.`,
+      });
+      return true;
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+      return true;
+    }
+  }, [api]);
+
   const focusProjectSearchTarget = useCallback((target: PendingProjectSearchTarget) => {
     if (!api) return;
     pendingProjectSearchTargetRef.current = target;
@@ -2353,6 +2417,13 @@ export default function App() {
             && featurePreferencesRef.current.slides
           ) runSlideFrameAction(pendingAction.action);
         }
+        const pendingRotation = pendingSlideRotationActionRef.current;
+        if (
+          pendingRotation
+          && pendingRotation.sceneId === sceneId
+          && featurePreferencesRef.current.slides
+          && runSlideRotationAction(pendingRotation)
+        ) pendingSlideRotationActionRef.current = null;
         const pendingSearchTarget = pendingProjectSearchTargetRef.current;
         if (pendingSearchTarget?.sceneId === sceneId) {
           focusProjectSearchTarget(pendingSearchTarget);
@@ -2366,6 +2437,7 @@ export default function App() {
     focusProjectSearchTarget,
     queueScenePersistence,
     runSlideFrameAction,
+    runSlideRotationAction,
   ]);
 
   useEffect(() => {
@@ -2832,6 +2904,8 @@ export default function App() {
     pendingFrameIdRef.current = null;
     pendingProjectSearchTargetRef.current = null;
     pendingSlideFrameActionRef.current = null;
+    pendingSlideRotationActionRef.current = null;
+    setSlideRotationTargetId(null);
     autosaveStartupReadyRef.current = false;
     pendingScenePersistenceRef.current = null;
     if (scenePersistenceTimerRef.current !== null) {
@@ -2920,9 +2994,11 @@ export default function App() {
     setProjectHydrationRevision((revision) => revision + 1);
     setProject(startupProject);
     setActiveSlideId(null);
+    setSlideRotationTargetId(null);
     setWorkspaceMode("board");
     pendingCreatedFrameIdRef.current = null;
     pendingSlideFrameActionRef.current = null;
+    pendingSlideRotationActionRef.current = null;
     setEquationEditor(null);
     setMermaidEditor(null);
     setMathToolEdit(null);
@@ -2989,9 +3065,17 @@ export default function App() {
           0,
           Math.floor((MAX_PROJECT_BYTES - preflightSize.totalBytes - file.size) * 3 / 4),
         );
+        const maxPages = Math.min(
+          MAX_PDF_PAGES,
+          MAX_PROJECT_SCENES - Object.keys(preflightProject.scenes).length,
+        );
+        if (maxPages <= 0) {
+          throw new Error("This project has no room for another PDF page.");
+        }
         const { importPdf } = await import("./lib/pdf/import-pdf");
         const imported = await importPdf(file, {
           maxEncodedBytesPerDocument,
+          maxPages,
           signal: operation.signal,
         });
         if (!isCurrentOperation()) return;
@@ -3044,6 +3128,8 @@ export default function App() {
         pendingProjectSearchTargetRef.current = null;
         pendingCreatedFrameIdRef.current = null;
         pendingSlideFrameActionRef.current = null;
+        pendingSlideRotationActionRef.current = null;
+        setSlideRotationTargetId(null);
         autosaveSuspendedRef.current = false;
         autosaveSuspensionGenerationRef.current = null;
         setAutosaveRecoveryKind(null);
@@ -3273,6 +3359,7 @@ export default function App() {
 
   const openNativeImageExport = useCallback(async () => {
     if (!api || !project) return;
+    const requestGeneration = ++nativeImageExportRequestGenerationRef.current;
     setExportOpen(false);
     setBusyMessage("Preparing image export…");
     let suspendedDarkPdf = false;
@@ -3290,6 +3377,7 @@ export default function App() {
     };
     try {
       await waitForSceneHydrationToSettle(() => switchingSceneRef.current);
+      if (requestGeneration !== nativeImageExportRequestGenerationRef.current) return;
       if (api.getSceneElements().length === 0) return;
       const scene = currentSceneRef.current;
       if (scene?.pdfPage && editorThemeRef.current === "dark") {
@@ -3316,6 +3404,13 @@ export default function App() {
           });
         }
         await afterNextPaint();
+      }
+      if (requestGeneration !== nativeImageExportRequestGenerationRef.current) {
+        if (suspendedDarkPdf && suspendDarkPdfDisplayRef.current) {
+          suspendDarkPdfDisplayRef.current = false;
+          setDarkPdfDisplayRevision((revision) => revision + 1);
+        }
+        return;
       }
       showDialog();
     } catch (error) {
@@ -4021,6 +4116,10 @@ export default function App() {
       isSceneChange
       && pendingSlideFrameActionRef.current?.sceneId !== sceneId
     ) pendingSlideFrameActionRef.current = null;
+    if (
+      isSceneChange
+      && pendingSlideRotationActionRef.current?.sceneId !== sceneId
+    ) pendingSlideRotationActionRef.current = null;
     if (frameId) pendingFrameIdRef.current = frameId;
     else if (isSceneChange) pendingFrameIdRef.current = null;
     if (isSceneChange) pendingCreatedFrameIdRef.current = null;
@@ -4042,6 +4141,70 @@ export default function App() {
     setActiveSlideId(slide.id);
     openScene(slide.sceneId, slide.frameId);
   }, [openScene]);
+
+  const openSlideRotationDialog = useCallback((
+    slide: ClassroomSlide,
+    returnFocusTarget: HTMLButtonElement | null,
+  ) => {
+    pendingSlideRotationActionRef.current = null;
+    slideRotationReturnFocusRef.current = returnFocusTarget;
+    setSlideRotationTargetId(slide.id);
+    openSlide(slide);
+  }, [openSlide]);
+
+  const cancelSlideRotation = useCallback(() => {
+    pendingSlideRotationActionRef.current = null;
+    setSlideRotationTargetId(null);
+  }, []);
+
+  const applySlideRotation = useCallback((degrees: number) => {
+    const currentProject = commitPendingScenePersistence() || projectRef.current;
+    const slide = currentProject?.slideOrder.find(
+      (candidate) => candidate.id === slideRotationTargetId,
+    );
+    setSlideRotationTargetId(null);
+    if (!slide) {
+      api?.setToast({ message: "That slide is no longer available." });
+      return;
+    }
+
+    const action: PendingSlideRotationAction = {
+      degrees,
+      frameId: slide.frameId,
+      sceneId: slide.sceneId,
+      slideId: slide.id,
+      title: slide.title,
+    };
+    pendingSlideRotationActionRef.current = action;
+    setActiveSlideId(slide.id);
+
+    if (currentProject?.activeSceneId !== slide.sceneId) {
+      openScene(slide.sceneId, slide.frameId);
+      return;
+    }
+    if (runSlideRotationAction(action)) {
+      pendingSlideRotationActionRef.current = null;
+      return;
+    }
+
+    // A very fast submit can land during the two-paint scene hydration fence.
+    // Keep the action pending and retry briefly even if the normal hydration
+    // callback has just completed between the readiness check and this turn.
+    const retryWhenStable = (remainingFrames: number) => {
+      if (pendingSlideRotationActionRef.current !== action) return;
+      if (runSlideRotationAction(action)) {
+        pendingSlideRotationActionRef.current = null;
+        return;
+      }
+      if (remainingFrames > 0) {
+        window.requestAnimationFrame(() => retryWhenStable(remainingFrames - 1));
+        return;
+      }
+      pendingSlideRotationActionRef.current = null;
+      api?.setToast({ message: "The slide was still loading. Try Rotate slide again." });
+    };
+    window.requestAnimationFrame(() => retryWhenStable(4));
+  }, [api, commitPendingScenePersistence, openScene, runSlideRotationAction, slideRotationTargetId]);
 
   const hideSlideRail = useCallback(() => {
     setIsSlideRailVisible(false);
@@ -4287,6 +4450,61 @@ export default function App() {
     document.addEventListener("fullscreenchange", stopWhenPresentationFullscreenEnds);
     return () => document.removeEventListener("fullscreenchange", stopWhenPresentationFullscreenEnds);
   }, [presentation, stopPresentation]);
+
+
+  useEffect(() => {
+    if (!featurePreferences.obsCaptureArea || !api || presentation) return;
+    nativeImageExportRequestGenerationRef.current += 1;
+    nativeImageExportOpenRef.current = false;
+    pendingProjectSearchTargetRef.current = null;
+    resetTransientPointerTools();
+    if (slideFrameDrawingActiveRef.current) stopSlideFrameDrawing();
+    setExportOpen(false);
+    setEquationEditor(null);
+    setMermaidEditor(null);
+    setIsMathToolsOpen(false);
+    setMathToolEdit(null);
+    setMathInteraction(null);
+    setIsScreenshotCaptureActive(false);
+    setIsProjectFindOpen(false);
+    setIsSizePositionOpen(false);
+    setIsLibraryOpen(false);
+    libraryOpenRef.current = false;
+    const appState = api.getAppState();
+    api.updateScene({
+      appState: {
+        editingFrame: null,
+        editingGroupId: null,
+        openDialog: null,
+        openSidebar: null,
+        selectedElementIds: {},
+        selectedGroupIds: {},
+        stats: { ...appState.stats, open: false },
+      },
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
+    const refreshFrame = window.requestAnimationFrame(() => {
+      api.refresh();
+      editorHostRef.current?.querySelector<HTMLElement>(".excalidraw")?.focus();
+    });
+    return () => window.cancelAnimationFrame(refreshFrame);
+  }, [api, featurePreferences.obsCaptureArea, presentation, resetTransientPointerTools, stopSlideFrameDrawing]);
+
+  useEffect(() => {
+    if (!featurePreferences.obsCaptureArea || !api) return;
+    let focusFrame = 0;
+    const refreshFrame = window.requestAnimationFrame(() => {
+      api.refresh();
+      if (workspaceMode !== "slides" || !activeSlideId) return;
+      const slide = project?.slideOrder.find((candidate) => candidate.id === activeSlideId);
+      if (!project || !slide || slide.sceneId !== project.activeSceneId) return;
+      focusFrame = window.requestAnimationFrame(() => focusSlide(api, slide.frameId, false));
+    });
+    return () => {
+      window.cancelAnimationFrame(refreshFrame);
+      window.cancelAnimationFrame(focusFrame);
+    };
+  }, [activeSlideId, api, featurePreferences.obsCaptureArea, isFullscreen, project?.activeSceneId, project?.slideOrder, workspaceMode]);
 
   const toggleFullscreen = useCallback(async () => {
     const shell = shellRef.current;
@@ -5198,7 +5416,11 @@ export default function App() {
 
   const changeWorkspaceMode = useCallback((mode: WorkspaceMode) => {
     pendingProjectSearchTargetRef.current = null;
-    if (mode !== "slides") pendingSlideFrameActionRef.current = null;
+    if (mode !== "slides") {
+      pendingSlideFrameActionRef.current = null;
+      pendingSlideRotationActionRef.current = null;
+      setSlideRotationTargetId(null);
+    }
     if (mode === "slides") {
       setIsSlideRailVisible(true);
       setActiveSlideId((current) => {
@@ -5375,6 +5597,21 @@ export default function App() {
     beginSlideFrameAction({ kind: "draw" });
   }, [api, beginSlideFrameAction, project]);
 
+  const toggleSlideQuickDraw = useCallback(() => {
+    const current = projectRef.current;
+    if (!current) return;
+    const enabled = current.slideQuickDrawEnabled !== true;
+    const next = {
+      ...current,
+      updatedAt: nowIso(),
+      slideQuickDrawEnabled: enabled,
+    };
+    slideQuickDrawEnabledRef.current = enabled;
+    projectRef.current = next;
+    setProject(next);
+    if (!enabled && slideFrameDrawingActiveRef.current) stopSlideFrameDrawing();
+  }, [stopSlideFrameDrawing]);
+
   const toggleSlideFrames = useCallback(() => {
     if (!api) return;
     const visible = !api.getAppState().frameRendering.enabled;
@@ -5486,7 +5723,10 @@ export default function App() {
         if (sceneHydrationGenerationRef.current !== suppressionGeneration) return;
         switchingSceneRef.current = false;
       }
-      if (deletingActiveSlide && nextSlide) openSlide(nextSlide);
+      if (deletingActiveSlide && nextSlide) {
+        openSlide(nextSlide);
+        return;
+      }
     });
   }, [activeSlideId, api, commitLiveScenePersistence, openSlide, project]);
 
@@ -5687,7 +5927,9 @@ export default function App() {
         setErrorMessage(error instanceof Error ? error.message : String(error));
       }
     } finally {
-      if (isCurrentFileOperation()) setBusyMessage(null);
+      if (isCurrentFileOperation()) {
+        setBusyMessage(null);
+      }
     }
   }, [
     beginFileOpenOperation,
@@ -5983,8 +6225,14 @@ export default function App() {
     } else {
       api.setToast({ message: "Drag farther to create a slide." });
     }
+    if (slideQuickDrawEnabledRef.current) {
+      slideFrameGestureRef.current = null;
+      hideConstrainedFramePreview();
+      activateSlideFrameTool(api, slideFrameAspectRatioRef.current);
+      return;
+    }
     stopSlideFrameDrawing();
-  }, [api, project?.slideOrder.length, slideBoundsForGesture, stopSlideFrameDrawing]);
+  }, [api, hideConstrainedFramePreview, project?.slideOrder.length, slideBoundsForGesture, stopSlideFrameDrawing]);
 
   useEffect(() => {
     const cancelOnEscape = (event: KeyboardEvent) => {
@@ -6066,15 +6314,56 @@ export default function App() {
 
   if (!project || !currentScene) return <div className="loading-screen">Opening PatterDraw…</div>;
 
+  const slideRotationTarget = slideRotationTargetId
+    ? project.slideOrder.find((slide) => slide.id === slideRotationTargetId) || null
+    : null;
+
+  const renderWorkspaceStatusControls = (variant: "footer" | "bottom") => (
+    <WorkspaceStatusControls
+      variant={variant}
+      workspaceMode={workspaceMode}
+      zoom={zoom}
+      pdfPageIndex={pageIndex}
+      pdfPageCount={pdfScenes.length}
+      onOpenPdfPage={(index) => {
+        const scene = pdfScenes[index];
+        if (scene) openScene(scene.id);
+      }}
+      isPdfRailVisible={isPdfRailVisible}
+      onShowPdfRail={() => setIsPdfRailVisible(true)}
+      activeSlideIndex={activeSlideIndex}
+      slideCount={project.slideOrder.length}
+      onOpenSlide={(index) => {
+        const slideId = project.slideOrder[index];
+        if (slideId) openSlide(slideId);
+      }}
+      isSlideRailVisible={isSlideRailVisible}
+      slideRailShowButtonRef={slideRailShowButtonRef}
+      onShowSlideRail={showSlideRail}
+      onHideFooter={() => setFeaturePreference("footer", false)}
+      onEditorControl={clickEditorControl}
+      onPresent={startPresentation}
+      isPdfToolbarVisible={isPdfToolbarVisible}
+      onTogglePdfToolbar={() => setIsPdfToolbarVisible((visible) => !visible)}
+      obsCaptureArea={featurePreferences.obsCaptureArea}
+      isFullscreen={isFullscreen}
+      onToggleFullscreen={() => void toggleFullscreen()}
+    />
+  );
+
   return (
     <div
       ref={shellRef}
-      className={`app-shell ${workspaceModeClassName(workspaceMode)} ${workspaceMode === "slides" && !isSlideRailVisible ? "is-slide-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfRailVisible ? "is-pdf-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfToolbarVisible ? "is-pdf-toolbar-hidden" : ""} ${!isNavigationVisible ? "is-nav-hidden" : ""} ${!isFooterVisible ? "is-footer-hidden" : ""} ${!featurePreferences.projectFind ? "is-project-find-disabled" : ""} ${!featurePreferences.library ? "is-library-disabled" : ""} ${featurePreferences.iconOnlyControls ? "is-icon-only-controls" : ""} ${presentation ? "is-presenting" : ""}`}
+      className={`app-shell ${workspaceModeClassName(workspaceMode)} ${workspaceMode === "slides" && !isSlideRailVisible ? "is-slide-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfRailVisible ? "is-pdf-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfToolbarVisible ? "is-pdf-toolbar-hidden" : ""} ${!isNavigationVisible ? "is-nav-hidden" : ""} ${!isFooterVisible ? "is-footer-hidden" : ""} ${!featurePreferences.projectFind ? "is-project-find-disabled" : ""} ${!featurePreferences.library ? "is-library-disabled" : ""} ${featurePreferences.iconOnlyControls ? "is-icon-only-controls" : ""} ${featurePreferences.bottomInterface ? "is-bottom-interface" : ""} ${featurePreferences.obsCaptureArea ? "is-obs-capture-enabled" : ""} ${featurePreferences.obsCaptureArea && featurePreferences.obsShowCursor ? "is-obs-cursor-visible" : ""} ${presentation ? "is-presenting" : ""}`}
       data-theme={editorTheme}
       style={{ "--pdf-rail-width": `${pdfRailWidth}px` } as CSSProperties}
     >
       {!presentation && isNavigationVisible && (
         <TopBar
+          placement={featurePreferences.bottomInterface ? "bottom" : "top"}
+          statusControls={featurePreferences.bottomInterface && isFooterVisible
+            ? renderWorkspaceStatusControls("bottom")
+            : undefined}
           title={project.title}
           status={saveStatus}
           featurePreferences={featurePreferences}
@@ -6107,6 +6396,9 @@ export default function App() {
           projectFindOpen={isProjectFindOpen}
           projectFindButtonRef={projectFindTriggerRef}
           onProjectFindToggle={toggleProjectFind}
+          onHideStatusControls={featurePreferences.bottomInterface && isFooterVisible
+            ? () => setFeaturePreference("footer", false)
+            : undefined}
           onHide={() => setIsNavigationVisible(false)}
         />
       )}
@@ -6154,8 +6446,11 @@ export default function App() {
           onAddSlide={addSlide}
           frameDrawingActive={isSlideFrameDrawingActive}
           onToggleFrameDrawing={toggleSlideFrameDrawing}
+          quickDrawEnabled={project.slideQuickDrawEnabled === true}
+          onToggleQuickDraw={toggleSlideQuickDraw}
           onOpenSlide={openSlideFromRail}
           onMoveSlide={reorderSlides}
+          onRotateSlide={openSlideRotationDialog}
           onDeleteSlide={deleteSlide}
           onHide={hideSlideRail}
           framesVisible={areSlideFramesVisible}
@@ -6201,7 +6496,7 @@ export default function App() {
             aria-label="Show navigation"
             title="Show navigation (Ctrl/⌘ + Shift + H)"
           >
-            <ShowTopBarIcon />
+            {featurePreferences.bottomInterface ? <ShowBottomBarIcon /> : <ShowTopBarIcon />}
           </button>
         )}
         {!presentation && !isFooterVisible && (
@@ -6256,7 +6551,16 @@ export default function App() {
           >
             {featurePreferences.library || featurePreferences.projectFind ? defaultSidebar : null}
           </Excalidraw>
-          {isSlideFrameDrawingActive && workspaceMode === "slides" && (
+          {featurePreferences.obsCaptureArea && !presentation ? (
+            <ObsCaptureGuide
+              layout={workspaceMode === "pdf"
+                ? "viewport"
+                : featurePreferences.obsRecordVisibleCanvas
+                  ? "visible"
+                  : "widescreen"}
+            />
+          ) : null}
+          {!featurePreferences.obsCaptureArea && isSlideFrameDrawingActive && workspaceMode === "slides" && (
             <div
               className="slide-frame-draw-overlay"
               data-testid="slide-frame-draw-overlay"
@@ -6274,16 +6578,16 @@ export default function App() {
             aria-hidden="true"
             hidden
           />
-          {isScreenshotCaptureActive && (
+          {!featurePreferences.obsCaptureArea && isScreenshotCaptureActive && (
             <ScreenshotCaptureOverlay
               onCancel={cancelScreenshotCapture}
               onCapture={finishScreenshotCapture}
             />
           )}
-          {spinnerPointerAnimations.length > 0 && (
+          {!featurePreferences.obsCaptureArea && spinnerPointerAnimations.length > 0 && (
             <SpinnerPointerOverlay durationMs={SPINNER_ANIMATION_DURATION_MS} spinners={spinnerPointerAnimations} />
           )}
-          {api && (
+          {api && !featurePreferences.obsCaptureArea && (
             <>
               <StrokeWidthExtensions
                 api={api}
@@ -6314,7 +6618,7 @@ export default function App() {
               ) : null}
             </>
           )}
-          {api && isLassoActive && lassoGeometryFactory && lassoInitialSelection && editorHostRef.current ? (
+          {api && !featurePreferences.obsCaptureArea && isLassoActive && lassoGeometryFactory && lassoInitialSelection && editorHostRef.current ? (
             <LassoOverlay
               api={api}
               createGeometrySnapshot={lassoGeometryFactory}
@@ -6323,7 +6627,7 @@ export default function App() {
               onExit={finishLasso}
             />
           ) : null}
-          {api && isBucketFillActive && editorHostRef.current ? (
+          {api && !featurePreferences.obsCaptureArea && isBucketFillActive && editorHostRef.current ? (
             <BucketFillOverlay
               api={api}
               editorHost={editorHostRef.current}
@@ -6331,7 +6635,7 @@ export default function App() {
               onFill={fillBucketRegion}
             />
           ) : null}
-          {mathInteraction && (
+          {!featurePreferences.obsCaptureArea && mathInteraction && (
             <MathInteractionOverlay
               kind={mathInteraction.kind}
               points={mathInteraction.points}
@@ -6348,127 +6652,9 @@ export default function App() {
             />
           )}
         </div>
-        {!presentation && isFooterVisible && (
-          <footer className="statusbar">
-            <div className="page-status">
-              <button
-                className="footer-hide"
-                type="button"
-                aria-label="Hide footer"
-                title="Hide footer (Ctrl/⌘ + Shift + F)"
-                onClick={() => setFeaturePreference("footer", false)}
-              >
-                <HideBottomBarIcon />
-              </button>
-              {workspaceMode === "pdf" && !isPdfRailVisible && (
-                <button
-                  className="pdf-rail-show"
-                  type="button"
-                  onClick={() => setIsPdfRailVisible(true)}
-                  aria-label="Show PDF pages"
-                  title="Show PDF pages"
-                >
-                  <ShowPanelIcon />
-                  <span className="icon-label">Pages</span>
-                </button>
-              )}
-              {workspaceMode === "slides" && !isSlideRailVisible && (
-                <button
-                  ref={slideRailShowButtonRef}
-                  className="slide-rail-show"
-                  type="button"
-                  onClick={showSlideRail}
-                  aria-label="Show slide navigator"
-                  aria-controls="slide-rail"
-                  aria-expanded="false"
-                  title="Show slide navigator"
-                >
-                  <ShowPanelIcon />
-                  <span className="icon-label">Slides</span>
-                </button>
-              )}
-              {pageIndex >= 0 ? (
-                <>
-                  <button type="button" disabled={pageIndex === 0} onClick={() => openScene(pdfScenes[pageIndex - 1].id)} aria-label="Previous PDF page"><PreviousIcon /></button>
-                  <span>Page {pageIndex + 1} of {pdfScenes.length}</span>
-                  <button type="button" disabled={pageIndex >= pdfScenes.length - 1} onClick={() => openScene(pdfScenes[pageIndex + 1].id)} aria-label="Next PDF page"><NextIcon /></button>
-                </>
-              ) : workspaceMode === "slides" ? (
-                <>
-                  <button
-                    type="button"
-                    disabled={activeSlideIndex <= 0}
-                    onClick={() => openSlide(project.slideOrder[activeSlideIndex - 1])}
-                    aria-label="Previous slide"
-                  >
-                    <PreviousIcon />
-                  </button>
-                  <span data-testid="slide-page-indicator" aria-live="polite">
-                    {activeSlideIndex >= 0
-                      ? `Slide ${activeSlideIndex + 1} of ${project.slideOrder.length}`
-                      : `Overview · ${project.slideOrder.length} slide${project.slideOrder.length === 1 ? "" : "s"}`}
-                  </span>
-                  <button
-                    type="button"
-                    disabled={project.slideOrder.length === 0 || activeSlideIndex >= project.slideOrder.length - 1}
-                    onClick={() => openSlide(project.slideOrder[activeSlideIndex + 1])}
-                    aria-label="Next slide"
-                  >
-                    <NextIcon />
-                  </button>
-                </>
-              ) : <span>Board</span>}
-            </div>
-            <div className="footer-zoom-controls" role="group" aria-label={`${workspaceMode === "pdf" ? "PDF" : workspaceMode === "slides" ? "Slides" : "Board"} zoom controls`}>
-              <button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => clickEditorControl(".zoom-out-button")}><MinusIcon /></button>
-              <button className="footer-reset-zoom" type="button" aria-label="Reset zoom" title="Reset zoom" onClick={() => clickEditorControl(".reset-zoom-button")}>{zoom}%</button>
-              <button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => clickEditorControl(".zoom-in-button")}><PlusIcon /></button>
-            </div>
-            <div className="statusbar-actions">
-              {workspaceMode === "slides" && (
-                <>
-                  <button className="present-button" type="button" onClick={startPresentation} title="Start presentation">
-                    <PresentIcon /><span className="icon-label">Present</span>
-                  </button>
-                  <button className="footer-history-button" type="button" aria-label="Undo" title="Undo" onClick={() => clickEditorControl('[data-testid="button-undo"]')}><UndoIcon /></button>
-                  <button className="footer-history-button" type="button" aria-label="Redo" title="Redo" onClick={() => clickEditorControl('[data-testid="button-redo"]')}><RedoIcon /></button>
-                </>
-              )}
-              {workspaceMode === "pdf" && (
-                <>
-                  <button
-                    className={`pdf-toolbar-toggle ${isPdfToolbarVisible ? "is-active" : ""}`}
-                    type="button"
-                    aria-label={isPdfToolbarVisible ? "Hide drawing tools" : "Show drawing tools"}
-                    aria-pressed={isPdfToolbarVisible}
-                    title={isPdfToolbarVisible ? "Hide drawing tools" : "Show drawing tools"}
-                    onClick={() => setIsPdfToolbarVisible((visible) => !visible)}
-                  >
-                    <InkIcon />
-                  </button>
-                  <button className="footer-history-button" type="button" aria-label="Undo" title="Undo" onClick={() => clickEditorControl('[data-testid="button-undo"]')}><UndoIcon /></button>
-                  <button className="footer-history-button" type="button" aria-label="Redo" title="Redo" onClick={() => clickEditorControl('[data-testid="button-redo"]')}><RedoIcon /></button>
-                </>
-              )}
-              {workspaceMode === "board" && (
-                <>
-                  <button className="footer-history-button" type="button" aria-label="Undo" title="Undo" onClick={() => clickEditorControl('[data-testid="button-undo"]')}><UndoIcon /></button>
-                  <button className="footer-history-button" type="button" aria-label="Redo" title="Redo" onClick={() => clickEditorControl('[data-testid="button-redo"]')}><RedoIcon /></button>
-                </>
-              )}
-              <button
-                className={`fullscreen-button ${isFullscreen ? "is-active" : ""}`}
-                type="button"
-                aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-                aria-pressed={isFullscreen}
-                title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-                onClick={() => void toggleFullscreen()}
-              >
-                {isFullscreen ? <ExitFullscreenIcon /> : <EnterFullscreenIcon />}
-              </button>
-            </div>
-          </footer>
-        )}
+        {!presentation && !featurePreferences.bottomInterface && isFooterVisible
+          ? renderWorkspaceStatusControls("footer")
+          : null}
       </main>
       {presentation && (
         <PresentationOverlay
@@ -6512,9 +6698,6 @@ export default function App() {
             <button type="button" onClick={openNativeImageExport} disabled={!api?.getSceneElements().length}>
               <strong>Export image…</strong><span>Use Excalidraw’s image options for a selection or the complete active scene.</span>
             </button>
-            <button type="button" onClick={() => void runFullBoardExport()} disabled={!api?.getSceneElements().length}>
-              <strong>Full board PNG</strong><span>Everything on this board, including content outside the window. Editable scene data is embedded when supported.</span>
-            </button>
             {workspaceMode === "slides" && (
               <>
                 <button type="button" onClick={() => void runPdfExport("slides")} disabled={!project.slideOrder.length}>
@@ -6535,6 +6718,14 @@ export default function App() {
           </section>
         </div>
       )}
+      {slideRotationTarget && !presentation ? (
+        <SlideRotationDialog
+          slideTitle={slideRotationTarget.title}
+          onCancel={cancelSlideRotation}
+          onSubmit={applySlideRotation}
+          returnFocusRef={slideRotationReturnFocusRef}
+        />
+      ) : null}
       {equationEditor && (
         <EquationDialog
           initialSource={equationEditor.initialSource}

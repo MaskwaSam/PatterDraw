@@ -27,7 +27,7 @@ export const MAX_STRUCTURAL_TOTAL_POINTS = 1_000_000;
 /** Clipboard strings are transient selections, not full project archives. */
 export const MAX_CLIPBOARD_TEXT_BYTES = 8 * MEBIBYTE;
 
-/** A board plus up to 250 imported PDF pages, with migration headroom. */
+/** A board plus a large imported PDF, with a small amount of migration headroom. */
 export const MAX_PROJECT_SCENES = 512;
 export const MAX_PROJECT_ELEMENTS_PER_SCENE = 100_000;
 export const MAX_PROJECT_TOTAL_ELEMENTS = 250_000;

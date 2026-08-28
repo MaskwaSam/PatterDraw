@@ -691,6 +691,31 @@ function exportTestText(
   };
 }
 
+function exportTestArrow(
+  id: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  index: string,
+  startElementId: string,
+  endElementId: string,
+) {
+  return {
+    ...exportTestRectangle(id, x, y, width, height, index),
+    type: "arrow",
+    backgroundColor: "transparent",
+    roundness: { type: 2 },
+    points: [[0, 0], [width, height]],
+    lastCommittedPoint: null,
+    startBinding: { elementId: startElementId, focus: 0, gap: 0 },
+    endBinding: { elementId: endElementId, focus: 0, gap: 0 },
+    startArrowhead: null,
+    endArrowhead: "arrow",
+    elbowed: false,
+  };
+}
+
 function classroomTestFrame(
   id: string,
   name: string,
@@ -2078,12 +2103,14 @@ test("customizes optional features from device-local settings", async ({ page })
   await settings.click();
   await expect(dialog).toBeVisible();
 
-  for (const label of ["Slides", "PDF", "Insert tools", "Math tools", "Library", "Size & Position", "Project Find", "Status bar"]) {
+  for (const label of ["Slides", "PDF", "Insert tools", "Math tools", "Library", "Size & Position", "Project Find", "Status bar", "Show cursor in OBS"]) {
     await expect(dialog.getByRole("switch", { name: label, exact: true })).toBeChecked();
   }
-  for (const label of ["Pen-only mode", "Show grid", "Snap to objects", "Icon-only controls"]) {
+  for (const label of ["Pen-only mode", "Show grid", "Snap to objects", "Icon-only controls", "Bottom interface", "OBS capture area", "Record all visible canvas"]) {
     await expect(dialog.getByRole("switch", { name: label, exact: true })).not.toBeChecked();
   }
+  await expect(dialog.getByRole("switch", { name: "Show cursor in OBS", exact: true })).toBeDisabled();
+  await expect(dialog.getByRole("switch", { name: "Record all visible canvas", exact: true })).toBeDisabled();
   await expect(dialog.getByRole("combobox", { name: "Theme", exact: true })).toHaveValue("light");
   const experimental = dialog.getByRole("switch", { name: "Experimental math tools", exact: true });
   await expect(experimental).not.toBeChecked();
@@ -2138,6 +2165,10 @@ test("customizes optional features from device-local settings", async ({ page })
     sizePosition: false,
     projectFind: false,
     iconOnlyControls: false,
+    bottomInterface: false,
+    obsCaptureArea: false,
+    obsRecordVisibleCanvas: false,
+    obsShowCursor: true,
   });
 
   await page.reload();
@@ -2177,8 +2208,160 @@ test("customizes optional features from device-local settings", async ({ page })
     sizePosition: true,
     projectFind: true,
     iconOnlyControls: false,
+    bottomInterface: false,
+    obsCaptureArea: false,
+    obsRecordVisibleCanvas: false,
+    obsShowCursor: true,
   });
   expect(await page.evaluate(() => localStorage.getItem("patterdraw:experimental-math-tools:v1"))).toBeNull();
+});
+
+test("moves the shared interface to the bottom without remounting the live editor", async ({ page }) => {
+  const shell = page.locator(".app-shell");
+  const editor = page.locator(".editor-host > .excalidraw");
+  await editor.evaluate((element) => element.setAttribute("data-bottom-interface-token", "same-editor"));
+  await page.getByTestId("toolbar-rectangle").check({ force: true });
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
+  const preference = dialog.getByRole("switch", { name: "Bottom interface", exact: true });
+  await expect(preference).not.toBeChecked();
+  await preference.click();
+
+  await expect(shell).toHaveClass(/is-bottom-interface/);
+  await expect(dialog).toBeVisible();
+  await expect(preference).toBeChecked();
+  await expect(editor).toHaveAttribute("data-bottom-interface-token", "same-editor");
+  await expect(page.getByTestId("toolbar-rectangle")).toBeChecked();
+  await expect(page.locator(".bottom-interface-bar")).toBeVisible();
+  await expect(page.locator(".statusbar")).toHaveCount(0);
+  await dialog.press("Escape");
+
+  const desktopGeometry = await page.evaluate(() => {
+    const rect = (selector: string) => {
+      const element = document.querySelector(selector);
+      if (!element) return null;
+      const bounds = element.getBoundingClientRect();
+      return {
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+        right: bounds.right,
+        bottom: bounds.bottom,
+      };
+    };
+    return {
+      dock: rect(".bottom-interface-bar"),
+      editor: rect(".editor-region"),
+      toolbar: rect(".editor-host .excalidraw:not(.excalidraw--mobile) .shapes-section"),
+      viewportHeight: window.innerHeight,
+      viewportWidth: window.innerWidth,
+      documentWidth: document.documentElement.scrollWidth,
+    };
+  });
+  expect(desktopGeometry.dock).not.toBeNull();
+  expect(desktopGeometry.editor).not.toBeNull();
+  expect(desktopGeometry.toolbar).not.toBeNull();
+  expect(desktopGeometry.dock?.bottom).toBeCloseTo(desktopGeometry.viewportHeight, 0);
+  expect(desktopGeometry.editor?.y).toBeCloseTo(0, 0);
+  expect(desktopGeometry.editor?.bottom).toBeLessThanOrEqual((desktopGeometry.dock?.y || 0) + 1);
+  expect(desktopGeometry.toolbar?.bottom).toBeLessThanOrEqual((desktopGeometry.dock?.y || 0) + 1);
+  expect(desktopGeometry.toolbar?.y || 0).toBeGreaterThan((desktopGeometry.editor?.height || 0) * 0.55);
+  expect(desktopGeometry.documentWidth).toBeLessThanOrEqual(desktopGeometry.viewportWidth);
+
+  const dock = page.locator(".bottom-interface-bar");
+  await dock.getByRole("button", { name: "Insert", exact: true }).click();
+  const insertMenu = dock.locator('.topbar-menu-popover[role="menu"]');
+  await expect(insertMenu).toBeVisible();
+  const insertMenuBounds = await insertMenu.boundingBox();
+  const dockBounds = await dock.boundingBox();
+  expect(insertMenuBounds).not.toBeNull();
+  expect(dockBounds).not.toBeNull();
+  expect(insertMenuBounds?.y || 0).toBeLessThan(dockBounds?.y || 0);
+  expect((insertMenuBounds?.y || 0) + (insertMenuBounds?.height || 0)).toBeLessThanOrEqual((dockBounds?.y || 0) + 1);
+  await dock.getByRole("button", { name: "Insert", exact: true }).click();
+
+  await dock.getByRole("button", { name: "More tools", exact: true }).click();
+  const utilityMenu = dock.locator(".topbar-utility-popover");
+  await expect(utilityMenu).toBeVisible();
+  await expect(utilityMenu.getByRole("menuitem", { name: "Library", exact: true })).toBeVisible();
+  await expect(utilityMenu.getByRole("menuitem", { name: "Find in project", exact: true })).toBeVisible();
+  await expect(utilityMenu.getByRole("menuitem", { name: "Size & Position", exact: true })).toBeVisible();
+  await dock.getByRole("button", { name: "More tools", exact: true }).click();
+
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect(shell).toHaveClass(/is-bottom-interface/);
+  await expect(page.locator(".bottom-interface-bar")).toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobileGeometry = await page.evaluate(() => {
+    const dock = document.querySelector(".bottom-interface-bar")?.getBoundingClientRect();
+    const editor = document.querySelector(".editor-region")?.getBoundingClientRect();
+    return {
+      dock: dock ? { y: dock.y, bottom: dock.bottom, width: dock.width, height: dock.height } : null,
+      editor: editor ? { y: editor.y, bottom: editor.bottom, width: editor.width, height: editor.height } : null,
+      viewportWidth: window.innerWidth,
+      documentWidth: document.documentElement.scrollWidth,
+    };
+  });
+  expect(mobileGeometry.dock).not.toBeNull();
+  expect(mobileGeometry.editor).not.toBeNull();
+  expect(mobileGeometry.dock?.width).toBeCloseTo(390, 0);
+  expect(mobileGeometry.editor?.bottom).toBeLessThanOrEqual((mobileGeometry.dock?.y || 0) + 1);
+  expect(mobileGeometry.documentWidth).toBeLessThanOrEqual(mobileGeometry.viewportWidth);
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(dialog).toBeVisible();
+  const mobileDialogBounds = await dialog.boundingBox();
+  const mobileDockBounds = await page.locator(".bottom-interface-bar").boundingBox();
+  expect(mobileDialogBounds).not.toBeNull();
+  expect(mobileDockBounds).not.toBeNull();
+  expect((mobileDialogBounds?.y || 0) + (mobileDialogBounds?.height || 0)).toBeLessThanOrEqual((mobileDockBounds?.y || 0) + 1);
+  await dialog.getByRole("switch", { name: "Bottom interface", exact: true }).click();
+  await expect(shell).not.toHaveClass(/is-bottom-interface/);
+  await expect(dialog).toBeVisible();
+  await expect(page.locator(".statusbar")).toBeVisible();
+  const restoredTopBar = await page.locator(".topbar").boundingBox();
+  expect(restoredTopBar?.y).toBeCloseTo(0, 0);
+});
+
+test("keeps Slides and PDF controls clear of the optional bottom interface", async ({ page }) => {
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
+  await dialog.getByRole("switch", { name: "Bottom interface", exact: true }).click();
+  await dialog.press("Escape");
+
+  const dock = page.locator(".bottom-interface-bar");
+  await dock.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-slide-mode/);
+  await expect(page.getByTestId("slide-page-indicator")).toContainText("Overview");
+  const slideRailBounds = await page.locator(".slide-rail").boundingBox();
+  const slideDockBounds = await dock.boundingBox();
+  expect(slideRailBounds).not.toBeNull();
+  expect(slideDockBounds).not.toBeNull();
+  expect((slideRailBounds?.y || 0) + (slideRailBounds?.height || 0)).toBeLessThanOrEqual((slideDockBounds?.y || 0) + 1);
+
+  await openTestPdf(page, 2);
+  await expect(page.locator(".app-shell")).toHaveClass(/is-bottom-interface/);
+  await expect(page.locator(".bottom-interface-status")).toContainText("Page 1 of 2");
+  const pdfDockBounds = await dock.boundingBox();
+  const pdfRailBounds = await page.locator("#pdf-page-rail").boundingBox();
+  const pdfToolbar = page.locator(".editor-host .excalidraw:not(.excalidraw--mobile) .shapes-section");
+  const pdfToolbarBounds = await pdfToolbar.boundingBox();
+  expect(pdfDockBounds).not.toBeNull();
+  expect(pdfRailBounds).not.toBeNull();
+  expect(pdfToolbarBounds).not.toBeNull();
+  expect((pdfRailBounds?.y || 0) + (pdfRailBounds?.height || 0)).toBeLessThanOrEqual((pdfDockBounds?.y || 0) + 1);
+  expect((pdfToolbarBounds?.y || 0) + (pdfToolbarBounds?.height || 0)).toBeLessThanOrEqual((pdfDockBounds?.y || 0) + 1);
+
+  await pdfToolbar.locator(".App-toolbar__extra-tools-trigger").click();
+  const extraTools = page.locator(".App-toolbar__extra-tools-dropdown");
+  await expect(extraTools).toBeVisible();
+  const extraToolsBounds = await extraTools.boundingBox();
+  expect(extraToolsBounds).not.toBeNull();
+  expect((extraToolsBounds?.y || 0) + (extraToolsBounds?.height || 0)).toBeLessThanOrEqual((pdfToolbarBounds?.y || 0) + 2);
 });
 
 test("optionally hides redundant icon labels without removing accessible names", async ({ page }) => {
@@ -2213,12 +2396,15 @@ test("optionally hides redundant icon labels without removing accessible names",
 
 test("applies pen-only, grid, and object-snapping preferences to the live editor", async ({ page }) => {
   const settings = page.getByRole("button", { name: "Settings", exact: true });
+  const canvasPenOnly = page.getByRole("checkbox", { name: "Pen mode - prevent touch", exact: true });
+  await expect(canvasPenOnly).toBeHidden();
   await settings.click();
   const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
   const penOnly = dialog.getByRole("switch", { name: "Pen-only mode", exact: true });
   const showGrid = dialog.getByRole("switch", { name: "Show grid", exact: true });
   const snapToObjects = dialog.getByRole("switch", { name: "Snap to objects", exact: true });
 
+  await expect(penOnly).toBeVisible();
   await penOnly.check();
   await showGrid.check();
   await expect(showGrid).toBeChecked();
@@ -2295,6 +2481,7 @@ test("applies pen-only, grid, and object-snapping preferences to the live editor
 
   await page.reload();
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect(canvasPenOnly).toBeHidden();
   await settings.click();
   await expect(penOnly).toBeChecked();
   await expect(showGrid).not.toBeChecked();
@@ -2683,6 +2870,7 @@ test("darkens PDF content while preserving embedded picture colours and canonica
   expect(darkSamples?.pictureAccent[1] || 0).toBeGreaterThan((darkSamples?.pictureAccent[2] || 0) * 2);
   expect(darkSamples?.pictureTransparentVector.every((channel) => channel > 205)).toBe(true);
   expect(darkSamples?.pictureVectorOverlay.every((channel) => channel > 205)).toBe(true);
+
   await expect.poll(storedPdfRaster, { timeout: 30_000 }).toEqual(lightStored);
 
   await page.getByRole("button", { name: /Open output page 2:/ }).click();
@@ -2967,6 +3155,10 @@ test("merges and synchronizes feature preferences across open tabs", async ({ pa
       sizePosition: true,
       projectFind: true,
       iconOnlyControls: false,
+      bottomInterface: false,
+      obsCaptureArea: false,
+      obsRecordVisibleCanvas: false,
+      obsShowCursor: true,
     };
     await expect.poll(() => page.evaluate(() => JSON.parse(
       localStorage.getItem("patterdraw:feature-preferences:v1") || "null",
@@ -3218,6 +3410,7 @@ test("does not replace an unreadable autosave with a blank project", async ({ pa
   const recoveryNotice = page.getByRole("alert").filter({ hasText: "Autosave is paused" });
   await expect(recoveryNotice).toContainText("Autosave could not be opened");
   await expect(recoveryNotice).toContainText("this temporary board is not saving automatically");
+  await expect(recoveryNotice).toBeVisible();
   const title = page.getByRole("textbox", { name: "Project title" });
   await title.fill("Temporary recovery board");
   await page.locator('.statusbar button[aria-label="Zoom in"]').click();
@@ -3230,7 +3423,6 @@ test("does not replace an unreadable autosave with a blank project", async ({ pa
     id: "recoverable-autosave",
     title: "Recoverable classroom work",
   });
-
   page.once("dialog", (dialog) => void dialog.dismiss());
   await recoveryNotice.getByRole("button", { name: "Use this board and resume autosave" }).click();
   await expect(recoveryNotice).toBeVisible();
@@ -4451,6 +4643,134 @@ test("strips canvas links and blocks external navigation", async ({ page }) => {
   expect(consoleErrors).toEqual([]);
 });
 
+test("configures a same-window OBS crop area only from Settings", async ({ context, page }) => {
+  const shell = page.locator(".app-shell");
+  const editorHost = page.locator(".editor-host");
+  const editor = editorHost.locator(".excalidraw");
+  await expect(editor).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await editorHost.evaluate((element) => element.setAttribute("data-obs-editor-token", "live-editor"));
+  const pageCount = context.pages().length;
+  await expect(page.locator(".statusbar").getByText("OBS", { exact: true })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+  const captureArea = settings.getByRole("switch", { name: "OBS capture area", exact: true });
+  const recordVisibleCanvas = settings.getByRole("switch", { name: "Record all visible canvas", exact: true });
+  const showCursor = settings.getByRole("switch", { name: "Show cursor in OBS", exact: true });
+  await expect(captureArea).not.toBeChecked();
+  await expect(recordVisibleCanvas).not.toBeChecked();
+  await expect(recordVisibleCanvas).toBeDisabled();
+  await expect(showCursor).toBeChecked();
+  await expect(showCursor).toBeDisabled();
+  await captureArea.check();
+  await page.keyboard.press("Escape");
+  await expect(settings).toHaveCount(0);
+  await expect(shell).toHaveClass(/is-obs-capture-enabled/);
+  await expect(shell).toHaveClass(/is-obs-cursor-visible/);
+  expect(context.pages()).toHaveLength(pageCount);
+  await expect(editorHost).toHaveAttribute("data-obs-editor-token", "live-editor");
+  await expect(page.locator(".topbar")).toBeVisible();
+  await expect(page.locator(".statusbar")).toBeVisible();
+  const drawingTools = page.getByRole("region", { name: "Shapes", exact: true });
+  await expect(drawingTools).toBeVisible();
+
+  const guide = page.getByTestId("obs-capture-guide");
+  const guideFrame = guide.locator(".obs-capture-guide-frame");
+  await expect(guide).toHaveAccessibleName("OBS 16:9 capture area");
+  await expect(guide).toHaveAttribute("data-layout", "widescreen");
+  await expect(guideFrame).toBeVisible();
+  const boardGuide = await guideFrame.boundingBox();
+  const boardTools = await drawingTools.boundingBox();
+  expect(boardGuide).not.toBeNull();
+  expect(boardTools).not.toBeNull();
+  expect((boardGuide?.width || 0) / (boardGuide?.height || 1)).toBeCloseTo(16 / 9, 2);
+  expect((boardTools?.y || 0) + (boardTools?.height || 0)).toBeLessThanOrEqual((boardGuide?.y || 0) - 2);
+  expect(await editorHost.evaluate((element) => getComputedStyle(element).cursor)).not.toBe("none");
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(recordVisibleCanvas).toBeEnabled();
+  await expect(showCursor).toBeEnabled();
+  await recordVisibleCanvas.check();
+  await expect(guide).toHaveAttribute("data-layout", "visible");
+  await expect(guide).toHaveAccessibleName("OBS visible canvas capture area");
+  const visibleGuide = await guideFrame.boundingBox();
+  expect(visibleGuide).not.toBeNull();
+  expect(visibleGuide?.width || 0).toBeGreaterThan(boardGuide?.width || 0);
+  expect((boardTools?.y || 0) + (boardTools?.height || 0)).toBeLessThanOrEqual((visibleGuide?.y || 0) - 2);
+  await recordVisibleCanvas.uncheck();
+  await expect(guide).toHaveAttribute("data-layout", "widescreen");
+  await showCursor.uncheck();
+  await page.keyboard.press("Escape");
+  await expect(shell).not.toHaveClass(/is-obs-cursor-visible/);
+  await expect(editorHost).toHaveCSS("cursor", "none");
+
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.getByRole("button", { name: "Add slide", exact: true }).click();
+  await page.getByRole("button", { name: "Add slide", exact: true }).click();
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(2);
+  await expect(guide).toHaveAttribute("data-layout", "widescreen");
+  const slidesGuide = await guideFrame.boundingBox();
+  expect((slidesGuide?.width || 0) / (slidesGuide?.height || 1)).toBeCloseTo(16 / 9, 2);
+  await page.getByRole("button", { name: /Open slide 1:/ }).click();
+  await expect(guide).toHaveAttribute("data-layout", "widescreen");
+  await page.getByRole("button", { name: /Open slide 2:/ }).click();
+  await expect(guide).toHaveAttribute("data-layout", "widescreen");
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await recordVisibleCanvas.check();
+  await page.keyboard.press("Escape");
+  await expect(guide).toHaveAttribute("data-layout", "visible");
+  const visibleSlidesGuide = await guideFrame.boundingBox();
+  expect(visibleSlidesGuide).not.toBeNull();
+  expect((visibleSlidesGuide?.width || 0) * (visibleSlidesGuide?.height || 0))
+    .toBeGreaterThan((slidesGuide?.width || 0) * (slidesGuide?.height || 0));
+  await page.getByRole("button", { name: /Open slide 1:/ }).click();
+  await expect(guide).toHaveAttribute("data-layout", "visible");
+  await page.getByRole("button", { name: /Open slide 2:/ }).click();
+  await expect(guide).toHaveAttribute("data-layout", "visible");
+
+  await openTestPdf(page, 2);
+  const pdfGuide = page.getByRole("region", { name: "OBS full canvas capture area", exact: true });
+  await expect(pdfGuide).toHaveAttribute("data-layout", "viewport");
+  await expect(drawingTools).toBeHidden();
+  await expect(page.getByRole("button", { name: /drawing tools/i })).toHaveCount(0);
+  const pdfFrame = await pdfGuide.locator(".obs-capture-guide-frame").boundingBox();
+  const pdfEditor = await editorHost.boundingBox();
+  expect(pdfFrame).not.toBeNull();
+  expect(pdfEditor).not.toBeNull();
+  expect(Math.abs((pdfEditor?.width || 0) - (pdfFrame?.width || 0))).toBeLessThanOrEqual(10);
+  expect(Math.abs((pdfEditor?.height || 0) - (pdfFrame?.height || 0))).toBeLessThanOrEqual(10);
+
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await recordVisibleCanvas.uncheck();
+  await page.keyboard.press("Escape");
+  await expect(guide).toHaveAttribute("data-layout", "widescreen");
+  await page.getByRole("button", { name: "Enter fullscreen", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => Boolean(document.fullscreenElement))).toBe(true);
+  await expect(page.locator(".topbar")).toBeHidden();
+  await expect(page.locator(".statusbar")).toBeHidden();
+  await expect(page.locator("#slide-rail")).toBeHidden();
+  await expect(drawingTools).toBeHidden();
+  const fullscreenGuide = await guideFrame.boundingBox();
+  expect(fullscreenGuide).not.toBeNull();
+  expect((fullscreenGuide?.width || 0) / (fullscreenGuide?.height || 1)).toBeCloseTo(16 / 9, 2);
+  expect(fullscreenGuide?.width || 0).toBeGreaterThan(1400);
+  await page.evaluate(() => document.exitFullscreen());
+  await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true);
+  await expect(editorHost).toHaveAttribute("data-obs-editor-token", "live-editor");
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await recordVisibleCanvas.check();
+  await page.keyboard.press("Escape");
+  await page.reload();
+  await expect(shell).toHaveClass(/is-obs-capture-enabled/);
+  await expect(shell).not.toHaveClass(/is-obs-cursor-visible/);
+  await expect(guide).toHaveAttribute("data-layout", "visible");
+  await expect(guide).toHaveAccessibleName("OBS visible canvas capture area");
+  expect(context.pages()).toHaveLength(pageCount);
+});
+
 test("toggles fullscreen from the bottom-right status bar", async ({ page }) => {
   const fullscreenButton = page.getByRole("button", { name: "Enter fullscreen", exact: true });
   await expect(fullscreenButton).toBeVisible();
@@ -4510,6 +4830,8 @@ test("moves board zoom and history controls into the footer", async ({ page }) =
   await expect(nativeRedo).toBeDisabled();
 
   await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator('.statusbar .footer-history-button[aria-label="Undo"]')).toBeVisible();
+  await expect(page.locator('.statusbar .footer-history-button[aria-label="Redo"]')).toBeVisible();
   const footerBox = await page.locator(".statusbar").boundingBox();
   const zoomBox = await footerZoom.boundingBox();
   const actionsBox = await page.locator(".statusbar-actions").boundingBox();
@@ -4717,6 +5039,52 @@ test("cancels Draw slide when leaving Slides mode", async ({ page }) => {
   expect(editor).not.toBeNull();
   await page.mouse.click((editor?.x || 0) + 300, (editor?.y || 0) + 240);
   await expect.poll(async () => (await autosavedFrameAspectSummary(page))?.frames.length || 0).toBe(0);
+});
+
+test("Quick draw keeps frame drawing armed until it is toggled off", async ({ page }) => {
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await openSlideSettings(page);
+  const quickDraw = page.getByRole("button", { name: "Quick draw", exact: true });
+  const drawFrame = page.getByRole("button", { name: "Draw slide", exact: true });
+  await expect(quickDraw).toHaveAttribute("aria-pressed", "false");
+  await quickDraw.click();
+  await expect(quickDraw).toHaveAttribute("aria-pressed", "true");
+  await drawFrame.click();
+
+  const editorBounds = await page.locator(".editor-host").boundingBox();
+  expect(editorBounds).not.toBeNull();
+  const drawQuickFrame = async (top: number) => {
+    await page.mouse.move((editorBounds?.x || 0) + 440, (editorBounds?.y || 0) + top);
+    await page.mouse.down();
+    await page.mouse.move(
+      (editorBounds?.x || 0) + 680,
+      (editorBounds?.y || 0) + top + 140,
+      { steps: 8 },
+    );
+    await page.mouse.up();
+  };
+
+  await drawQuickFrame(160);
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(1);
+  await expect(page.getByTestId("slide-frame-draw-overlay")).toBeVisible();
+  await expect(page.getByText(/Quick drawing .* slide/i)).toBeVisible();
+
+  await drawQuickFrame(370);
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(2);
+  await expect(page.getByTestId("slide-frame-draw-overlay")).toBeVisible();
+
+  await openSlideSettings(page);
+  await expect(quickDraw).toHaveAttribute("aria-pressed", "true");
+  await quickDraw.click();
+  await expect(quickDraw).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByTestId("slide-frame-draw-overlay")).toHaveCount(0);
+  await expect(page.getByTestId("toolbar-selection")).toBeChecked();
+
+  await page.mouse.move((editorBounds?.x || 0) + 440, (editorBounds?.y || 0) + 580);
+  await page.mouse.down();
+  await page.mouse.move((editorBounds?.x || 0) + 680, (editorBounds?.y || 0) + 700, { steps: 8 });
+  await page.mouse.up();
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(2);
 });
 
 test("requires Draw slide for each 16:9, 4:3, freeform, and touch slide", async ({ page }) => {
@@ -5289,6 +5657,249 @@ test("reorders slides with visible keyboard and touch controls", async ({ page }
   await movePracticeLater.click();
   await expect(captions).toHaveText(["Opening", "Practice"]);
   await expect(liveAnnouncement).toHaveText("Moved Practice to slide position 2.");
+});
+
+test("rotates one slide by an exact arbitrary angle while its frame stays upright", async ({ page }) => {
+  const content = exportTestRectangle("rotation-content", 450, 240, 40, 40, "a0");
+  const frame = classroomTestFrame("rotation-frame", "Crooked example", 100, 100, 500, 300, "a1", true);
+  await openClassroomFixture(page, [content, frame], [
+    { id: "rotation-record", frameId: frame.id, title: "Crooked example", titleMode: "custom" },
+  ]);
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+
+  const rotationSummary = async () => {
+    const saved = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, {
+        elements: Array<{
+          angle?: number;
+          height?: number;
+          id: string;
+          width?: number;
+          x?: number;
+          y?: number;
+        }>;
+      }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    const elements = saved?.scenes[saved.activeSceneId]?.elements || [];
+    const savedContent = elements.find((element) => element.id === content.id);
+    const savedFrame = elements.find((element) => element.id === frame.id);
+    return {
+      content: savedContent ? {
+        angle: savedContent.angle,
+        centerX: (savedContent.x || 0) + (savedContent.width || 0) / 2,
+        centerY: (savedContent.y || 0) + (savedContent.height || 0) / 2,
+      } : null,
+      frame: savedFrame ? {
+        angle: savedFrame.angle,
+        height: savedFrame.height,
+        width: savedFrame.width,
+        x: savedFrame.x,
+        y: savedFrame.y,
+      } : null,
+    };
+  };
+
+  const preview = page.locator(".slide-thumbnail .slide-preview").first();
+  await expect(preview).toHaveAttribute("data-preview-revision", /.+/);
+  const previewRevisionBefore = await preview.getAttribute("data-preview-revision");
+  const actionsButton = page.getByRole("button", {
+    name: "Slide 1 actions: Crooked example",
+    exact: true,
+  });
+  await actionsButton.click();
+  await page.getByRole("menuitem", { name: /Rotate slide/ }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Rotate slide content", exact: true });
+  await expect(dialog).toContainText("if a slide leans 33° to the right");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(actionsButton).toBeFocused();
+
+  await actionsButton.click();
+  await page.getByRole("menuitem", { name: /Rotate slide/ }).click();
+  await expect(dialog.getByRole("button", { name: "↺ Turn left", exact: true }))
+    .toHaveAttribute("aria-pressed", "true");
+  await dialog.getByRole("spinbutton", { name: "Degrees", exact: true }).fill("33");
+  await dialog.getByRole("button", { name: "Rotate left 33°", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+
+  const radians = -33 * Math.PI / 180;
+  const frameCenter = { x: 350, y: 250 };
+  const originalContentCenter = { x: 470, y: 260 };
+  const deltaX = originalContentCenter.x - frameCenter.x;
+  const deltaY = originalContentCenter.y - frameCenter.y;
+  const expectedCenter = {
+    x: frameCenter.x + deltaX * Math.cos(radians) - deltaY * Math.sin(radians),
+    y: frameCenter.y + deltaX * Math.sin(radians) + deltaY * Math.cos(radians),
+  };
+  await expect.poll(async () => (await rotationSummary()).frame).toEqual({
+    angle: 0,
+    height: 300,
+    width: 500,
+    x: 100,
+    y: 100,
+  });
+  await expect.poll(async () => (await rotationSummary()).content?.centerX)
+    .toBeCloseTo(expectedCenter.x, 5);
+  await expect.poll(async () => (await rotationSummary()).content?.centerY)
+    .toBeCloseTo(expectedCenter.y, 5);
+  const rotated = await rotationSummary();
+  expect(rotated.content?.angle).toBeCloseTo((2 * Math.PI) + radians, 8);
+  await expect.poll(() => preview.getAttribute("data-preview-revision"))
+    .not.toBe(previewRevisionBefore);
+
+  const nativeUndo = page.getByTestId("button-undo");
+  const nativeRedo = page.getByTestId("button-redo");
+  await expect(nativeUndo).toBeEnabled();
+  await page.locator('.statusbar .footer-history-button[aria-label="Undo"]').click();
+  await expect.poll(rotationSummary).toMatchObject({
+    content: { angle: 0, centerX: originalContentCenter.x, centerY: originalContentCenter.y },
+    frame: { angle: 0, height: 300, width: 500, x: 100, y: 100 },
+  });
+  await expect(nativeRedo).toBeEnabled();
+  await page.locator('.statusbar .footer-history-button[aria-label="Redo"]').click();
+  await expect.poll(async () => (await rotationSummary()).content?.angle)
+    .toBeCloseTo((2 * Math.PI) + radians, 8);
+
+  await page.reload();
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect(page.locator(".slide-thumbnail .slide-caption")).toHaveText("Crooked example");
+  await expect.poll(async () => (await rotationSummary()).content?.angle)
+    .toBeCloseTo((2 * Math.PI) + radians, 8);
+});
+
+test("keeps slide arrow and bound-text relationships through rotation, undo, and reopen", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+
+  const arrowId = "rotation-arrow";
+  const labelId = "rotation-label";
+  const left = {
+    ...exportTestRectangle("rotation-left", 160, 200, 120, 80, "a0"),
+    boundElements: [{ id: arrowId, type: "arrow" }],
+  };
+  const right = {
+    ...exportTestRectangle("rotation-right", 500, 200, 140, 80, "a1"),
+    boundElements: [
+      { id: arrowId, type: "arrow" },
+      { id: labelId, type: "text" },
+    ],
+  };
+  const arrow = exportTestArrow(
+    arrowId,
+    280,
+    240,
+    220,
+    0,
+    "a2",
+    left.id,
+    right.id,
+  );
+  const label = {
+    ...exportTestText(labelId, "Label", 535, 225, "a3"),
+    containerId: right.id,
+    textAlign: "center",
+    verticalAlign: "middle",
+  };
+  const frame = classroomTestFrame(
+    "rotation-binding-frame",
+    "Connected example",
+    100,
+    100,
+    600,
+    350,
+    "a4",
+    true,
+  );
+  await openClassroomFixture(page, [left, right, arrow, label, frame], [
+    { id: "rotation-binding-record", frameId: frame.id, title: "Connected example", titleMode: "custom" },
+  ]);
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+
+  const relationshipSummary = async () => {
+    const saved = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, {
+        elements: Array<{
+          angle?: number;
+          containerId?: string | null;
+          endBinding?: { elementId?: string } | null;
+          id: string;
+          x?: number;
+          y?: number;
+          startBinding?: { elementId?: string } | null;
+        }>;
+      }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    const elements = saved?.scenes[saved.activeSceneId]?.elements || [];
+    const find = (id: string) => elements.find((element) => element.id === id);
+    const savedArrow = find(arrowId);
+    return {
+      angles: [left.id, right.id, arrowId, labelId].map((id) => find(id)?.angle),
+      arrowOrigin: [savedArrow?.x, savedArrow?.y],
+      endElementId: savedArrow?.endBinding?.elementId,
+      labelContainerId: find(labelId)?.containerId,
+      labelOrigin: [find(labelId)?.x, find(labelId)?.y],
+      startElementId: savedArrow?.startBinding?.elementId,
+    };
+  };
+
+  const beforeRotation = await relationshipSummary();
+
+  await page.getByRole("button", { name: "Slide 1 actions: Connected example", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Rotate slide/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Rotate slide content", exact: true });
+  await dialog.getByRole("spinbutton", { name: "Degrees", exact: true }).fill("33");
+  await dialog.getByRole("button", { name: "Rotate left 33°", exact: true }).click();
+
+  const rotatedAngle = (2 * Math.PI) - (33 * Math.PI / 180);
+  await expect.poll(relationshipSummary).toMatchObject({
+    endElementId: right.id,
+    labelContainerId: right.id,
+    startElementId: left.id,
+  });
+  await expect.poll(async () => (await relationshipSummary()).angles[0])
+    .toBeCloseTo(rotatedAngle, 8);
+  await expect.poll(async () => (await relationshipSummary()).angles[1])
+    .toBeCloseTo(rotatedAngle, 8);
+  await expect.poll(async () => (await relationshipSummary()).angles[2])
+    .toBeCloseTo(rotatedAngle, 8);
+  await expect.poll(async () => (await relationshipSummary()).angles[3])
+    .toBeCloseTo(rotatedAngle, 8);
+  const rotatedRelationships = await relationshipSummary();
+  expect(rotatedRelationships.arrowOrigin).not.toEqual(beforeRotation.arrowOrigin);
+  expect(rotatedRelationships.labelOrigin).not.toEqual(beforeRotation.labelOrigin);
+
+  await expect(page.getByTestId("button-undo")).toBeEnabled();
+  await page.locator('.statusbar .footer-history-button[aria-label="Undo"]').click();
+  await expect.poll(async () => (await relationshipSummary()).angles).toEqual([0, 0, 0, 0]);
+  await expect.poll(relationshipSummary).toMatchObject({
+    endElementId: right.id,
+    labelContainerId: right.id,
+    startElementId: left.id,
+  });
+  await page.locator('.statusbar .footer-history-button[aria-label="Redo"]').click();
+  await expect.poll(async () => (await relationshipSummary()).angles[1])
+    .toBeCloseTo(rotatedAngle, 8);
+
+  await page.reload();
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect.poll(relationshipSummary).toMatchObject({
+    endElementId: right.id,
+    labelContainerId: right.id,
+    startElementId: left.id,
+  });
+  await expect.poll(async () => (await relationshipSummary()).angles[1])
+    .toBeCloseTo(rotatedAngle, 8);
+  await expect.poll(async () => (await relationshipSummary()).angles[2])
+    .toBeCloseTo(rotatedAngle, 8);
+  await expect.poll(async () => (await relationshipSummary()).angles[3])
+    .toBeCloseTo(rotatedAngle, 8);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
 });
 
 test("applies consecutive slide drops to the latest order", async ({ page }) => {

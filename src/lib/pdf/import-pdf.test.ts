@@ -69,6 +69,7 @@ describe("PDF import PDF.js safety options", () => {
     page.cleanup.mockClear();
     page.render.mockClear();
     documentProxy.getPage.mockClear();
+    documentProxy.numPages = 1;
     loadingTask.destroy.mockClear();
   });
 
@@ -88,11 +89,11 @@ describe("PDF import PDF.js safety options", () => {
     expect(options).toEqual(expect.objectContaining({
       enableScripting: false,
       isEvalSupported: false,
-      maxImageSize: 16_000_000,
+      maxImageSize: 64_000_000,
       canvasMaxAreaInBytes: 64_000_000,
     }));
     expect(assertPdfEmbeddedImageLimitMock).toHaveBeenCalledOnce();
-    expect(assertPdfEmbeddedImageLimitMock.mock.calls[0]?.[1]).toBe(16_000_000);
+    expect(assertPdfEmbeddedImageLimitMock.mock.calls[0]?.[1]).toBe(64_000_000);
     expect(assertPdfEmbeddedImageLimitMock.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
       maxEdge: 8_192,
     }));
@@ -130,6 +131,26 @@ describe("PDF import PDF.js safety options", () => {
     await expect(importPdf(file, { maxEncodedBytesPerDocument: 0 }))
       .rejects.toThrow(/rendered pages are too large/i);
     expect(getDocumentMock).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a PDF that exceeds the destination project's remaining page capacity", async () => {
+    documentProxy.numPages = 3;
+    const file = new File([new Uint8Array([0x25, 0x50, 0x44, 0x46])], "three-pages.pdf", {
+      type: "application/pdf",
+    });
+    await expect(importPdf(file, { maxPages: 2 }))
+      .rejects.toThrow("The PDF has more than the 2-page capacity remaining in this project.");
+    expect(documentProxy.getPage).not.toHaveBeenCalled();
+    expect(loadingTask.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an invalid destination page capacity before parsing", async () => {
+    const file = new File([new Uint8Array([0x25, 0x50, 0x44, 0x46])], "safe.pdf", {
+      type: "application/pdf",
+    });
+    await expect(importPdf(file, { maxPages: 0 }))
+      .rejects.toThrow("The PDF page limit is invalid.");
+    expect(getDocumentMock).not.toHaveBeenCalled();
   });
 
   it("destroys a pending PDF.js load when the import generation aborts", async () => {

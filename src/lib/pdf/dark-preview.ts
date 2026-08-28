@@ -7,14 +7,16 @@ import {
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import {
   getBrowserPdfRasterBudget,
+  getPdfEmbeddedImagePixelBudget,
   getPdfImportEncodedByteBudget,
   getPdfJsRasterOptions,
   pdfRasterCanvasToPngDataUrl,
   releasePdfRasterCanvas,
   type PdfRasterBudget,
 } from "./raster-limits";
+import { withPdfWorkerCacheRevision } from "./worker-url";
 
-GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+GlobalWorkerOptions.workerSrc = withPdfWorkerCacheRevision(pdfWorkerUrl);
 
 // PDF.js 6.2.108 still consumes these legacy hardening flags at runtime, but
 // its public DocumentInitParameters type no longer declares them. Keep the
@@ -372,7 +374,7 @@ export async function renderDarkPdfPreview({
   await assertPdfEmbeddedImageLimit(bytes, rasterOptions.maxImageSize, {
     immutableSha256,
     maxEdge: rasterBudget.maxEdge,
-    maxTotalPixels: rasterBudget.maxPixelsPerDocument,
+    maxTotalPixels: getPdfEmbeddedImagePixelBudget(rasterBudget),
     maxTotalEncodedBytes: embeddedImageBudget.maxBytesPerDocument,
     signal,
   });

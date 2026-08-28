@@ -45,8 +45,10 @@ function mount(overrides: Partial<Parameters<typeof SlideRail>[0]> = {}) {
   const callbacks = {
     onAddSlide: vi.fn(),
     onToggleFrameDrawing: vi.fn(),
+    onToggleQuickDraw: vi.fn(),
     onOpenSlide: vi.fn(),
     onMoveSlide: vi.fn(),
+    onRotateSlide: vi.fn(),
     onDeleteSlide: vi.fn(),
     onHide: vi.fn(),
     onToggleFrames: vi.fn(),
@@ -62,6 +64,7 @@ function mount(overrides: Partial<Parameters<typeof SlideRail>[0]> = {}) {
     project: project(),
     activeSlideId: "slide-one",
     frameDrawingActive: false,
+    quickDrawEnabled: false,
     framesVisible: true,
     frameAspectRatio: "freeform",
     morphEnabled: false,
@@ -103,10 +106,12 @@ describe("SlideRail compact controls", () => {
 
     act(() => button(container, "Draw slide").click());
     expect(callbacks.onToggleFrameDrawing).toHaveBeenCalledOnce();
+    act(() => button(container, "Quick draw").click());
+    expect(callbacks.onToggleQuickDraw).toHaveBeenCalledOnce();
     expect(container.querySelector(".slide-settings-popover")).toBeTruthy();
   });
 
-  it("keeps reorder and delete actions available in the selected slide menu", () => {
+  it("keeps reorder, rotation, and delete actions available in the selected slide menu", () => {
     const { callbacks, container } = mount();
 
     act(() => button(container, "Slide 1 actions: Opening").click());
@@ -116,6 +121,15 @@ describe("SlideRail compact controls", () => {
       .find((candidate) => candidate.textContent?.includes("Move later"));
     act(() => moveLater?.click());
     expect(callbacks.onMoveSlide).toHaveBeenCalledWith("slide-one", "slide-two");
+
+    act(() => button(container, "Slide 1 actions: Opening").click());
+    const rotateSlide = [...container.querySelectorAll<HTMLButtonElement>('[role="menu"] button')]
+      .find((candidate) => candidate.textContent?.includes("Rotate slide"));
+    act(() => rotateSlide?.click());
+    expect(callbacks.onRotateSlide).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "slide-one" }),
+      button(container, "Slide 1 actions: Opening"),
+    );
 
     act(() => button(container, "Slide 1 actions: Opening").click());
     const deleteSlide = [...container.querySelectorAll<HTMLButtonElement>('[role="menu"] button')]

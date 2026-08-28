@@ -247,6 +247,19 @@ jobs:
             > artifacts/production/deploy-asset-headers.txt
           grep -qi 'Cache-Control: public, max-age=31536000, immutable' \
             artifacts/production/deploy-asset-headers.txt
+
+          pdf_worker_path=$(find dist/release/assets -maxdepth 1 -type f \
+            -name 'pdf.worker*.mjs' -print -quit | sed 's#^dist/release/##')
+          test -n "$pdf_worker_path"
+          "${client[@]}" -c \
+            "wget -S -O /dev/null --header='Host: draw.spatterson.ca' 'http://patterdraw:8080/$pdf_worker_path' 2>&1" \
+            > artifacts/production/deploy-pdf-worker-headers.txt
+          grep -q 'HTTP/1.1 200' artifacts/production/deploy-pdf-worker-headers.txt
+          assert_security_headers artifacts/production/deploy-pdf-worker-headers.txt
+          grep -Eqi 'Content-Type: (application|text)/javascript([;[:space:]]|$)' \
+            artifacts/production/deploy-pdf-worker-headers.txt
+          grep -qi 'Cache-Control: public, max-age=31536000, immutable' \
+            artifacts/production/deploy-pdf-worker-headers.txt
       - name: Start packaged release server
         if: ${{ always() && steps.production-package.outcome == 'success' }}
         run: |
