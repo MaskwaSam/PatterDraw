@@ -7844,6 +7844,7 @@ test("docks the drawing toolbar and resizes or hides the PDF page rail", async (
   expect((showPagesBox?.x || 0) + (showPagesBox?.width || 0)).toBeLessThan(previousPageBox?.x || 0);
   await showPages.click();
   await expect(rail).toBeVisible();
+  await expect(rail.locator('.pdf-page-open[aria-current="page"]')).toBeFocused();
   expect((await rail.boundingBox())?.width || 0).toBeCloseTo(resizedWidth, 0);
 });
 

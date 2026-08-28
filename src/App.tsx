@@ -12161,7 +12161,7 @@ export default function App() {
         if (scene) openScene(scene.id);
       }}
       isPdfRailVisible={isPdfRailVisible}
-      onShowPdfRail={() => setIsPdfRailVisible(true)}
+      onShowPdfRail={showPdfRail}
       activeSlideIndex={activeSlideIndex}
       slideCount={project.slideOrder.length}
       onOpenSlide={(index) => {

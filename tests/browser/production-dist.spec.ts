@@ -394,7 +394,14 @@ test("uses a Settings-only OBS crop guide around the mounted production editor",
   expect(page.context().pages()).toHaveLength(pageCount);
   await expect(editorHost).toHaveAttribute("data-production-obs-token", "live-editor");
   await expect(page.locator(".topbar")).toBeVisible();
-  await expect(page.locator(".statusbar")).toBeVisible();
+  const responsiveStatusbarIsHidden = await page.evaluate(() => window.matchMedia(
+    "(max-width: 640px), (max-width: 1000px) and (max-height: 500px)",
+  ).matches);
+  if (responsiveStatusbarIsHidden) {
+    await expect(page.locator(".statusbar")).toBeHidden();
+  } else {
+    await expect(page.locator(".statusbar")).toBeVisible();
+  }
   const drawingTools = page.getByRole("region", { name: "Shapes", exact: true });
   await expect(drawingTools).toBeVisible();
   const guide = page.getByRole("region", { name: "OBS 16:9 capture area", exact: true });
