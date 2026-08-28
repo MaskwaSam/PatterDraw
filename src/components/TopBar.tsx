@@ -1,12 +1,14 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   BoardIcon,
   ChevronDownIcon,
   EquationIcon,
   ExportIcon,
+  HideBottomBarIcon,
   HideTopBarIcon,
   LibraryIcon,
   MermaidIcon,
+  MoreIcon,
   OpenIcon,
   PdfIcon,
   SaveIcon,
@@ -27,6 +29,8 @@ import type {
 } from "../lib/pdf/pdf-preferences";
 
 interface TopBarProps {
+  placement?: "top" | "bottom";
+  statusControls?: ReactNode;
   title: string;
   status: "saved" | "saving" | "error";
   featurePreferences: FeaturePreferences;
@@ -58,6 +62,7 @@ interface TopBarProps {
   projectFindOpen: boolean;
   projectFindButtonRef: RefObject<HTMLButtonElement>;
   onProjectFindToggle: () => void;
+  onHideStatusControls?: () => void;
   onHide: () => void;
 }
 
@@ -115,7 +120,125 @@ function InsertMenu({
   );
 }
 
+function UtilityMenu({
+  featurePreferences,
+  libraryAvailable,
+  libraryOpen,
+  onLibraryToggle,
+  sizePositionOpen,
+  onSizePositionToggle,
+  projectFindOpen,
+  onProjectFindToggle,
+  onHideStatusControls,
+  onHide,
+}: Pick<TopBarProps,
+  | "featurePreferences"
+  | "libraryAvailable"
+  | "libraryOpen"
+  | "onLibraryToggle"
+  | "sizePositionOpen"
+  | "onSizePositionToggle"
+  | "projectFindOpen"
+  | "onProjectFindToggle"
+  | "onHideStatusControls"
+  | "onHide"
+>) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setOpen(false);
+      triggerRef.current?.focus();
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  const runAction = (action: () => void) => {
+    setOpen(false);
+    action();
+  };
+
+  const hasActivePanel = libraryOpen || sizePositionOpen || projectFindOpen;
+
+  return (
+    <div ref={menuRef} className={`topbar-menu topbar-utility-menu ${open ? "is-open" : ""}`}>
+      <button
+        ref={triggerRef}
+        className={`topbar-menu-trigger ${hasActivePanel ? "is-active" : ""}`}
+        type="button"
+        aria-label="More tools"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title="More tools"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <MoreIcon /><span className="icon-label">More</span>
+      </button>
+      {open ? (
+        <div className="topbar-menu-popover topbar-utility-popover" role="menu">
+          {featurePreferences.library ? (
+            <button
+              className={libraryOpen ? "is-active" : ""}
+              type="button"
+              role="menuitem"
+              aria-label="Library"
+              disabled={!libraryAvailable}
+              onClick={() => runAction(onLibraryToggle)}
+            >
+              <LibraryIcon /><span className="icon-label"><strong>Library</strong><small>Shapes and screenshots</small></span>
+            </button>
+          ) : null}
+          {featurePreferences.projectFind ? (
+            <button
+              className={projectFindOpen ? "is-active" : ""}
+              type="button"
+              role="menuitem"
+              aria-label="Find in project"
+              onClick={() => runAction(onProjectFindToggle)}
+            >
+              <SearchIcon /><span className="icon-label"><strong>Find in project</strong><small>Search every workspace</small></span>
+            </button>
+          ) : null}
+          {featurePreferences.sizePosition ? (
+            <button
+              className={sizePositionOpen ? "is-active" : ""}
+              type="button"
+              role="menuitem"
+              aria-label="Size & Position"
+              onClick={() => runAction(onSizePositionToggle)}
+            >
+              <SizePositionIcon /><span className="icon-label"><strong>Size &amp; Position</strong><small>Exact geometry</small></span>
+            </button>
+          ) : null}
+          {onHideStatusControls ? (
+            <button type="button" role="menuitem" aria-label="Hide status controls" onClick={() => runAction(onHideStatusControls)}>
+              <HideBottomBarIcon /><span className="icon-label"><strong>Hide status controls</strong><small>Page, zoom, history, and fullscreen</small></span>
+            </button>
+          ) : null}
+          <button type="button" role="menuitem" aria-label="Hide navigation" onClick={() => runAction(onHide)}>
+            <HideTopBarIcon /><span className="icon-label"><strong>Hide navigation</strong><small>Keep only the canvas</small></span>
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function TopBar({
+  placement = "top",
+  statusControls,
   title,
   status,
   featurePreferences,
@@ -147,10 +270,12 @@ export function TopBar({
   projectFindOpen,
   projectFindButtonRef,
   onProjectFindToggle,
+  onHideStatusControls,
   onHide,
 }: TopBarProps) {
-  return (
-    <header className="topbar">
+  const isBottomPlacement = placement === "bottom";
+  const content = (
+    <>
       <div className="topbar-document">
         <SettingsMenu
           preferences={featurePreferences}
@@ -235,7 +360,7 @@ export function TopBar({
             <ChevronDownIcon />
           </button>
         </div>
-        {featurePreferences.library ? (
+        {!isBottomPlacement && featurePreferences.library ? (
           <button
             className={`sidebar-trigger topbar-library ${libraryOpen ? "is-active" : ""}`}
             type="button"
@@ -248,7 +373,7 @@ export function TopBar({
             <LibraryIcon />
           </button>
         ) : null}
-        {featurePreferences.projectFind ? (
+        {!isBottomPlacement && featurePreferences.projectFind ? (
           <button
             ref={projectFindButtonRef}
             className={`topbar-tool ${projectFindOpen ? "is-active" : ""}`}
@@ -261,7 +386,7 @@ export function TopBar({
             <SearchIcon />
           </button>
         ) : null}
-        {featurePreferences.sizePosition ? (
+        {!isBottomPlacement && featurePreferences.sizePosition ? (
           <button
             className={`topbar-tool ${sizePositionOpen ? "is-active" : ""}`}
             type="button"
@@ -273,16 +398,41 @@ export function TopBar({
             <SizePositionIcon />
           </button>
         ) : null}
-        <button
-          className="topbar-hide"
-          type="button"
-          aria-label="Hide navigation"
-          title="Hide navigation (Ctrl/⌘ + Shift + H)"
-          onClick={onHide}
-        >
-          <HideTopBarIcon />
-        </button>
+        {isBottomPlacement ? (
+          <UtilityMenu
+            featurePreferences={featurePreferences}
+            libraryAvailable={libraryAvailable}
+            libraryOpen={libraryOpen}
+            onLibraryToggle={onLibraryToggle}
+            sizePositionOpen={sizePositionOpen}
+            onSizePositionToggle={onSizePositionToggle}
+            projectFindOpen={projectFindOpen}
+            onProjectFindToggle={onProjectFindToggle}
+            onHideStatusControls={onHideStatusControls}
+            onHide={onHide}
+          />
+        ) : (
+          <button
+            className="topbar-hide"
+            type="button"
+            aria-label="Hide navigation"
+            title="Hide navigation (Ctrl/⌘ + Shift + H)"
+            onClick={onHide}
+          >
+            <HideTopBarIcon />
+          </button>
+        )}
       </nav>
+      {statusControls}
+    </>
+  );
+
+  return (
+    <header
+      className={`topbar ${isBottomPlacement ? "bottom-interface-bar" : ""}`}
+      aria-label={isBottomPlacement ? "Bottom interface" : undefined}
+    >
+      {content}
     </header>
   );
 }

@@ -116,7 +116,9 @@ export function installSafeClipboardReadGuard(): SafeClipboardReadGuard {
       const blockedTypes = new Set<string>();
       const withoutBlockedTypes = (): ClipboardItem => ({
         types: item.types.filter((type) => !blockedTypes.has(type)),
-        getType: (type: string) => item.getType(type),
+        getType: (type: string) => blockedTypes.has(type)
+          ? Promise.reject(new DOMException("Clipboard type is blocked by the offline content policy.", "NotAllowedError"))
+          : item.getType(type),
         presentationStyle: item.presentationStyle,
       }) as ClipboardItem;
 

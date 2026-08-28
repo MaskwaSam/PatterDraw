@@ -61,31 +61,52 @@ class SemanticArchiveWorker {
 
 describe("project archive worker cancellation", () => {
   afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
     PendingArchiveWorker.instances.length = 0;
     ErrorArchiveWorker.instances.length = 0;
     SemanticArchiveWorker.instances.length = 0;
     vi.unstubAllGlobals();
   });
 
-  it("falls back to synchronous archive creation when the module worker cannot start", async () => {
+  it("fails closed when the module worker cannot start in a browser", async () => {
+    vi.stubEnv("MODE", "production");
+    vi.stubGlobal("Worker", StartupFailureArchiveWorker);
+    const { extractProjectArchive } = await import("./project-archive-client");
+    const archive = zipSync({ "project.json": new TextEncoder().encode("{}") });
+
+    await expect(extractProjectArchive(archive, 1_024))
+      .rejects.toThrow("Failed to construct module worker (CSP).");
+  });
+
+  it("fails closed when archive creation cannot start its production worker", async () => {
+    vi.stubEnv("MODE", "production");
     vi.stubGlobal("Worker", StartupFailureArchiveWorker);
     const { createProjectArchive } = await import("./project-archive-client");
 
-    const archive = await createProjectArchive({
+    await expect(createProjectArchive({
       "project.json": new TextEncoder().encode("{}"),
-    }, 1_024);
-
-    expect(archive).toBeInstanceOf(Uint8Array);
-    expect(archive.byteLength).toBeGreaterThan(0);
+    }, 1_024)).rejects.toThrow("Failed to construct module worker (CSP).");
   });
 
-  it("falls back once to synchronous extraction after a worker transport error", async () => {
+  it("fails closed when the browser has no Worker API in production", async () => {
+    vi.stubEnv("MODE", "production");
+    vi.stubGlobal("Worker", undefined);
+    const { extractProjectArchive } = await import("./project-archive-client");
+    const archive = zipSync({ "project.json": new TextEncoder().encode("{}") });
+
+    await expect(extractProjectArchive(archive, 1_024))
+      .rejects.toThrow("Project archive worker is unavailable.");
+  });
+
+  it("fails closed after a worker transport error instead of parsing on the UI thread", async () => {
+    vi.stubEnv("MODE", "production");
     vi.stubGlobal("Worker", ErrorArchiveWorker);
     const { extractProjectArchive } = await import("./project-archive-client");
     const archive = zipSync({ "project.json": new TextEncoder().encode("{}") });
 
-    const entries = await extractProjectArchive(archive, 1_024);
-    expect(Array.from(entries["project.json"] ?? [])).toEqual([123, 125]);
+    await expect(extractProjectArchive(archive, 1_024))
+      .rejects.toThrow("404 loading worker module");
     expect(ErrorArchiveWorker.instances).toHaveLength(1);
     expect(ErrorArchiveWorker.instances[0].postMessage).toHaveBeenCalledOnce();
     expect(ErrorArchiveWorker.instances[0].terminate).toHaveBeenCalledOnce();
@@ -114,6 +135,22 @@ describe("project archive worker cancellation", () => {
     controller.abort();
 
     await expect(extraction).rejects.toMatchObject({ name: "AbortError" });
+    expect(PendingArchiveWorker.instances).toHaveLength(1);
+    expect(PendingArchiveWorker.instances[0].postMessage).toHaveBeenCalledOnce();
+    expect(PendingArchiveWorker.instances[0].terminate).toHaveBeenCalledOnce();
+  });
+
+  it("terminates and rejects a worker that exceeds the archive timeout", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("MODE", "production");
+    vi.stubGlobal("Worker", PendingArchiveWorker);
+    const { extractProjectArchive, PROJECT_ARCHIVE_WORKER_TIMEOUT_MS } = await import("./project-archive-client");
+
+    const extraction = extractProjectArchive(new Uint8Array([1, 2, 3, 4]), 1_024);
+    const rejection = expect(extraction).rejects.toThrow("Project archive worker timed out.");
+    await vi.advanceTimersByTimeAsync(PROJECT_ARCHIVE_WORKER_TIMEOUT_MS);
+
+    await rejection;
     expect(PendingArchiveWorker.instances).toHaveLength(1);
     expect(PendingArchiveWorker.instances[0].postMessage).toHaveBeenCalledOnce();
     expect(PendingArchiveWorker.instances[0].terminate).toHaveBeenCalledOnce();

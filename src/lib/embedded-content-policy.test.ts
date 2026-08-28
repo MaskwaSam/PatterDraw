@@ -129,6 +129,7 @@ describe("embedded content policy", () => {
       const [item] = await navigator.clipboard.read();
       expect(item.types).toEqual(["text/plain"]);
       expect(await (await item.getType("text/plain")).text()).toBe("Safe fallback text");
+      await expect(item.getType("text/html")).rejects.toThrow(/offline content policy/i);
       guard.restore();
     } finally {
       if (descriptor) Object.defineProperty(navigator, "clipboard", descriptor);

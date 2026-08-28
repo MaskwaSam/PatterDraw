@@ -78,6 +78,8 @@ export interface ClassroomProject {
   slideFramesVisible?: boolean;
   /** Shape used for newly drawn slide frames. Optional only for legacy v1 project files. */
   slideFrameAspectRatio?: SlideFrameAspectRatio;
+  /** Keep frame drawing armed after each new slide. Optional only for legacy v1 project files. */
+  slideQuickDrawEnabled?: boolean;
   /** @deprecated Legacy preference migrated to slideFrameAspectRatio when loading. */
   slideWidescreenFrames?: boolean;
   /** Smooth presentation navigation preference. Optional only for legacy v1 project files. */
@@ -132,6 +134,7 @@ export function createBlankProject(now = new Date()): ClassroomProject {
     slideOrder: [],
     slideFramesVisible: true,
     slideFrameAspectRatio: "freeform",
+    slideQuickDrawEnabled: false,
     slideMorphEnabled: false,
     slideMorphDurationMs: DEFAULT_SLIDE_MORPH_DURATION_MS,
     pdfPageOrder: [],

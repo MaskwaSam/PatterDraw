@@ -122,6 +122,9 @@ export const PresentIcon = (props: IconProps) => (
 export const MorphIcon = (props: IconProps) => (
   <IconBase {...props}><rect x="3.5" y="5" width="8" height="8" rx="1.5"/><rect x="12.5" y="11" width="8" height="8" rx="1.5"/><path d="m10 16 2 2 2-2M14 8l-2-2-2 2"/></IconBase>
 );
+export const RotateIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="M19 8V3m0 0h-5m5 0-3.1 3.1A8 8 0 1 0 20 13"/></IconBase>
+);
 export const EnterFullscreenIcon = (props: IconProps) => (
   <IconBase {...props}><path d="M9 4H4v5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></IconBase>
 );

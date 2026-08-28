@@ -301,6 +301,12 @@ export function SettingsMenu({
           <div className="settings-group" role="group" aria-labelledby="display-settings-label">
             <h3 id="display-settings-label">Display</h3>
             <SettingsToggle
+              checked={preferences.bottomInterface}
+              description="Put project, workspace, and canvas controls along the bottom edge"
+              label="Bottom interface"
+              onChange={(enabled) => onPreferenceChange("bottomInterface", enabled)}
+            />
+            <SettingsToggle
               checked={preferences.footer}
               description="Page, zoom, history, and fullscreen controls"
               label="Status bar"

@@ -74,6 +74,7 @@ describe("PDF import PDF.js safety options", () => {
     page.cleanup.mockClear();
     page.render.mockClear();
     documentProxy.getPage.mockClear();
+    documentProxy.numPages = 1;
     loadingTask.destroy.mockClear();
   });
 

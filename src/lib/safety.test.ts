@@ -281,6 +281,17 @@ describe("student safety", () => {
       .toThrow(/widescreen frame preference must be a boolean/);
   });
 
+  it("normalizes and validates the Quick draw slide preference", () => {
+    const project = createBlankProject();
+    delete project.slideQuickDrawEnabled;
+    expect(sanitizeProject(project).slideQuickDrawEnabled).toBe(false);
+    expect(sanitizeProject({ ...project, slideQuickDrawEnabled: true }).slideQuickDrawEnabled).toBe(true);
+    expect(() => assertSafeProject({
+      ...project,
+      slideQuickDrawEnabled: "yes",
+    } as unknown as ClassroomProject)).toThrow(/Quick draw preference must be a boolean/);
+  });
+
   it("migrates legacy slideOrder frames to tagged detached slides without changing schema or geometry", () => {
     const project = createBlankProject();
     const sceneId = project.activeSceneId;

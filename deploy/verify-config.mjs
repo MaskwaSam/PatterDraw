@@ -47,7 +47,6 @@ if (dockerignore !== expectedDockerignore) {
     "The repository root .dockerignore must exactly restrict the Docker context to deploy/ and dist/release/.",
   );
 }
-
 rejectMatch(compose, /^\s*ports\s*:/m, "PatterDraw must not publish a host port.");
 requireMatch(compose, /^\s*read_only:\s*true\s*$/m, "Compose must use a read-only root filesystem.");
 requireMatch(compose, /^\s*user:\s*["']101:101["']\s*$/m, "Compose must run NGINX as uid/gid 101.");
@@ -166,7 +165,7 @@ if (
 requireMatch(nginx, /return 444;/, "NGINX must reject unknown Host headers.");
 requireMatch(
   nginx,
-  /include \/etc\/nginx\/mime\.types;\s*types\s*\{\s*application\/javascript\s+mjs;\s*\}\s*default_type application\/octet-stream;/,
+  /include \/etc\/nginx\/mime\.types;\s*(?:#[^\n]*\n\s*)*types\s*\{\s*application\/javascript\s+mjs;\s*\}\s*default_type application\/octet-stream;/,
   "NGINX must explicitly serve .mjs files as application/javascript.",
 );
 for (const [routeName, routePattern] of [
@@ -228,7 +227,6 @@ requireMatch(
   /location \^~ \/geogon\/ \{[\s\S]*?error_page 404 = @asset_not_found;[\s\S]*?try_files \$uri =404;/,
   "GeoGon static resources must fail closed through the non-cacheable missing-asset policy.",
 );
-
 for (const requiredHeader of [
   "Content-Security-Policy",
   "Permissions-Policy",

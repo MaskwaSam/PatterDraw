@@ -232,6 +232,13 @@ describe("classroom project files", () => {
     expect(decoded.project.slideFrameAspectRatio).toBe("4:3");
   });
 
+  it("round-trips the Quick draw slide preference", async () => {
+    const project = createBlankProject();
+    project.slideQuickDrawEnabled = true;
+    const decoded = await decodeProjectFile(await encodeProjectFile(project, {}));
+    expect(decoded.project.slideQuickDrawEnabled).toBe(true);
+  });
+
   it("migrates the legacy widescreen slide-frame preference", async () => {
     const project = createBlankProject();
     delete project.slideFrameAspectRatio;

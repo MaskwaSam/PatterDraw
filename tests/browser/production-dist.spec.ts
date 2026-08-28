@@ -351,6 +351,7 @@ test("opens Slides and adds a slide without remounting the production editor", a
 
   await page.goto(productionRoute, { waitUntil: "domcontentloaded" });
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
+  await expect(page.getByRole("checkbox", { name: "Pen mode - prevent touch", exact: true })).toBeHidden();
   const editorToken = await page.locator(".editor-host").evaluate((element) => {
     const token = "production-editor-root";
     element.setAttribute("data-production-editor-token", token);
@@ -434,7 +435,8 @@ test("imports a PDF through the local worker, draws an annotation, and exports i
   await page.goto(productionRoute, { waitUntil: "domcontentloaded" });
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
   const workerResponse = page.waitForResponse(
-    (response) => /\/assets\/pdf\.worker(?:\.min)?[-A-Za-z0-9_]*\.(?:mjs|js)$/.test(new URL(response.url()).pathname),
+    (response) => /\/assets\/pdf\.worker(?:\.min)?[-A-Za-z0-9_]*\.(?:mjs|js)(?:\?.*)?$/.test(new URL(response.url()).pathname)
+      && response.status() === 200,
     { timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT },
   );
   await page.getByLabel("Open project file").setInputFiles({

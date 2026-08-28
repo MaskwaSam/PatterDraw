@@ -20,6 +20,7 @@ This repository is intentionally independent from PolyPad. Nothing here patches 
 - A device-wide, locally persisted Excalidraw library supports adding and reusing canvas objects plus importing and exporting standard `.excalidrawlib` files without enabling public-library browsing or publishing.
 - A separate device-wide **Screenshot Library** captures exact canvas regions, copies PNGs when browser clipboard access permits, and keeps the newest 50 captures available for click or drag insertion without adding them to project files.
 - **Canvas capture for OBS** adds a clean crop target to the current live canvas without a popup or synchronized renderer. Board and Slides can use either a 16:9 guide or all visible canvas, PDF uses the full canvas viewport, and fullscreen removes the surrounding PatterDraw chrome.
+- An optional, device-local **Settings → Display → Bottom interface** moves project, workspace, file, zoom, history, and fullscreen controls to a responsive bottom dock. The native drawing palette sits just above it, and toggling the preference never replaces the live canvas.
 - Tagged, detached slide windows with explicit ordering, one-shot freeform/16:9/4:3 drawing, native grouping, optional Morph transitions, fullscreen presentation, keyboard navigation, transient laser, and persistent live ink. Ordinary Excalidraw frames remain available for content ownership.
 - One-workspace-per-page PDF import using a bundled PDF.js worker.
 - Toggleable **PDF** mode with real local page thumbnails, drag reordering, accessible move-up/down controls, mixed-document ordering, and Previous/Next navigation that follows the chosen output order.
@@ -89,21 +90,25 @@ npm run release:package
 npm run release:verify
 ```
 
-`npm run release:package` independently verifies the pinned GeoGon source,
-then empties and rebuilds `dist/` before recording source provenance, so a stale
-ignored bundle cannot be attributed to the current commit. Final packaging
-requires a clean git worktree. The release directory remains a complete
-deployable static root and includes `release-manifest.json`, `provenance.json`,
-a CycloneDX `sbom.cdx.json`, and `SHA256SUMS`. The SBOM identifies GeoGon
-0.2.10 and its bundled Three.js 0.185.1 runtime with their licenses, exact
-source provenance, deterministic inventory hashes, and their formal dependency
-relationship. Release verification
-checks those pinned hashes directly against the packaged files and does not
-trust a mutable `public/geogon/` checkout. Payload paths and metadata are sorted
-and timestamped from `SOURCE_DATE_EPOCH` or the HEAD commit time; the checksum
-file covers every payload and metadata file except itself. The manifest records
-`releaseMode: "final"` or `"development"` and source maps are rejected because
-they are diagnostic-only artifacts.
+`npm run release:package` builds an immutable archive of the clean `HEAD`
+commit after installing its lockfile-pinned dependencies inside that snapshot.
+It verifies a complete candidate beside `dist/`, then swaps it into place while
+retaining the previous tree until the handoff succeeds. This prevents stale,
+concurrently edited source, or live dependency bytes from being attributed to
+the commit. The immutable build independently verifies the pinned GeoGon source,
+and release packaging and verification share an exclusive local lock so
+concurrent commands cannot race the handoff. Final packaging requires a clean
+git worktree. The release directory remains a complete deployable static root
+and includes `release-manifest.json`, `provenance.json`, a CycloneDX
+`sbom.cdx.json`, and `SHA256SUMS`. The SBOM identifies GeoGon 0.2.10 and its
+bundled Three.js 0.185.1 runtime with their licenses, exact source provenance,
+deterministic inventory hashes, and their formal dependency relationship.
+Release verification checks those pinned hashes directly against the packaged
+files and does not trust a mutable `public/geogon/` checkout. Payload paths
+and metadata are sorted and timestamped from `SOURCE_DATE_EPOCH` or the HEAD
+commit time; the checksum file covers every payload and metadata file except
+itself. The manifest records `releaseMode: "final"` or `"development"` and
+source maps are rejected because they are diagnostic-only artifacts.
 
 For a local development check while source changes are uncommitted, make the
 dirty state explicit in the recorded provenance:

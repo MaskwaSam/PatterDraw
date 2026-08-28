@@ -487,7 +487,7 @@ button { color: inherit; }
 .slide-settings-toggle svg { width: 16px; height: 16px; flex: 0 0 auto; }
 .slide-settings-toggle span { min-width: 0; flex: 1 1 auto; }
 .slide-settings-toggle strong { color: #6b7689; font-size: 9px; text-transform: uppercase; }
-.toggle-morph-button.is-active { border-color: #91aff3; color: #204aa5; background: var(--accent-soft); }
+:is(.toggle-morph-button, .toggle-quick-draw-button).is-active { border-color: #91aff3; color: #204aa5; background: var(--accent-soft); }
 .morph-duration-control {
   min-width: 0;
   display: grid;
@@ -1073,6 +1073,7 @@ button { color: inherit; }
   border: 0;
 }
 .editor-host .excalidraw [data-testid="main-menu-trigger"] { display: none !important; }
+.editor-host .excalidraw .ToolIcon__penMode,
 .editor-host .excalidraw button[data-testid="toolbar-embeddable"],
 .editor-host .excalidraw button[title^="Link"],
 .editor-host .excalidraw .excalidraw-hyperlinkContainer,
@@ -2157,6 +2158,61 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
   background: #fff;
   box-shadow: 0 18px 60px rgb(15 23 42 / 25%);
 }
+.slide-rotation-dialog {
+  width: min(520px, 100%);
+  max-height: calc(100dvh - 40px);
+  overflow: auto;
+  padding: 22px;
+  border: 1px solid #cfd5df;
+  border-radius: 11px;
+  background: #fff;
+  box-shadow: 0 18px 60px rgb(15 23 42 / 25%);
+}
+.slide-rotation-intro { margin: -4px 0 16px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.slide-rotation-direction { min-width: 0; margin: 0 0 14px; padding: 0; border: 0; }
+.slide-rotation-direction legend,
+.slide-rotation-angle > span:first-child { margin-bottom: 7px; color: #34405a; font-size: 12px; font-weight: 720; }
+.slide-rotation-direction-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.slide-rotation-direction-options button {
+  min-height: 42px;
+  padding: 8px 12px;
+  border: 1px solid #cbd3df;
+  border-radius: 8px;
+  background: #fff;
+  color: #34405a;
+  font-weight: 680;
+  cursor: pointer;
+}
+.slide-rotation-direction-options button:hover { border-color: #8ba7e3; background: #f4f7ff; }
+.slide-rotation-direction-options button.is-active { border-color: #2859c5; background: var(--accent-soft); color: #204aa5; box-shadow: 0 0 0 1px #2859c5; }
+.slide-rotation-angle { display: grid; }
+.slide-rotation-input-wrap { position: relative; display: block; }
+.slide-rotation-input-wrap input {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 38px 8px 12px;
+  border: 1px solid #bfc7d4;
+  border-radius: 8px;
+  outline: none;
+  background: #fbfcfe;
+  color: #172033;
+  font: 680 17px/1.2 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+.slide-rotation-input-wrap input:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px #dbe7ff; }
+.slide-rotation-input-wrap > span { position: absolute; top: 50%; right: 13px; transform: translateY(-50%); color: var(--muted); font-size: 17px; pointer-events: none; }
+.slide-rotation-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.slide-rotation-presets button {
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid #d1d7e1;
+  border-radius: 7px;
+  background: #fff;
+  color: #34405a;
+  font-weight: 650;
+  cursor: pointer;
+}
+.slide-rotation-presets button:hover { border-color: #93abe1; background: #f3f7ff; }
+.slide-rotation-help { margin: 14px 0 0; padding: 11px 12px; border-radius: 8px; background: #f3f6fa; color: #566176; font-size: 11px; line-height: 1.5; }
 .dialog-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 17px; }
 .dialog-heading h2 { margin: 2px 0 0; font-size: 21px; letter-spacing: -.02em; }
 .dialog-kicker { color: var(--muted); font-size: 10px; font-weight: 750; text-transform: uppercase; letter-spacing: .08em; }
@@ -2498,6 +2554,7 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
   .new-slide-button,
   .draw-frame-button,
   .toggle-frames-button,
+  .toggle-quick-draw-button,
   .toggle-morph-button,
   .pdf-add-page,
   .present-button,
@@ -2587,6 +2644,7 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
   .math-tools-dialog,
   .geogon-dialog,
   .equation-dialog,
+  .slide-rotation-dialog,
   .mermaid-dialog,
   .math-interaction-panel,
   .screenshot-library,
@@ -2608,6 +2666,8 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
   .slide-number,
   .slide-settings-heading strong,
   .slide-settings-label,
+  .slide-rotation-direction legend,
+  .slide-rotation-angle > span:first-child,
   .rail-empty strong,
   .pdf-page-label strong,
   .pdf-clear-annotation-scopes legend,
@@ -2656,6 +2716,7 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
   .math-tool-categories,
   .math-interaction-options,
   .equation-source,
+  .slide-rotation-help,
   .mermaid-source-panel,
   .screenshot-card-dimensions
 ) { border-color: var(--border); background: #111a28; }
@@ -2673,6 +2734,7 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
   .workspace-toggle.is-active,
   .slide-aspect-segments button.is-active,
   .slide-frame-aspect-buttons button.is-active,
+  .slide-rotation-direction-options button.is-active,
   .math-tool-categories button[aria-selected="true"]
 ) { color: #a9c2ff; background: #263248; box-shadow: none; }
 .app-shell[data-theme="dark"] :is(
@@ -2691,6 +2753,8 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
   .pdf-insert-placement label,
   .toggle-morph-button,
   .slide-frame-aspect-buttons button,
+  .slide-rotation-direction-options button,
+  .slide-rotation-presets button,
   .rail-empty button,
   .rail-mode-switch,
   .present-button,
@@ -2701,6 +2765,8 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
   .math-tool-config select,
   .math-interaction-actions button,
   .equation-symbols button,
+  .slide-rotation-direction-options button,
+  .slide-rotation-presets button,
   .screenshot-card-actions button
 ) {
   border-color: #45536b;
@@ -2714,6 +2780,8 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
   .slide-settings-toggle:hover,
   .slide-aspect-segments button:hover,
   .slide-frame-aspect-buttons button:hover,
+  .slide-rotation-direction-options button:hover,
+  .slide-rotation-presets button:hover,
   .export-dialog > button:not(.dialog-cancel):hover:not(:disabled),
   .dialog-cancel:hover,
   .equation-symbols button:hover,
@@ -2721,6 +2789,7 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
 ) { border-color: #617391; background: #2a3850; }
 .app-shell[data-theme="dark"] :is(
   .equation-dialog textarea,
+  .slide-rotation-input-wrap input,
   .mermaid-source-panel textarea,
   .pdf-insert-range input
 ) {
@@ -2731,6 +2800,7 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
 }
 .app-shell[data-theme="dark"] :is(
   .equation-dialog textarea:focus,
+  .slide-rotation-input-wrap input:focus,
   .mermaid-source-panel textarea:focus,
   .pdf-insert-range input:focus
 ) {
@@ -2849,7 +2919,7 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
   .morph-duration-control,
   .morph-duration-control output
 ) { color: #b9c5d7; }
-.app-shell[data-theme="dark"] .toggle-morph-button.is-active {
+.app-shell[data-theme="dark"] :is(.toggle-morph-button, .toggle-quick-draw-button).is-active {
   border-color: #7196eb;
   background: #29446f;
   color: #c7d6ff;
@@ -3316,6 +3386,7 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
   .pdf-insert-actions > span { grid-column: 1 / -1; }
   .pdf-insert-actions :is(.dialog-cancel, .dialog-primary) { min-height: 44px; width: 100%; }
   .equation-dialog { padding: 16px; }
+  .slide-rotation-dialog { max-height: calc(100dvh - 20px); padding: 16px; }
   .math-tools-dialog { max-height: calc(100dvh - 20px); padding: 16px; }
   .geogon-backdrop {
     padding: calc(8px + var(--safe-area-top)) calc(8px + var(--safe-area-right)) calc(8px + var(--safe-area-bottom)) calc(8px + var(--safe-area-left));
@@ -3350,6 +3421,11 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
   .screenshot-card-thumbnail img { height: 120px; }
   .screenshot-capture-instructions { top: 10px; left: 10px; transform: none; padding-inline: 10px; }
   .screenshot-capture-cancel { top: 10px; right: 10px; }
+}
+
+@media (max-width: 420px) {
+  .statusbar-actions { gap: 2px; }
+  .statusbar-actions button { width: 30px; }
 }
 
 /* Across current iPhone widths, keep all file actions visible while sharing
@@ -3439,6 +3515,272 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
   .footer-zoom-controls,
   .footer-history-button,
   .fullscreen-button { display: none; }
+}
+
+/* Optional OpenBoard-inspired bottom interface. The wrapper chrome changes
+   grid position, while the one live Excalidraw editor remains mounted. */
+.app-shell.is-bottom-interface {
+  --bottom-interface-height: 70px;
+  grid-template-rows: minmax(0, 1fr) var(--bottom-interface-height);
+}
+.app-shell.is-bottom-interface.is-nav-hidden {
+  grid-template-rows: minmax(0, 1fr) 0;
+}
+.app-shell.is-bottom-interface .bottom-interface-bar {
+  grid-row: 2;
+  grid-template-columns: minmax(190px, 1fr) auto auto auto;
+  gap: 10px;
+  padding: 0 12px;
+  border-top: 1px solid var(--border);
+  border-bottom: 0;
+  box-shadow: 0 -5px 18px rgb(15 23 42 / 5%);
+}
+.app-shell.is-bottom-interface :is(.slide-rail, .pdf-page-rail) { grid-row: 1; }
+.app-shell.is-bottom-interface .editor-region {
+  grid-row: 1;
+  grid-template-rows: minmax(0, 1fr);
+}
+.app-shell.is-bottom-interface .editor-host .excalidraw .App-bottom-bar > .Island {
+  display: none;
+}
+.app-shell.is-bottom-interface .bottom-interface-bar :is(
+  .settings-trigger,
+  .workspace-toggle,
+  .file-actions > .topbar-action,
+  .topbar-menu > .topbar-menu-trigger,
+  .export-split > button,
+  .footer-zoom-controls button,
+  .footer-history-button,
+  .pdf-toolbar-toggle,
+  .present-button,
+  .fullscreen-button
+) { min-height: 40px; }
+.app-shell.is-bottom-interface .bottom-interface-bar .settings-trigger { width: 40px; height: 40px; }
+.app-shell.is-bottom-interface .bottom-interface-bar .brand-mark { width: 40px; height: 40px; border-radius: 10px; }
+.app-shell.is-bottom-interface .bottom-interface-bar .document-title { height: 29px; }
+.app-shell.is-bottom-interface .bottom-interface-bar .workspace-tabs { padding: 4px; border-radius: 10px; }
+.app-shell.is-bottom-interface .bottom-interface-bar .workspace-toggle { min-height: 38px; }
+.app-shell.is-bottom-interface .bottom-interface-bar .file-actions { gap: 2px; }
+.app-shell.is-bottom-interface .bottom-interface-bar .file-actions .topbar-library,
+.app-shell.is-bottom-interface .bottom-interface-bar .file-actions .topbar-tool,
+.app-shell.is-bottom-interface .bottom-interface-bar .file-actions .topbar-hide { width: 40px; }
+.app-shell.is-bottom-interface .bottom-interface-bar .topbar-menu-trigger.is-active {
+  border-color: #91aff3;
+  color: #204aa5;
+  background: var(--accent-soft);
+}
+.app-shell.is-bottom-interface .settings-popover,
+.app-shell.is-bottom-interface .topbar-menu-popover {
+  top: auto;
+  bottom: calc(100% + 16px);
+  max-height: calc(100dvh - var(--bottom-interface-height) - 18px);
+}
+.app-shell.is-bottom-interface .topbar-utility-popover { width: 238px; }
+.app-shell.is-bottom-interface .topbar-utility-popover button.is-active {
+  border-color: #91aff3;
+  color: #204aa5;
+  background: var(--accent-soft);
+}
+.app-shell.is-bottom-interface .bottom-interface-status {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  color: #465066;
+  font-size: 12px;
+}
+.app-shell.is-bottom-interface .bottom-interface-status .page-status { min-width: 0; }
+.app-shell.is-bottom-interface .bottom-interface-status .page-status > span {
+  max-width: 126px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.app-shell.is-bottom-interface .bottom-interface-status .footer-zoom-controls { flex: 0 0 auto; }
+.app-shell.is-bottom-interface .bottom-interface-status .statusbar-actions { flex: 0 0 auto; }
+.app-shell.is-bottom-interface .editor-host .excalidraw:not(.excalidraw--mobile) .shapes-section {
+  position: absolute;
+  z-index: calc(var(--zIndex-layerUI) + 1);
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+@media (min-width: 641px) {
+  .app-shell.is-bottom-interface .editor-host .excalidraw .App-top-bar > section {
+    position: absolute;
+    bottom: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+  }
+}
+.app-shell.is-bottom-interface .editor-host .excalidraw:not(.excalidraw--mobile) .App-toolbar__extra-tools-dropdown {
+  top: auto;
+  bottom: 100%;
+  margin-top: 0;
+  margin-bottom: .375rem;
+}
+.app-shell.is-bottom-interface .topbar-show {
+  top: auto;
+  bottom: 0;
+  border-top: 1px solid #b9c4d3;
+  border-bottom: 0;
+  border-radius: 9px 9px 0 0;
+  box-shadow: 0 -4px 14px rgb(15 23 42 / 14%);
+}
+.app-shell.is-bottom-interface .footer-show { bottom: var(--bottom-interface-height); }
+.app-shell.is-bottom-interface.is-nav-hidden .footer-show { right: 60px; bottom: 0; }
+.app-shell.is-bottom-interface .autosave-recovery-banner { top: 12px; }
+.app-shell.is-bottom-interface .error-toast { bottom: calc(var(--bottom-interface-height) + 12px); }
+.app-shell.is-bottom-interface.is-nav-hidden .error-toast { bottom: 18px; }
+.app-shell.is-bottom-interface .obs-capture-guide { inset: 10px 10px 84px; }
+.app-shell.is-bottom-interface .obs-capture-guide[data-layout="viewport"] { inset: 4px; }
+
+.app-shell[data-theme="dark"].is-bottom-interface .bottom-interface-status { color: #d2dced; }
+.app-shell[data-theme="dark"].is-bottom-interface .bottom-interface-status :is(
+  .footer-zoom-controls button,
+  .footer-history-button,
+  .pdf-toolbar-toggle,
+  .present-button,
+  .fullscreen-button,
+  .page-status button
+):hover:not(:disabled) {
+  border-color: #45536b;
+  background: #263248;
+}
+.app-shell[data-theme="dark"].is-bottom-interface .topbar-utility-popover button.is-active {
+  border-color: #7196eb;
+  color: #c7d6ff;
+  background: #29446f;
+}
+
+@media (max-width: 1360px) {
+  .app-shell.is-bottom-interface { --bottom-interface-height: 100px; }
+  .app-shell.is-bottom-interface .bottom-interface-bar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: 50px 50px;
+    gap: 0 10px;
+    align-content: start;
+  }
+  .app-shell.is-bottom-interface .bottom-interface-bar .topbar-document { grid-column: 1; grid-row: 1; }
+  .app-shell.is-bottom-interface .bottom-interface-bar .file-actions { grid-column: 2; grid-row: 1; }
+  .app-shell.is-bottom-interface .bottom-interface-bar .workspace-tabs {
+    grid-column: 1;
+    grid-row: 2;
+    justify-self: start;
+  }
+  .app-shell.is-bottom-interface .bottom-interface-bar .bottom-interface-status {
+    grid-column: 2;
+    grid-row: 2;
+  }
+}
+
+@media (max-width: 860px) {
+  .app-shell.is-bottom-interface .bottom-interface-bar .file-actions > .topbar-action,
+  .app-shell.is-bottom-interface .bottom-interface-bar .topbar-menu > .topbar-menu-trigger,
+  .app-shell.is-bottom-interface .bottom-interface-bar .export-split > button:first-child {
+    width: 40px;
+    justify-content: center;
+    padding: 0;
+  }
+  .app-shell.is-bottom-interface .bottom-interface-bar .file-actions > .topbar-action > span,
+  .app-shell.is-bottom-interface .bottom-interface-bar .topbar-menu > .topbar-menu-trigger > span,
+  .app-shell.is-bottom-interface .bottom-interface-bar .topbar-menu > .topbar-menu-trigger > .menu-chevron,
+  .app-shell.is-bottom-interface .bottom-interface-bar .export-split > button:first-child > span {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .app-shell.is-bottom-interface,
+  .app-shell.is-bottom-interface.is-slide-mode,
+  .app-shell.is-bottom-interface.is-pdf-mode {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) var(--bottom-interface-height);
+  }
+  .app-shell.is-bottom-interface.is-nav-hidden,
+  .app-shell.is-bottom-interface.is-nav-hidden.is-slide-mode,
+  .app-shell.is-bottom-interface.is-nav-hidden.is-pdf-mode {
+    grid-template-rows: minmax(0, 1fr) 0;
+  }
+  .app-shell.is-bottom-interface .bottom-interface-bar {
+    grid-column: 1;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: 50px 50px;
+    padding: 0 8px;
+  }
+  .app-shell.is-bottom-interface :is(.slide-rail, .pdf-page-rail) {
+    top: 0;
+    bottom: var(--bottom-interface-height);
+  }
+  .app-shell.is-bottom-interface .slide-rail-backdrop {
+    top: 0;
+    bottom: var(--bottom-interface-height);
+  }
+  .app-shell.is-bottom-interface .editor-region,
+  .app-shell.is-bottom-interface.is-slide-mode .editor-region,
+  .app-shell.is-bottom-interface.is-pdf-mode .editor-region {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .app-shell.is-bottom-interface .bottom-interface-status .footer-zoom-controls { display: none; }
+  .app-shell.is-bottom-interface .bottom-interface-status .page-status { gap: 3px; }
+  .app-shell.is-bottom-interface .bottom-interface-status .page-status > span { max-width: 92px; font-size: 11px; }
+  .app-shell.is-bottom-interface .bottom-interface-status .statusbar-actions { gap: 2px; }
+  .app-shell.is-bottom-interface .bottom-interface-status .statusbar-actions button {
+    width: 34px;
+    justify-content: center;
+    padding: 0;
+  }
+  .app-shell.is-bottom-interface .bottom-interface-status .statusbar-actions .icon-label { display: none; }
+  .app-shell.is-bottom-interface .settings-popover { max-height: calc(100dvh - var(--bottom-interface-height) - 12px); }
+  .app-shell.is-bottom-interface .topbar-show {
+    right: 12px;
+    left: auto;
+    transform: none;
+  }
+  .app-shell.is-bottom-interface .obs-capture-guide { inset: 6px 6px 76px; }
+  .app-shell.is-bottom-interface .obs-capture-guide[data-layout="viewport"] { inset: 4px; }
+}
+
+@media (max-width: 520px) {
+  .app-shell.is-bottom-interface .bottom-interface-bar .brand-mark { display: none; }
+  .app-shell.is-bottom-interface .bottom-interface-bar .topbar-document { gap: 5px; }
+  .app-shell.is-bottom-interface .bottom-interface-bar .settings-trigger { width: 34px; height: 34px; }
+  .app-shell.is-bottom-interface .bottom-interface-bar .workspace-toggle {
+    min-width: 40px;
+    justify-content: center;
+    padding-inline: 8px;
+  }
+  .app-shell.is-bottom-interface .bottom-interface-bar .workspace-toggle .icon-label,
+  .app-shell.is-bottom-interface .bottom-interface-status .page-status > span,
+  .app-shell.is-bottom-interface .bottom-interface-status .page-status :is(.pdf-rail-show, .slide-rail-show) .icon-label {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    overflow: hidden !important;
+    clip-path: inset(50%) !important;
+  }
+  .app-shell.is-bottom-interface .bottom-interface-status .page-status :is(.pdf-rail-show, .slide-rail-show) {
+    width: 34px;
+    padding: 0;
+  }
+}
+
+@media (max-width: 359px) {
+  .app-shell.is-bottom-interface,
+  .app-shell.is-bottom-interface.is-slide-mode,
+  .app-shell.is-bottom-interface.is-pdf-mode {
+    --bottom-interface-height: 100px;
+    grid-template-rows: minmax(0, 1fr) var(--bottom-interface-height);
+  }
+  .app-shell.is-bottom-interface .bottom-interface-bar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: 50px 50px;
+  }
+  .app-shell.is-bottom-interface .bottom-interface-bar .topbar-document { grid-column: 1; grid-row: 1; }
+  .app-shell.is-bottom-interface .bottom-interface-bar .file-actions { grid-column: 2; grid-row: 1; }
+  .app-shell.is-bottom-interface .bottom-interface-bar .workspace-tabs { grid-column: 1; grid-row: 2; }
+  .app-shell.is-bottom-interface .bottom-interface-bar .bottom-interface-status { grid-column: 2; grid-row: 2; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -3533,7 +3875,6 @@ body:has(.app-shell:fullscreen.is-obs-capture-enabled) :is(.Modal, .context-menu
   .obs-capture-guide { inset: 70px 6px 6px; }
   .obs-capture-guide-frame > span { top: -21px; font-size: 9px; }
 }
-
 /* Classroom time widgets -------------------------------------------------- */
 .classroom-time-tool-card { grid-template-rows: auto 100px auto; }
 .classroom-time-tool-preview {

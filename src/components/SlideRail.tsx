@@ -15,6 +15,7 @@ import {
   MoreIcon,
   MorphIcon,
   PlusIcon,
+  RotateIcon,
   TrashIcon,
   UpIcon,
 } from "./Icons";
@@ -35,8 +36,11 @@ interface SlideRailProps {
   onAddSlide: () => void;
   frameDrawingActive: boolean;
   onToggleFrameDrawing: () => void;
+  quickDrawEnabled: boolean;
+  onToggleQuickDraw: () => void;
   onOpenSlide: (slide: ClassroomSlide) => void;
   onMoveSlide: (slideId: string, targetId: string) => void;
+  onRotateSlide: (slide: ClassroomSlide, returnFocusTarget: HTMLButtonElement | null) => void;
   onDeleteSlide: (slide: ClassroomSlide) => void;
   onHide: () => void;
   framesVisible: boolean;
@@ -55,8 +59,11 @@ export function SlideRail({
   onAddSlide,
   frameDrawingActive,
   onToggleFrameDrawing,
+  quickDrawEnabled,
+  onToggleQuickDraw,
   onOpenSlide,
   onMoveSlide,
+  onRotateSlide,
   onDeleteSlide,
   onHide,
   framesVisible,
@@ -222,6 +229,18 @@ export function SlideRail({
               <FrameIcon />
               <span>{frameDrawingActive ? "Cancel drawing" : "Draw slide"}</span>
             </button>
+            <button
+              className={`slide-settings-toggle toggle-quick-draw-button ${quickDrawEnabled ? "is-active" : ""}`}
+              type="button"
+              onClick={onToggleQuickDraw}
+              aria-label="Quick draw"
+              aria-pressed={quickDrawEnabled}
+              title="Keep drawing new slide frames until Quick draw is turned off"
+            >
+              <FrameIcon />
+              <span>Quick draw</span>
+              <strong>{quickDrawEnabled ? "On" : "Off"}</strong>
+            </button>
             {frameDrawingActive ? (
               <div id="slide-frame-aspect-options" className="slide-frame-aspect-options">
                 <div className="slide-settings-label slide-frame-aspect-heading">
@@ -295,7 +314,7 @@ export function SlideRail({
         {frameDrawingActive ? (
           <div className="slide-draw-status" role="status">
             <FrameIcon />
-            <span>Drawing {frameAspectRatio === "freeform" ? "freeform" : frameAspectRatio} slide</span>
+            <span>{quickDrawEnabled ? "Quick drawing" : "Drawing"} {frameAspectRatio === "freeform" ? "freeform" : frameAspectRatio} slide</span>
             <button type="button" onClick={onToggleFrameDrawing}>Cancel</button>
           </div>
         ) : null}
@@ -409,6 +428,16 @@ export function SlideRail({
                     onClick={() => shiftSlide(slide, index, 1)}
                   >
                     <DownIcon /><span>Move later</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setActionSlideId(null);
+                      onRotateSlide(slide, actionButtonRefs.current.get(slide.id) || null);
+                    }}
+                  >
+                    <RotateIcon /><span>Rotate slide…</span>
                   </button>
                   <button
                     className="is-danger"

@@ -103,114 +103,6 @@ jobs:
           sha256sum dist/release/release-manifest.json dist/release/provenance.json dist/release/sbom.cdx.json dist/release/SHA256SUMS > "$production_diag_dir/release-second.sha256"
           diff -u "$production_diag_dir/release-first.sha256" "$production_diag_dir/release-second.sha256"
           npm run release:verify 2>&1 | tee "$production_diag_dir/package-verify.log"
-      - name: Smoke-test the release through its NGINX container
-        if: ${{ always() && steps.production-package.outcome == 'success' }}
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts/production
-          deploy_env="$RUNNER_TEMP/patterdraw-deploy.env"
-          node deploy/verify-config.mjs | grep '^PATTERDRAW_' > "$deploy_env"
-          set -a
-          source "$deploy_env"
-          set +a
-          docker compose --env-file "$deploy_env" -f deploy/compose.yaml build patterdraw
-
-          container="patterdraw-nginx-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          trap 'docker rm --force "$container" >/dev/null 2>&1 || true' EXIT
-          docker run --detach --name "$container" \
-            --init \
-            --user 101:101 \
-            --read-only \
-            --cap-drop ALL \
-            --security-opt no-new-privileges:true \
-            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777,uid=101,gid=101 \
-            --tmpfs /var/cache/nginx:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=101,gid=101 \
-            --pids-limit 64 \
-            --memory 128m \
-            --cpus 0.50 \
-            --ulimit nofile=8192:8192 \
-            --publish 127.0.0.1::8080 \
-            "patterdraw:${PATTERDRAW_IMAGE_TAG}"
-
-          host_port=$(docker inspect --format '{{(index (index .NetworkSettings.Ports "8080/tcp") 0).HostPort}}' "$container")
-          ready=0
-          for attempt in $(seq 1 30); do
-            status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
-              --header 'Host: draw.spatterson.ca' \
-              "http://127.0.0.1:${host_port}/healthz" || true)
-            if [ "$status" = 200 ]; then
-              ready=1
-              break
-            fi
-            sleep 1
-          done
-          test "$ready" = 1
-
-          expected_headers=(
-            "Content-Security-Policy: default-src 'self' blob: data:; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' data:; connect-src 'self'; media-src 'self' blob: data:; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
-            "Cross-Origin-Opener-Policy: same-origin"
-            "Cross-Origin-Resource-Policy: same-origin"
-            "Permissions-Policy: accelerometer=(), autoplay=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
-            "Referrer-Policy: no-referrer"
-            "Strict-Transport-Security: max-age=31536000"
-            "X-Content-Type-Options: nosniff"
-            "X-Frame-Options: DENY"
-            "X-PatterDraw-Production-Dist: 1"
-          )
-
-          assert_security_headers() {
-            local response_headers=$1
-            for expected_header in "${expected_headers[@]}"; do
-              grep -Fqi "$expected_header" "$response_headers"
-            done
-          }
-
-          accepted_hosts=(draw.spatterson.ca)
-          for accepted_host in "${accepted_hosts[@]}"; do
-            entry_headers="artifacts/production/nginx-entry-${accepted_host}.headers"
-            entry_body="artifacts/production/nginx-entry-${accepted_host}.html"
-            status=$(curl --silent --show-error \
-              --dump-header "$entry_headers" \
-              --output "$entry_body" \
-              --write-out '%{http_code}' \
-              --header "Host: ${accepted_host}" \
-              "http://127.0.0.1:${host_port}/")
-            test "$status" = 200
-            cmp --silent "$entry_body" dist/release/index.html
-            assert_security_headers "$entry_headers"
-            grep -Eiq '^Content-Type:[[:space:]]*text/html([[:space:]]*;.*)?[[:space:]]*$' "$entry_headers"
-            grep -Eiq '^Cache-Control:[[:space:]]*no-store, no-transform[[:space:]]*$' "$entry_headers"
-            if grep -Eiq '^Location:' "$entry_headers"; then
-              echo "Accepted PatterDraw host unexpectedly redirected: ${accepted_host}" >&2
-              exit 1
-            fi
-          done
-
-          rejected_body="artifacts/production/nginx-entry-unlisted-host.body"
-          rejected_status=$(curl --silent \
-            --output "$rejected_body" \
-            --write-out '%{http_code}' \
-            --header 'Host: not-patterdraw.invalid' \
-            "http://127.0.0.1:${host_port}/" || true)
-          test "$rejected_status" = 000
-          test ! -s "$rejected_body"
-
-          mapfile -t pdf_workers < <(find dist/release/assets -maxdepth 1 -type f -name 'pdf.worker*.mjs' -print | sort)
-          test "${#pdf_workers[@]}" -eq 1
-          worker_path="/${pdf_workers[0]#dist/release/}"
-          for accepted_host in "${accepted_hosts[@]}"; do
-            response_headers="artifacts/production/nginx-pdf-worker-${accepted_host}.headers"
-            status=$(curl --silent --show-error \
-              --dump-header "$response_headers" \
-              --output /dev/null \
-              --write-out '%{http_code}' \
-              --header "Host: ${accepted_host}" \
-              "http://127.0.0.1:${host_port}${worker_path}?patterdraw-worker=mjs-mime-v1")
-            test "$status" = 200
-            assert_security_headers "$response_headers"
-            grep -Eiq '^Content-Type:[[:space:]]*application/javascript([[:space:]]*;.*)?[[:space:]]*$' "$response_headers"
-            grep -Eiq '^Cache-Control:[[:space:]]*public, max-age=31536000, immutable[[:space:]]*$' "$response_headers"
-          done
       - name: Prepare production diagnostics
         if: ${{ always() }}
         run: |
@@ -222,6 +114,167 @@ jobs:
           if [ -d dist/release ]; then
             find dist/release -type f -print | sort > artifacts/production/release-manifest-files.txt
           fi
+      - id: production-container
+        name: Build and smoke-test deployment container
+        if: ${{ always() && steps.production-package.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          deploy_env="$RUNNER_TEMP/patterdraw-deploy.env"
+          deploy_project="patterdraw-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          edge_network="patterdraw_edge"
+          network_created=0
+          cleanup() {
+            set +e
+            docker compose --project-name "$deploy_project" --env-file "$deploy_env" \
+              -f deploy/compose.yaml down --remove-orphans >/dev/null 2>&1
+            if [ "$network_created" = 1 ]; then
+              docker network rm "$edge_network" >/dev/null 2>&1
+            fi
+          }
+          trap cleanup EXIT
+
+          node deploy/verify-config.mjs | tee artifacts/production/deploy-verify.log
+          sed -n \
+            -e '/^PATTERDRAW_GIT_COMMIT=/p' \
+            -e '/^PATTERDRAW_MANIFEST_SHA256=/p' \
+            -e '/^PATTERDRAW_RELEASE_TREE_SHA256=/p' \
+            -e '/^PATTERDRAW_DEPLOY_CONFIG_SHA256=/p' \
+            -e '/^PATTERDRAW_IMAGE_TAG=/p' \
+            artifacts/production/deploy-verify.log > "$deploy_env"
+          test "$(wc -l < "$deploy_env" | tr -d '[:space:]')" = 5
+          chmod 0600 "$deploy_env"
+          set -a
+          . "$deploy_env"
+          set +a
+
+          docker compose --project-name "$deploy_project" --env-file "$deploy_env" \
+            -f deploy/compose.yaml config --quiet
+          docker compose --project-name "$deploy_project" --env-file "$deploy_env" \
+            -f deploy/compose.yaml build --pull patterdraw 2>&1 \
+            | tee artifacts/production/deploy-build.log
+          docker network create "$edge_network" > artifacts/production/deploy-network.id
+          network_created=1
+          docker compose --project-name "$deploy_project" --env-file "$deploy_env" \
+            -f deploy/compose.yaml up -d --no-deps --no-build --wait patterdraw
+
+          container_id=$(docker compose --project-name "$deploy_project" --env-file "$deploy_env" \
+            -f deploy/compose.yaml ps -q patterdraw)
+          test -n "$container_id"
+          test "$(docker inspect --format '{{.Config.User}}' "$container_id")" = "101:101"
+          test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container_id")" = "true"
+          test "$(docker inspect --format '{{.State.Health.Status}}' "$container_id")" = "healthy"
+          test -z "$(docker port "$container_id")"
+          docker inspect --format '{{json .HostConfig.CapDrop}}' "$container_id" | grep -q '"ALL"'
+          docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$container_id" | grep -q 'no-new-privileges'
+          docker inspect --format '{{json .HostConfig.Tmpfs}}' "$container_id" | grep -q '/var/cache/nginx'
+          test "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$container_id")" = 1
+          test -n "$(docker inspect --format '{{(index .NetworkSettings.Networks "patterdraw_edge").NetworkID}}' "$container_id")"
+          test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container_id")" = "$PATTERDRAW_GIT_COMMIT"
+          test "$(docker inspect --format '{{index .Config.Labels "ca.spatterson.patterdraw.manifest-sha256"}}' "$container_id")" = "$PATTERDRAW_MANIFEST_SHA256"
+          test "$(docker inspect --format '{{index .Config.Labels "ca.spatterson.patterdraw.release-tree-sha256"}}' "$container_id")" = "$PATTERDRAW_RELEASE_TREE_SHA256"
+          test "$(docker inspect --format '{{index .Config.Labels "ca.spatterson.patterdraw.deploy-config-sha256"}}' "$container_id")" = "$PATTERDRAW_DEPLOY_CONFIG_SHA256"
+
+          image_ref="patterdraw:${PATTERDRAW_IMAGE_TAG}"
+          client=(docker run --rm --network "$edge_network" --entrypoint /bin/sh "$image_ref")
+          "${client[@]}" -eu -c \
+            'test "$(wget -q -O - --header="Host: draw.spatterson.ca" http://patterdraw:8080/healthz)" = healthy'
+          "${client[@]}" -eu -c \
+            'wget -q -O /tmp/patterdraw-index.html --header="Host: draw.spatterson.ca" http://patterdraw:8080/ && cmp /tmp/patterdraw-index.html /usr/share/nginx/html/index.html'
+          "${client[@]}" -c \
+            'wget -S -O /dev/null --header="Host: draw.spatterson.ca" http://patterdraw:8080/ 2>&1' \
+            > artifacts/production/deploy-root-headers.txt
+          expected_headers=(
+            "Content-Security-Policy: default-src 'self' blob: data:; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' data:; connect-src 'self'; media-src 'self' blob: data:; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+            "Cross-Origin-Opener-Policy: same-origin"
+            "Cross-Origin-Resource-Policy: same-origin"
+            "Permissions-Policy: accelerometer=(), autoplay=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+            "Referrer-Policy: no-referrer"
+            "Strict-Transport-Security: max-age=31536000"
+            "X-Content-Type-Options: nosniff"
+            "X-Frame-Options: DENY"
+            "X-PatterDraw-Production-Dist: 1"
+          )
+          assert_security_headers() {
+            local header_file="$1"
+            for expected_header in "${expected_headers[@]}"; do
+              grep -Fqi "$expected_header" "$header_file"
+            done
+          }
+          assert_security_headers artifacts/production/deploy-root-headers.txt
+          grep -qi 'Cache-Control: no-store' artifacts/production/deploy-root-headers.txt
+          grep -qi 'Cache-Control: no-store, no-transform' artifacts/production/deploy-root-headers.txt
+
+          for html_path in /index.html /classroom/deployment-acceptance; do
+            "${client[@]}" -c \
+              "wget -S -O /dev/null --header='Host: draw.spatterson.ca' 'http://patterdraw:8080$html_path' 2>&1" \
+              > artifacts/production/deploy-html-route-headers.txt
+            grep -q 'HTTP/1.1 200' artifacts/production/deploy-html-route-headers.txt
+            assert_security_headers artifacts/production/deploy-html-route-headers.txt
+            grep -qi 'Cache-Control: no-store, no-transform' \
+              artifacts/production/deploy-html-route-headers.txt
+          done
+
+          set +e
+          "${client[@]}" -c \
+            'wget -S -O /dev/null --post-data="" --header="Host: draw.spatterson.ca" http://patterdraw:8080/ 2>&1' \
+            > artifacts/production/deploy-method-headers.txt
+          method_status=$?
+          set -e
+          test "$method_status" -ne 0
+          grep -q 'HTTP/1.1 405' artifacts/production/deploy-method-headers.txt
+          grep -qi 'Allow: GET, HEAD' artifacts/production/deploy-method-headers.txt
+          assert_security_headers artifacts/production/deploy-method-headers.txt
+          grep -qi 'Cache-Control: no-store' artifacts/production/deploy-method-headers.txt
+
+          set +e
+          "${client[@]}" -c \
+            'wget -S -O /dev/null --header="Host: draw.spatterson.ca" http://patterdraw:8080/assets/missing-does-not-exist.js 2>&1' \
+            > artifacts/production/deploy-missing-headers.txt
+          missing_status=$?
+          set -e
+          test "$missing_status" -ne 0
+          grep -q 'HTTP/1.1 404' artifacts/production/deploy-missing-headers.txt
+          assert_security_headers artifacts/production/deploy-missing-headers.txt
+          grep -qi 'Cache-Control: no-store' \
+            artifacts/production/deploy-missing-headers.txt
+
+          if "${client[@]}" -c \
+            'wget -q -O /dev/null --header="Host: invalid.example" http://patterdraw:8080/'; then
+            echo "Unknown Host unexpectedly received a usable response." >&2
+            exit 1
+          fi
+
+          asset_path=$(find dist/release/assets -type f -print | LC_ALL=C sort \
+            | sed -n '1p' | sed 's#^dist/release/##')
+          test -n "$asset_path"
+          "${client[@]}" -c \
+            "wget -S -O /dev/null --header='Host: draw.spatterson.ca' 'http://patterdraw:8080/$asset_path' 2>&1" \
+            > artifacts/production/deploy-asset-headers.txt
+          grep -qi 'Cache-Control: public, max-age=31536000, immutable' \
+            artifacts/production/deploy-asset-headers.txt
+
+          "${client[@]}" -c \
+            'wget -S -O /dev/null --header="Host: draw.spatterson.ca" http://patterdraw:8080/geogon/index.html 2>&1' \
+            > artifacts/production/deploy-geogon-headers.txt
+          grep -q 'HTTP/1.1 200' artifacts/production/deploy-geogon-headers.txt
+          grep -Fqi "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; worker-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'none'; media-src 'none'; frame-src 'self'; object-src 'none'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'" \
+            artifacts/production/deploy-geogon-headers.txt
+          grep -Fqi 'X-Frame-Options: SAMEORIGIN' artifacts/production/deploy-geogon-headers.txt
+          grep -Fqi 'Cache-Control: no-store, no-transform' artifacts/production/deploy-geogon-headers.txt
+
+          mapfile -t pdf_workers < <(find dist/release/assets -maxdepth 1 -type f \
+            -name 'pdf.worker*.mjs' -print | LC_ALL=C sort)
+          test "${#pdf_workers[@]}" -eq 1
+          pdf_worker_path=${pdf_workers[0]#dist/release/}
+          "${client[@]}" -c \
+            "wget -S -O /dev/null --header='Host: draw.spatterson.ca' 'http://patterdraw:8080/$pdf_worker_path?patterdraw-worker=mjs-mime-v1' 2>&1" \
+            > artifacts/production/deploy-pdf-worker-headers.txt
+          grep -q 'HTTP/1.1 200' artifacts/production/deploy-pdf-worker-headers.txt
+          assert_security_headers artifacts/production/deploy-pdf-worker-headers.txt
+          grep -Eqi '^[[:space:]]*Content-Type:[[:space:]]*application/javascript([[:space:]]*;.*)?[[:space:]]*$' \
+            artifacts/production/deploy-pdf-worker-headers.txt
+          grep -Eqi '^[[:space:]]*Cache-Control:[[:space:]]*public, max-age=31536000, immutable[[:space:]]*$' \
+            artifacts/production/deploy-pdf-worker-headers.txt
       - name: Start packaged release server
         if: ${{ always() && steps.production-package.outcome == 'success' }}
         run: |
@@ -298,7 +351,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Upload verified production release
-        if: ${{ steps.production-package.outcome == 'success' && steps.production-browser.outcome == 'success' && steps.production-postverify.outcome == 'success' }}
+        if: ${{ steps.production-package.outcome == 'success' && steps.production-container.outcome == 'success' && steps.production-browser.outcome == 'success' && steps.production-postverify.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: patterdraw-release-${{ github.run_id }}

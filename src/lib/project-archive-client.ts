@@ -2,6 +2,9 @@ type ArchiveOperation =
   | { operation: "zip"; entries: Record<string, Uint8Array>; maxBytes: number }
   | { operation: "unzip"; bytes: Uint8Array; maxBytes: number };
 
+/** Bound worker hangs while leaving headroom for a 150 MiB archive on classroom hardware. */
+export const PROJECT_ARCHIVE_WORKER_TIMEOUT_MS = 60_000;
+
 interface ArchiveWorkerResponse {
   id: number;
   ok: boolean;
@@ -11,10 +14,14 @@ interface ArchiveWorkerResponse {
 }
 
 /**
- * Worker startup and transport failures are recoverable because the archive
- * engine is also available synchronously. Keep this distinct from a response
- * with `ok: false`: that response came from a running worker and represents a
- * validation/semantic verdict that must not be retried with another engine.
+ * Worker startup and transport failures are infrastructure errors. Production
+ * browser builds deliberately do not retry them with synchronous parsing:
+ * doing so would move untrusted archive work onto the UI thread after the
+ * isolation boundary failed. Development/test builds retain the synchronous
+ * path so local tooling and non-browser fixtures remain usable. Keep this
+ * distinct from a response with `ok: false`: that response came from a
+ * running worker and represents a validation/semantic verdict that must not
+ * be retried with another engine either.
  */
 class ArchiveWorkerInfrastructureError extends Error {
   constructor(message: string) {
@@ -40,8 +47,16 @@ function throwIfAborted(signal?: AbortSignal): void {
   }
 }
 
+function isBrowserRuntime(): boolean {
+  return typeof window !== "undefined";
+}
+
 function canUseArchiveWorker(): boolean {
-  return typeof window !== "undefined" && typeof Worker === "function";
+  return isBrowserRuntime() && typeof Worker === "function";
+}
+
+function canFallbackToSynchronousArchive(): boolean {
+  return import.meta.env.PROD !== true && import.meta.env.MODE !== "production";
 }
 
 function runArchiveWorker(
@@ -67,7 +82,12 @@ function runArchiveWorker(
       return;
     }
     let settled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const finish = () => {
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+        timeoutId = undefined;
+      }
       signal?.removeEventListener("abort", onAbort);
       worker.terminate();
     };
@@ -109,6 +129,12 @@ function runArchiveWorker(
       ));
     };
 
+    timeoutId = setTimeout(() => {
+      rejectOnce(new ArchiveWorkerInfrastructureError(
+        "Project archive worker timed out.",
+      ));
+    }, PROJECT_ARCHIVE_WORKER_TIMEOUT_MS);
+
     try {
       if (operation.operation === "zip") {
         const transferableEntries = Object.fromEntries(
@@ -144,6 +170,9 @@ export async function createProjectArchive(
   maxBytes: number,
 ): Promise<Uint8Array> {
   if (!canUseArchiveWorker()) {
+    if (isBrowserRuntime() && !canFallbackToSynchronousArchive()) {
+      throw new ArchiveWorkerInfrastructureError("Project archive worker is unavailable.");
+    }
     const { createProjectArchiveSync } = await import("./project-archive-engine");
     return createProjectArchiveSync(entries, maxBytes);
   }
@@ -158,6 +187,7 @@ export async function createProjectArchive(
     return response.archive;
   } catch (error) {
     if (!isArchiveWorkerInfrastructureError(error)) throw error;
+    if (isBrowserRuntime() && !canFallbackToSynchronousArchive()) throw error;
     const { createProjectArchiveSync } = await import("./project-archive-engine");
     return createProjectArchiveSync(entries, maxBytes);
   }
@@ -170,6 +200,9 @@ export async function extractProjectArchive(
 ): Promise<Record<string, Uint8Array>> {
   throwIfAborted(signal);
   if (!canUseArchiveWorker()) {
+    if (isBrowserRuntime() && !canFallbackToSynchronousArchive()) {
+      throw new ArchiveWorkerInfrastructureError("Project archive worker is unavailable.");
+    }
     const { extractProjectArchiveSync } = await import("./project-archive-engine");
     throwIfAborted(signal);
     const entries = extractProjectArchiveSync(bytes, maxBytes);
@@ -188,6 +221,11 @@ export async function extractProjectArchive(
     return response.entries;
   } catch (error) {
     if (!isArchiveWorkerInfrastructureError(error)) throw error;
+    if (isBrowserRuntime() && !canFallbackToSynchronousArchive()) {
+      // Abort is still allowed to win if it raced with infrastructure failure.
+      throwIfAborted(signal);
+      throw error;
+    }
     // Abort must win over recovery. The synchronous engine has the same
     // pre/post-operation checks as the no-worker path, but cannot be
     // interrupted while fflate is executing.

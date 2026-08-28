@@ -351,6 +351,7 @@ export function sanitizeProject(project: ClassroomProject): ClassroomProject {
     safe.slideWidescreenFrames,
   );
   delete safe.slideWidescreenFrames;
+  safe.slideQuickDrawEnabled = safe.slideQuickDrawEnabled === true;
   safe.slideMorphEnabled = safe.slideMorphEnabled === true;
   safe.slideMorphDurationMs = normalizeSlideMorphDurationMs(safe.slideMorphDurationMs);
   return safe;
@@ -394,6 +395,9 @@ function assertProject(project: ClassroomProject, requireSanitized: boolean): vo
   }
   if (project.slideWidescreenFrames !== undefined && typeof project.slideWidescreenFrames !== "boolean") {
     throw new Error("Slide widescreen frame preference must be a boolean.");
+  }
+  if (project.slideQuickDrawEnabled !== undefined && typeof project.slideQuickDrawEnabled !== "boolean") {
+    throw new Error("Slide Quick draw preference must be a boolean.");
   }
   if (project.slideMorphEnabled !== undefined && typeof project.slideMorphEnabled !== "boolean") {
     throw new Error("Slide Morph preference must be a boolean.");

@@ -159,6 +159,9 @@ describe("PDF source metadata preflight", () => {
       await assertPdfSourceMetadata(project, { pdf: bytes });
       await assertPdfSourceMetadata(project, { pdf: bytes });
       expect(loadSpy).toHaveBeenCalledOnce();
+      expect(loadSpy).toHaveBeenCalledWith(bytes, expect.objectContaining({
+        ignoreEncryption: true,
+      }));
     } finally {
       loadSpy.mockRestore();
     }

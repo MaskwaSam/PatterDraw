@@ -1,6 +1,7 @@
 import {
   PDFArray,
   PDFBool,
+  PDFContext,
   PDFDict,
   PDFDocument,
   PDFName,
@@ -102,7 +103,7 @@ const CANCELLATION_YIELD_BYTES = 256 * 1_024;
 const MAX_PDF_CONTENT_TOKEN_BYTES = 1024 * 1024;
 const MAX_PDF_RESOURCE_DEPTH = 256;
 const MAX_PDF_INSPECTED_STREAMS = 4_096;
-const MAX_PDF_EMBEDDED_IMAGE_PIXELS = 64 * 1024 * 1024;
+const MAX_PDF_EMBEDDED_IMAGE_PIXELS = 256 * 1024 * 1024;
 const MAX_PDF_EMBEDDED_IMAGE_BYTES = 75 * 1024 * 1024;
 
 interface EffectiveImageLimitBudget {
@@ -435,6 +436,19 @@ function readContentToken(bytes: Uint8Array, initialOffset: number): ContentToke
       end: offset,
       kind: "name",
       value: normalizedPdfName(byteString(bytes, start, offset)),
+    };
+  }
+  if (
+    (bytes[offset] === 0x3c && bytes[offset + 1] === 0x3c)
+    || (bytes[offset] === 0x3e && bytes[offset + 1] === 0x3e)
+  ) {
+    // Dictionaries are valid operands in page content streams (most commonly
+    // as the property list passed to BDC). Consume the paired delimiter as one
+    // token so the second '<' is not mistaken for a hexadecimal string.
+    return {
+      end: offset + 2,
+      kind: "other",
+      value: String.fromCharCode(bytes[offset], bytes[offset + 1]),
     };
   }
   if (isDelimiter(bytes[offset])) {
@@ -1233,9 +1247,11 @@ function boundedPdfLibFilterDecode(
   signal?: AbortSignal,
   limitError?: Error,
 ): Uint8Array {
-  const canonicalFilter = LZW_FILTERS.has(filter)
-    ? PDFName.of("LZWDecode")
-    : PDFName.of("RunLengthDecode");
+  const canonicalFilter = FLATE_FILTERS.has(filter)
+    ? PDFName.of("FlateDecode")
+    : LZW_FILTERS.has(filter)
+      ? PDFName.of("LZWDecode")
+      : PDFName.of("RunLengthDecode");
   const dict = stream.dict.context.obj({ Filter: canonicalFilter }) as PDFDict;
   if (params) dict.set(DECODE_PARMS, params);
   try {
@@ -1381,7 +1397,20 @@ function boundedFlateDecode(
         || isImageFilterLimitError(error)
       )
     ) throw error;
-    throw contentInspectionError();
+    // Older Quartz-generated PDFs can contain a complete Deflate payload but
+    // omit the trailing zlib checksum. PDF.js and pdf-lib intentionally
+    // recover those streams. Match that compatibility only after the
+    // streaming decoder rejects, and retain the same hard output bound.
+    const context = PDFContext.create();
+    return boundedPdfLibFilterDecode(
+      PDFRawStream.of(context.obj({}) as PDFDict, bytes),
+      bytes,
+      "/FlateDecode",
+      undefined,
+      maxBytes,
+      signal,
+      limitError,
+    );
   }
   if (chunks.length === 1) return chunks[0];
   const output = new Uint8Array(outputLength);
@@ -1941,11 +1970,11 @@ function inspectOpaqueImagePayload(
   } else if (JPX_FILTERS.has(filter)) {
     inspectJpxIntrinsicDimensions(bytes, maxPixels, maxEdge, signal);
   } else if (OPAQUE_IMAGE_FILTERS.has(filter)) {
-    // JBIG2/CCITT/CCF dimensions are codec-dependent and PDF.js may decode
-    // them into a surface larger than the image dictionary advertises. Until
-    // a bounded header parser exists for each codec, reject them rather than
-    // trusting a potentially malicious Width/Height pair.
-    throw contentInspectionError();
+    // Pinned PDF.js passes the already-validated image dictionary Width and
+    // Height directly to its JBIG2/CCITT decoder and sizes the output from
+    // those values. The payload remains encoded here; no unbounded decode is
+    // needed merely to accept these common monochrome document images.
+    return;
   }
 }
 
@@ -2509,6 +2538,16 @@ async function inspectEmbeddedImageLimitsInline(
   throwIfAborted(signal);
 
   try {
+    if (document.isEncrypted) {
+      // Permission-encrypted PDFs are common in older government documents.
+      // pdf-lib can inspect their page tree but cannot decrypt content
+      // streams; PDF.js performs that decryption in its worker and applies the
+      // configured image/canvas limits during the actual import.
+      if (document.getPageCount() > MAX_PDF_PAGES) {
+        throw new Error(`The PDF has more than ${MAX_PDF_PAGES} pages.`);
+      }
+      return;
+    }
     const pages = document.getPages();
     if (pages.length > MAX_PDF_PAGES) {
       throw new Error(`The PDF has more than ${MAX_PDF_PAGES} pages.`);

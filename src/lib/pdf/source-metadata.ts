@@ -195,7 +195,7 @@ export async function assertPdfSourceMetadata(
       // synchronously on the current thread and does not transfer/detach it
       // like a PDF.js worker load would.
       sourceDocument = await awaitWithAbort(
-        PDFDocument.load(bytes, { updateMetadata: false }),
+        PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false }),
         options.signal,
       );
     } catch (error) {

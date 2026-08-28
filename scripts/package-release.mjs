@@ -2,7 +2,8 @@
 
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { chmod, copyFile, lstat, mkdir, readFile, readdir, realpath, rm, utimes, writeFile } from "node:fs/promises";
+import { chmod, copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, utimes, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -12,6 +13,7 @@ const scriptRoot = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptRoot, "..");
 const defaultDist = path.join(repoRoot, "dist");
 const defaultOutput = path.join(defaultDist, "release");
+const releaseLockPath = path.join(repoRoot, ".patterdraw-release.lock");
 const metadataFiles = ["release-manifest.json", "provenance.json", "sbom.cdx.json"];
 const checksumFile = "SHA256SUMS";
 // This is the reviewed top-level Vite output contract from vite.config.ts.
@@ -88,12 +90,40 @@ The default output is dist/release/. Packaging requires a clean git worktree unl
 Unix timestamp; otherwise the HEAD commit timestamp is used. Packaging output
 must be a top-level release or release-* directory inside the build directory.
 --build performs a fresh empty-output Vite build first and is required by the
-supported npm release:package workflow so provenance cannot describe stale dist bytes.
+supported npm release:package workflow. Clean final builds use an immutable archive
+of HEAD so provenance cannot describe stale or concurrently modified source bytes.
 `;
 }
 
 function fail(message) {
   throw new Error(message);
+}
+
+async function acquireReleaseLock() {
+  try {
+    await mkdir(releaseLockPath, { mode: 0o700 });
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      fail(`Another release package or verification is active (${releaseLockPath}). If a prior process crashed, remove this lock only after confirming no release command is running.`);
+    }
+    throw error;
+  }
+  try {
+    await writeFile(
+      path.join(releaseLockPath, "owner.json"),
+      jsonBytes({ pid: process.pid, startedAt: new Date().toISOString() }),
+      { mode: 0o600 },
+    );
+  } catch (error) {
+    await rm(releaseLockPath, { force: true, recursive: true });
+    throw error;
+  }
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    await rm(releaseLockPath, { force: true, recursive: true });
+  };
 }
 
 function normalizedRelativePath(value) {
@@ -139,9 +169,9 @@ function parseArguments(argv) {
   return options;
 }
 
-async function command(commandName, args, { allowFailure = false } = {}) {
+async function command(commandName, args, { allowFailure = false, cwd = repoRoot } = {}) {
   try {
-    const { stdout } = await execFile(commandName, args, { cwd: repoRoot, encoding: "utf8" });
+    const { stdout } = await execFile(commandName, args, { cwd, encoding: "utf8" });
     return stdout.trim();
   } catch (error) {
     if (allowFailure) return "";
@@ -150,13 +180,13 @@ async function command(commandName, args, { allowFailure = false } = {}) {
   }
 }
 
-async function gitMetadata() {
-  const commit = await command("git", ["rev-parse", "HEAD"]);
+async function gitMetadata({ cwd = repoRoot } = {}) {
+  const commit = await command("git", ["rev-parse", "HEAD"], { cwd });
   if (!/^[0-9a-f]{40}$/i.test(commit)) fail("Unable to resolve a full git HEAD commit.");
-  const commitEpochText = await command("git", ["show", "-s", "--format=%ct", commit]);
+  const commitEpochText = await command("git", ["show", "-s", "--format=%ct", commit], { cwd });
   const commitEpoch = Number(commitEpochText);
   if (!Number.isSafeInteger(commitEpoch) || commitEpoch < 0) fail(`Invalid HEAD commit timestamp: ${commitEpochText}`);
-  const status = await command("git", ["status", "--porcelain=v1", "--untracked-files=all"]);
+  const status = await command("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd });
   return {
     commit,
     commitShort: commit.slice(0, 12),
@@ -174,8 +204,8 @@ function sourceDateEpoch(commitEpoch) {
   return epoch;
 }
 
-async function npmVersion() {
-  const version = await command("npm", ["--version"], { allowFailure: true });
+async function npmVersion({ cwd = repoRoot } = {}) {
+  const version = await command("npm", ["--version"], { allowFailure: true, cwd });
   return version || "unavailable";
 }
 
@@ -599,11 +629,11 @@ function checksumLines(files) {
     .join("\n")}\n`;
 }
 
-async function toolchainMetadata(packageInfo, lockfile, buildCommand) {
+async function toolchainMetadata(packageInfo, lockfile, buildCommand, { commandRoot = repoRoot } = {}) {
   const lockedVersion = (name) => lockfile.packages?.[`node_modules/${name}`]?.version || "unavailable";
   return {
     node: process.version,
-    npm: await npmVersion(),
+    npm: await npmVersion({ cwd: commandRoot }),
     packageManager: packageInfo.packageManager || "npm",
     typescript: lockedVersion("typescript"),
     vite: lockedVersion("vite"),
@@ -612,7 +642,16 @@ async function toolchainMetadata(packageInfo, lockfile, buildCommand) {
   };
 }
 
-async function packageRelease(options) {
+async function packageRelease(
+  options,
+  {
+    buildCommand = options.build ? "npm run build -- --emptyOutDir" : "prebuilt dist (development only)",
+    commandRoot = repoRoot,
+    displayOutputRoot = options.out,
+    sourceMetadata,
+    sourceRoot = repoRoot,
+  } = {},
+) {
   const { dist: distRoot, out: outputRoot } = options;
   if (!options.build && !options.allowDirty) {
     fail("Final release packaging requires --build so the payload is rebuilt from the recorded source. Use --allow-dirty only for an explicitly prebuilt development artifact.");
@@ -627,15 +666,15 @@ async function packageRelease(options) {
   if (outputRoot === repoRoot) fail("--out must not be the repository root.");
   if (isWithin(outputRoot, distRoot)) fail("--out must not contain the build directory.");
   await validateOutputPath(distRoot, outputRoot);
-  const source = await gitMetadata();
+  const source = sourceMetadata ? { ...sourceMetadata } : await gitMetadata({ cwd: sourceRoot });
   if (source.dirty && !options.allowDirty) {
     fail("Refusing final release packaging from a dirty worktree. Commit all source changes first, or pass --allow-dirty for a development artifact.");
   }
   source.sourceDateEpoch = sourceDateEpoch(source.commitEpoch);
   source.timestamp = new Date(source.sourceDateEpoch * 1000).toISOString();
 
-  const packageInfo = await readJson(path.join(repoRoot, "package.json"), "package.json");
-  const lockfileBytes = await readFile(path.join(repoRoot, "package-lock.json"));
+  const packageInfo = await readJson(path.join(sourceRoot, "package.json"), "package.json");
+  const lockfileBytes = await readFile(path.join(sourceRoot, "package-lock.json"));
   const lockfile = JSON.parse(lockfileBytes.toString("utf8"));
   const lockHash = sha256(lockfileBytes);
   if (lockfile.lockfileVersion !== 3) fail(`Expected npm lockfileVersion 3, received ${lockfile.lockfileVersion}.`);
@@ -645,7 +684,8 @@ async function packageRelease(options) {
   const toolchain = await toolchainMetadata(
     packageInfo,
     lockfile,
-    options.build ? "npm run build -- --emptyOutDir" : "prebuilt dist (development only)",
+    buildCommand,
+    { commandRoot },
   );
 
   const outputInsideDist = isWithin(distRoot, outputRoot);
@@ -672,7 +712,7 @@ async function packageRelease(options) {
   const sourceMaps = payload.filter((file) => file.relative.toLowerCase().endsWith(".map"));
   if (sourceMaps.length > 0) fail(`Source maps are not publishable release files: ${sourceMaps.map((file) => file.relative).join(", ")}`);
   const vendoredComponents = await verifyPackagedGeoGon(distRoot, payload);
-  const licenses = await licenseVerification({ distRoot, sourceRoot: repoRoot });
+  const licenses = await licenseVerification({ distRoot, sourceRoot });
   const releaseMode = options.allowDirty ? "development" : "final";
 
   await removeExistingOutput(outputRoot);
@@ -686,7 +726,7 @@ async function packageRelease(options) {
   // directory). The deployable root is relative to the selected build root,
   // not to the caller's machine-specific repository path.
   const artifactPath = normalizedRelativePath(path.relative(distRoot, outputRoot));
-  const artifactDisplayPath = normalizedRelativePath(path.relative(repoRoot, outputRoot));
+  const artifactDisplayPath = normalizedRelativePath(path.relative(repoRoot, displayOutputRoot));
   const provenance = {
     schemaVersion: provenanceSchema,
     releaseMode,
@@ -768,33 +808,120 @@ async function buildAndPackageRelease(options) {
   if (sourceBeforeBuild.dirty && !options.allowDirty) {
     fail("Refusing a final release build from a dirty worktree. Commit all source changes first, or pass --allow-dirty for a development artifact.");
   }
-  await command(process.execPath, ["scripts/verify-geogon-vendor.mjs"]);
-  const sourceAfterVendorVerify = await gitMetadata();
-  if (
-    sourceAfterVendorVerify.commit !== sourceBeforeBuild.commit
-    || sourceAfterVendorVerify.dirty !== sourceBeforeBuild.dirty
-    || sourceAfterVendorVerify.statusSha256 !== sourceBeforeBuild.statusSha256
-  ) {
-    fail("The source checkout changed while the pinned GeoGon vendor was being verified.");
+  if (sourceBeforeBuild.dirty) {
+    await command(process.execPath, ["scripts/verify-geogon-vendor.mjs"]);
+    await assertSourceStateUnchanged(sourceBeforeBuild, "GeoGon verification");
+    console.log("Verified pinned GeoGon vendor source before release build.");
+    await command("npm", ["run", "build", "--", "--emptyOutDir"]);
+    await assertSourceStateUnchanged(sourceBeforeBuild, "build");
+    await packageRelease(options);
+    await assertSourceStateUnchanged(sourceBeforeBuild, "package");
+    return;
   }
-  console.log("Verified pinned GeoGon vendor source before release build.");
-  await command("npm", ["run", "build", "--", "--emptyOutDir"]);
-  const sourceAfterBuild = await gitMetadata();
+
+  await buildFinalReleaseFromCommit(options, sourceBeforeBuild);
+}
+
+async function assertSourceStateUnchanged(expected, phase) {
+  const actual = await gitMetadata();
   if (
-    sourceAfterBuild.commit !== sourceBeforeBuild.commit
-    || sourceAfterBuild.dirty !== sourceBeforeBuild.dirty
-    || sourceAfterBuild.statusSha256 !== sourceBeforeBuild.statusSha256
+    actual.commit !== expected.commit
+    || actual.dirty !== expected.dirty
+    || actual.statusSha256 !== expected.statusSha256
   ) {
-    fail("The source checkout changed while the release build was running.");
+    fail(`The source checkout changed while the release ${phase} was running.`);
   }
-  await packageRelease(options);
-  const sourceAfterPackage = await gitMetadata();
-  if (
-    sourceAfterPackage.commit !== sourceBeforeBuild.commit
-    || sourceAfterPackage.dirty !== sourceBeforeBuild.dirty
-    || sourceAfterPackage.statusSha256 !== sourceBeforeBuild.statusSha256
-  ) {
-    fail("The source checkout changed while the release was being packaged.");
+}
+
+async function buildFinalReleaseFromCommit(options, source) {
+  const temporaryRoot = await mkdtemp(path.join(tmpdir(), "patterdraw-release-"));
+  const archivePath = path.join(temporaryRoot, "source.tar");
+  const snapshotRoot = path.join(temporaryRoot, "source");
+  const snapshotDist = path.join(snapshotRoot, "dist");
+  const snapshotOutput = path.join(snapshotDist, "release");
+  try {
+    await mkdir(snapshotRoot, { recursive: true });
+    await command("git", ["archive", "--format=tar", "--output", archivePath, source.commit]);
+    await command("tar", ["-xf", archivePath, "-C", snapshotRoot]);
+
+    await command("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: snapshotRoot });
+    await command(process.execPath, ["scripts/verify-geogon-vendor.mjs"], { cwd: snapshotRoot });
+    console.log("Verified pinned GeoGon vendor source inside the immutable release snapshot.");
+    await command("npm", ["run", "build", "--", "--emptyOutDir"], { cwd: snapshotRoot });
+    await assertSourceStateUnchanged(source, "immutable build");
+
+    const snapshotOptions = { ...options, dist: snapshotDist, out: snapshotOutput };
+    await packageRelease(snapshotOptions, {
+      buildCommand: "npm ci --ignore-scripts --no-audit --no-fund && node scripts/verify-geogon-vendor.mjs && npm run build -- --emptyOutDir",
+      commandRoot: snapshotRoot,
+      displayOutputRoot: defaultOutput,
+      sourceMetadata: source,
+      sourceRoot: snapshotRoot,
+    });
+    await verifyRelease({ ...snapshotOptions, verify: true });
+    await assertSourceStateUnchanged(source, "immutable package");
+
+    await installCanonicalDist(snapshotDist, sourceDateEpoch(source.commitEpoch), options);
+    await assertSourceStateUnchanged(source, "artifact installation");
+  } finally {
+    await rm(temporaryRoot, { force: true, recursive: true });
+  }
+}
+
+async function installCanonicalDist(snapshotDist, epoch, options) {
+  const stagingRoot = await mkdtemp(path.join(repoRoot, ".patterdraw-dist-stage-"));
+  const candidateDist = path.join(stagingRoot, "dist");
+  const previousDist = `${stagingRoot}-previous`;
+  const failedDist = `${stagingRoot}-failed`;
+  let candidateInstalled = false;
+  let previousMoved = false;
+  try {
+    await cp(snapshotDist, candidateDist, { preserveTimestamps: true, recursive: true });
+    await setDeterministicTimes(path.join(candidateDist, "release"), epoch);
+    await verifyRelease({ ...options, out: path.join(candidateDist, "release"), verify: true });
+
+    let currentStats;
+    try {
+      currentStats = await lstat(defaultDist);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    if (currentStats) {
+      if (!currentStats.isDirectory() || currentStats.isSymbolicLink()) {
+        fail(`Canonical build directory must be a real directory: ${defaultDist}`);
+      }
+      await rename(defaultDist, previousDist);
+      previousMoved = true;
+    }
+
+    try {
+      await rename(candidateDist, defaultDist);
+      candidateInstalled = true;
+    } catch (error) {
+      if (previousMoved) {
+        await rename(previousDist, defaultDist);
+        previousMoved = false;
+      }
+      throw error;
+    }
+
+    await verifyRelease({ ...options, out: defaultOutput, verify: true });
+    if (previousMoved) {
+      await rm(previousDist, { force: true, recursive: true });
+      previousMoved = false;
+    }
+  } catch (error) {
+    if (candidateInstalled) {
+      await rename(defaultDist, failedDist);
+      if (previousMoved) {
+        await rename(previousDist, defaultDist);
+        previousMoved = false;
+      }
+      await rm(failedDist, { force: true, recursive: true });
+    }
+    throw error;
+  } finally {
+    await rm(stagingRoot, { force: true, recursive: true });
   }
 }
 
@@ -1074,9 +1201,14 @@ async function main() {
     console.log(usage());
     return;
   }
-  if (options.verify) await verifyRelease(options);
-  else if (options.build) await buildAndPackageRelease(options);
-  else await packageRelease(options);
+  const releaseLock = await acquireReleaseLock();
+  try {
+    if (options.verify) await verifyRelease(options);
+    else if (options.build) await buildAndPackageRelease(options);
+    else await packageRelease(options);
+  } finally {
+    await releaseLock();
+  }
 }
 
 main().catch((error) => {
