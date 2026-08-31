@@ -1061,6 +1061,21 @@ async function renderedPdfDisplaySamples(
   }, imageUrl);
 }
 
+async function waitForRenderedPdfDisplaySamples(
+  page: import("@playwright/test").Page,
+  predicate: (samples: PdfDisplaySamples) => boolean = () => true,
+): Promise<PdfDisplaySamples> {
+  const matched: { value: PdfDisplaySamples | null } = { value: null };
+  await expect.poll(async () => {
+    const samples = await renderedPdfDisplaySamples(page);
+    if (!samples || !predicate(samples)) return false;
+    matched.value = samples;
+    return true;
+  }, { timeout: 30_000 }).toBe(true);
+  if (!matched.value) throw new Error("The rendered PDF never produced the expected stable sample.");
+  return matched.value;
+}
+
 async function unusualPdfBytes(): Promise<Uint8Array> {
   const document = await PDFDocument.create();
   const page = document.addPage([612, 792]);
@@ -3458,11 +3473,10 @@ test("darkens PDF content while preserving embedded picture colours and canonica
   expect(lightStored?.dataURL).toBe(lightThumbnail);
   expect(lightStored?.appTheme).toBeUndefined();
 
-  await expect.poll(
-    () => renderedPdfDisplaySamples(page),
-    { timeout: 30_000 },
-  ).not.toBeNull();
-  const lightSamples = await renderedPdfDisplaySamples(page);
+  const lightSamples = await waitForRenderedPdfDisplaySamples(page, (samples) => (
+    samples.background.every((channel) => channel > 225)
+    && samples.vector.every((channel) => channel < 40)
+  ));
   expect(lightSamples?.background.every((channel) => channel > 225)).toBe(true);
   expect(lightSamples?.vector.every((channel) => channel < 40)).toBe(true);
   expect(lightSamples?.picture[0]).toBeGreaterThan(220);
@@ -3509,14 +3523,10 @@ test("darkens PDF content while preserving embedded picture colours and canonica
       && dimensions.every(({ height, width }) => Math.max(height, width) <= 256);
   }, { timeout: 30_000 }).toBe(true);
 
-  await expect.poll(async () => {
-    const samples = await renderedPdfDisplaySamples(page);
-    return samples?.background.every((channel) => channel < 45)
-      && samples.vector.every((channel) => channel > 205)
-      ? samples
-      : null;
-  }, { timeout: 30_000 }).not.toBeNull();
-  const darkSamples = await renderedPdfDisplaySamples(page);
+  const darkSamples = await waitForRenderedPdfDisplaySamples(page, (samples) => (
+    samples.background.every((channel) => channel < 45)
+    && samples.vector.every((channel) => channel > 205)
+  ));
   expect(darkSamples?.background.every((channel) => channel < 45)).toBe(true);
   expect(darkSamples?.vector.every((channel) => channel > 205)).toBe(true);
   expect(darkSamples?.picture[0]).toBeGreaterThan(150);
@@ -6496,7 +6506,10 @@ test("keeps every wrapper shortcut inert while editing Excalidraw text", async (
   await expect(textEditor).toHaveValue(exactText);
   await expect(textEditor).toBeFocused();
 
-  const shortcutEffects = await textEditor.evaluate(async (element) => {
+  const probeShortcutModifier = async (
+    modifier: "ctrlKey" | "metaKey",
+    includeUnmodifiedShortcuts: boolean,
+  ) => textEditor.evaluate(async (element, probe) => {
     const openInput = document.querySelector<HTMLInputElement>('input[aria-label="Open project file"]');
     let openClicks = 0;
     let downloadClicks = 0;
@@ -6505,8 +6518,23 @@ test("keeps every wrapper shortcut inert while editing Excalidraw text", async (
       const target = event.target instanceof Element ? event.target : null;
       if (target?.closest("a[download]")) downloadClicks += 1;
     };
+    // PatterDraw's capture handlers must see every synthetic probe, while
+    // Excalidraw's platform-specific Ctrl/Cmd+Enter text commit is tested
+    // separately below. Keep this textarea attached so every wrapper probe
+    // reaches the real app handlers on both macOS and Linux.
+    const suppressNativeTextCommit = (event: Event) => {
+      if (
+        event instanceof KeyboardEvent
+        && event.key === "Enter"
+        && (event.ctrlKey || event.metaKey)
+      ) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    };
     openInput?.addEventListener("click", countOpenClick);
     document.addEventListener("click", countDownloadClick, true);
+    element.addEventListener("keydown", suppressNativeTextCommit, true);
 
     const dispatchShortcut = (key: string, options: KeyboardEventInit = {}) => {
       const event = new KeyboardEvent("keydown", {
@@ -6519,16 +6547,21 @@ test("keeps every wrapper shortcut inert while editing Excalidraw text", async (
     };
 
     try {
-      dispatchShortcut("f", { ctrlKey: true });
-      dispatchShortcut("h", { ctrlKey: true, shiftKey: true });
-      dispatchShortcut("f", { ctrlKey: true, shiftKey: true });
-      dispatchShortcut("Enter", { ctrlKey: true, shiftKey: true });
-      dispatchShortcut("Enter", { altKey: true, ctrlKey: true });
-      dispatchShortcut("o", { ctrlKey: true });
-      dispatchShortcut("s", { ctrlKey: true });
-      dispatchShortcut("k", { ctrlKey: true });
-      dispatchShortcut("b");
-      dispatchShortcut("?", { code: "Slash", shiftKey: true });
+      const modifierOptions: KeyboardEventInit = probe.modifier === "ctrlKey"
+        ? { ctrlKey: true }
+        : { metaKey: true };
+      dispatchShortcut("f", modifierOptions);
+      dispatchShortcut("h", { ...modifierOptions, shiftKey: true });
+      dispatchShortcut("f", { ...modifierOptions, shiftKey: true });
+      dispatchShortcut("Enter", { ...modifierOptions, shiftKey: true });
+      dispatchShortcut("Enter", { ...modifierOptions, altKey: true });
+      dispatchShortcut("o", modifierOptions);
+      dispatchShortcut("s", modifierOptions);
+      dispatchShortcut("k", modifierOptions);
+      if (probe.includeUnmodifiedShortcuts) {
+        dispatchShortcut("b");
+        dispatchShortcut("?", { code: "Slash", shiftKey: true });
+      }
       await new Promise((resolve) => window.setTimeout(resolve, 250));
       return {
         downloadClicks,
@@ -6537,17 +6570,34 @@ test("keeps every wrapper shortcut inert while editing Excalidraw text", async (
         openClicks,
       };
     } finally {
+      element.removeEventListener("keydown", suppressNativeTextCommit, true);
       openInput?.removeEventListener("click", countOpenClick);
       document.removeEventListener("click", countDownloadClick, true);
     }
-  });
+  }, { includeUnmodifiedShortcuts, modifier });
 
-  expect(shortcutEffects).toEqual({
-    downloadClicks: 0,
-    focused: true,
-    fullscreen: false,
-    openClicks: 0,
-  });
+  const expectWrapperShortcutsUntouched = async (
+    shortcutEffects: Awaited<ReturnType<typeof probeShortcutModifier>>,
+  ) => {
+    expect(shortcutEffects).toEqual({
+      downloadClicks: 0,
+      focused: true,
+      fullscreen: false,
+      openClicks: 0,
+    });
+    await expect(page.locator(".topbar")).toBeVisible();
+    await expect(page.locator(".statusbar")).toBeVisible();
+    await expect(page.locator("#slide-rail")).toBeVisible();
+    await expect(page.locator(".app-shell")).not.toHaveClass(/is-clean-fullscreen|is-nav-hidden|is-footer-hidden/);
+    await expect(page.getByRole("toolbar", { name: "Presentation controls", exact: true })).toHaveCount(0);
+    await expect(page.locator(".project-find-panel")).toHaveCount(0);
+    await expect(page.getByRole("dialog", { name: "Keyboard shortcuts", exact: true })).toHaveCount(0);
+    await expect(page.getByTestId("bucket-fill-settings")).toHaveCount(0);
+    await expect(page.getByText("External links are disabled in PatterDraw.", { exact: true })).toHaveCount(0);
+  };
+
+  await expectWrapperShortcutsUntouched(await probeShortcutModifier("ctrlKey", true));
+  await expectWrapperShortcutsUntouched(await probeShortcutModifier("metaKey", false));
 
   // Ctrl/Cmd+Enter belongs to Excalidraw's native text editor: it commits
   // the text rather than invoking a PatterDraw wrapper shortcut. Keep this
@@ -6564,15 +6614,6 @@ test("keeps every wrapper shortcut inert while editing Excalidraw text", async (
       !element.isDeleted && element.type === "text" && element.text === exactText
     )) || false;
   }).toBe(true);
-  await expect(page.locator(".topbar")).toBeVisible();
-  await expect(page.locator(".statusbar")).toBeVisible();
-  await expect(page.locator("#slide-rail")).toBeVisible();
-  await expect(page.locator(".app-shell")).not.toHaveClass(/is-clean-fullscreen|is-nav-hidden|is-footer-hidden/);
-  await expect(page.getByRole("toolbar", { name: "Presentation controls", exact: true })).toHaveCount(0);
-  await expect(page.locator(".project-find-panel")).toHaveCount(0);
-  await expect(page.getByRole("dialog", { name: "Keyboard shortcuts", exact: true })).toHaveCount(0);
-  await expect(page.getByTestId("bucket-fill-settings")).toHaveCount(0);
-  await expect(page.getByText("External links are disabled in PatterDraw.", { exact: true })).toHaveCount(0);
 });
 
 test("toggles clean fullscreen without changing the restored toolbar and rail layout", async ({ page }) => {
