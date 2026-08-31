@@ -5015,7 +5015,7 @@ test("flushes ordinary project-title typing without the trailing autosave delay"
   }).toBe("Immediate autosave");
 });
 
-test("retries the latest dirty title during a real page reload", async ({ page }) => {
+test("keeps failed title saves unload-protected and retries before a later reload", async ({ page }) => {
   await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
   await page.evaluate(() => {
     const state = window as Window & {
@@ -5049,18 +5049,48 @@ test("retries the latest dirty title during a real page reload", async ({ page }
     page,
     "patterdraw:autosave:project:v1",
   ))?.title).not.toBe("Real page teardown autosave");
-  // Restore the synthetic storage failure before navigation begins. Doing it
-  // from another beforeunload listener makes the test depend on special-event
-  // listener ordering instead of exercising PatterDraw's page-exit retry.
+
+  const beforeUnloadResult = await page.evaluate(() => {
+    const event = new Event("beforeunload", { cancelable: true });
+    const dispatchResult = window.dispatchEvent(event);
+    return { defaultPrevented: event.defaultPrevented, dispatchResult };
+  });
+  expect(beforeUnloadResult).toEqual({ defaultPrevented: true, dispatchResult: false });
+  await expect.poll(() => page.evaluate(() => (
+    window as Window & { __reloadAutosaveFailure?: { attempts: number } }
+  ).__reloadAutosaveFailure?.attempts || 0)).toBeGreaterThan(1);
+
+  // A browser may destroy the document before an async IndexedDB write
+  // started from beforeunload/pagehide finishes. Exercise the supported
+  // boundary instead: retry while this page is still active, then reload
+  // only after the durable copy is observable.
   await page.evaluate(() => {
     const state = (window as Window & {
       __reloadAutosaveFailure?: { failWrites: boolean };
     }).__reloadAutosaveFailure;
     if (state) state.failWrites = false;
+    window.dispatchEvent(new Event("pagehide"));
   });
 
-  page.once("dialog", (dialog) => void dialog.accept());
-  await page.reload();
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  await expect.poll(async () => (
+    await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
+  )?.title).toBe("Real page teardown autosave");
+
+  // Let the active document acknowledge the pagehide boundary before
+  // reloading. This keeps the assertion about persistence independent of
+  // browser-specific unload scheduling.
+  await page.evaluate(() => window.dispatchEvent(new Event("pageshow")));
+  const clearedBeforeUnloadResult = await page.evaluate(() => {
+    const event = new Event("beforeunload", { cancelable: true });
+    const dispatchResult = window.dispatchEvent(event);
+    return { defaultPrevented: event.defaultPrevented, dispatchResult };
+  });
+  expect(clearedBeforeUnloadResult).toEqual({
+    defaultPrevented: false,
+    dispatchResult: true,
+  });
+  await page.reload({ waitUntil: "domcontentloaded" });
 
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await expect(page.getByRole("textbox", { name: "Project title" }))
@@ -6518,8 +6548,22 @@ test("keeps every wrapper shortcut inert while editing Excalidraw text", async (
     fullscreen: false,
     openClicks: 0,
   });
-  await expect(textEditor).toHaveValue(exactText);
-  await expect(textEditor).toBeFocused();
+
+  // Ctrl/Cmd+Enter belongs to Excalidraw's native text editor: it commits
+  // the text rather than invoking a PatterDraw wrapper shortcut. Keep this
+  // real key path outside the synthetic wrapper probes above because the
+  // native commit removes the textarea from the document.
+  await textEditor.press("ControlOrMeta+Enter");
+  await expect(textEditor).toHaveCount(0);
+  await expect.poll(async () => {
+    const saved = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, { elements: Array<{ isDeleted?: boolean; text?: string; type?: string }> }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    return saved?.scenes[saved.activeSceneId]?.elements.some((element) => (
+      !element.isDeleted && element.type === "text" && element.text === exactText
+    )) || false;
+  }).toBe(true);
   await expect(page.locator(".topbar")).toBeVisible();
   await expect(page.locator(".statusbar")).toBeVisible();
   await expect(page.locator("#slide-rail")).toBeVisible();

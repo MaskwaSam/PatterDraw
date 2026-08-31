@@ -1656,11 +1656,11 @@ test("keeps overlapping PDF Undo and alarm controls actionable, restores the exa
   const updateDialog = page.getByRole("dialog", { name: "Customize Timer", exact: true });
   await updateDialog.getByRole("button", { name: "Timer", exact: true }).click();
   await updateDialog.getByLabel("Timer hours", { exact: true }).fill("0");
-  await updateDialog.getByLabel("Timer minutes", { exact: true }).fill("1");
+  await updateDialog.getByLabel("Timer minutes", { exact: true }).fill("5");
   await updateDialog.getByLabel("Timer seconds", { exact: true }).fill("0");
   await updateDialog.getByRole("button", { name: "Save changes", exact: true }).click();
   await expect.poll(async () => (await waitForOnlyWidget(page, "timer")).runtime)
-    .toMatchObject({ status: "idle", remainingMs: 60_000 });
+    .toMatchObject({ status: "idle", remainingMs: 300_000 });
   await overlay.getByRole("button", { name: "Start", exact: true }).click();
   await expect.poll(async () => (await waitForOnlyWidget(page, "timer")).runtime?.status).toBe("running");
   const runningBeforeClear = await waitForOnlyWidget(page, "timer");

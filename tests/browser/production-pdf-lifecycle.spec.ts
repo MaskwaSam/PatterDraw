@@ -94,18 +94,21 @@ test("inserts multiple PDF sources, clears and restores one source, then saves a
   await drawPdfRectangle(page);
   await expect(pages.nth(0).locator(".pdf-annotation-count")).toHaveText("1");
 
+  const supplementalPdf = await pdfBytes([[400, 500], [410, 510]]);
+  const appendixPdf = await pdfBytes([[300, 360]]);
   await page.getByRole("button", { name: "Add page", exact: true }).click();
+  const insertPdfChooser = page.waitForEvent("filechooser");
   await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
-  await page.getByLabel("Select PDFs to insert").setInputFiles([
+  await (await insertPdfChooser).setFiles([
     {
       name: "cross-engine-supplement.pdf",
       mimeType: "application/pdf",
-      buffer: await pdfBytes([[400, 500], [410, 510]]),
+      buffer: supplementalPdf,
     },
     {
       name: "cross-engine-appendix.pdf",
       mimeType: "application/pdf",
-      buffer: await pdfBytes([[300, 360]]),
+      buffer: appendixPdf,
     },
   ]);
   const insert = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });

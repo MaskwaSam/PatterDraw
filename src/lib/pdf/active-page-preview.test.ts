@@ -24,8 +24,17 @@ import {
   shouldRenderLightPdfPageRefinement,
   type ActivePdfPagePreviewKeyInput,
 } from "./active-page-preview";
+import { getPdfRasterBudget } from "./raster-limits";
 
 const originalCreateElement = window.document.createElement.bind(window.document);
+const STANDARD_RASTER_BUDGET = getPdfRasterBudget({
+  deviceMemory: 8,
+  hardwareConcurrency: 8,
+});
+const LOW_MEMORY_RASTER_BUDGET = getPdfRasterBudget({
+  deviceMemory: 4,
+  hardwareConcurrency: 8,
+});
 
 describe("active PDF page preview targets", () => {
   it("uses discrete DPR quality buckets capped by the device tier", () => {
@@ -235,6 +244,7 @@ describe("light active PDF page rendering", () => {
       effectiveRotation: 90,
       width: 612,
       height: 792,
+      rasterBudget: STANDARD_RASTER_BUDGET,
     })).resolves.toEqual({
       dataURL: "data:image/png;base64,AA==",
       width: 612,
@@ -251,6 +261,32 @@ describe("light active PDF page rendering", () => {
     expect(page.cleanup).toHaveBeenCalledOnce();
     expect(loadingTask.destroy).toHaveBeenCalledOnce();
     expect(canvas).toMatchObject({ width: 0, height: 0 });
+  });
+
+  it("uses the explicit constrained-device raster envelope for refinement", async () => {
+    const sourceBytes = new Uint8Array([1, 2, 3, 4]);
+
+    await expect(renderLightPdfPagePreview({
+      bytes: sourceBytes,
+      pageIndex: 1,
+      effectiveRotation: 90,
+      width: 612,
+      height: 792,
+      rasterBudget: LOW_MEMORY_RASTER_BUDGET,
+    })).resolves.toMatchObject({ width: 612, height: 792 });
+
+    expect(assertPdfEmbeddedImageLimitMock).toHaveBeenCalledWith(
+      sourceBytes,
+      16_000_000,
+      expect.objectContaining({
+        maxEdge: 6_144,
+        maxTotalPixels: 32_000_000,
+      }),
+    );
+    expect(getDocumentMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      maxImageSize: 16_000_000,
+      canvasMaxAreaInBytes: 32_000_000,
+    }));
   });
 
   it("renders a view-rotated refinement in display orientation while validating source rotation", async () => {

@@ -60,6 +60,24 @@ describe("local classroom alarm audio", () => {
     expect(oscillators).toEqual([]);
   });
 
+  it("bounds a pending resume so Start can continue with a blocked-audio warning", async () => {
+    vi.useFakeTimers();
+    try {
+      const { context, oscillators } = fakeAudioContext("suspended");
+      vi.mocked(context.resume).mockImplementation(() => new Promise<void>(() => undefined));
+      const preparation = prepareClassroomAlarmAudio(context);
+      await vi.runAllTimersAsync();
+      await expect(preparation).resolves.toMatchObject({
+        status: "blocked",
+        error: expect.objectContaining({ name: "AudioContextResumeTimeoutError" }),
+      });
+      expect(context.resume).toHaveBeenCalledOnce();
+      expect(oscillators).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     ["warm-chime", 6],
     ["gentle-bell", 5],

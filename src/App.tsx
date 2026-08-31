@@ -3749,6 +3749,12 @@ export default function App() {
   }, []);
   const autosaveSnapshotRef = useRef<LoadedClassroomProject | null>(null);
   const autosaveDirtyRef = useRef(false);
+  // A failed write is stronger than the ordinary dirty flag: a later React
+  // commit or an exit-flush dedupe must not accidentally make the browser
+  // believe it is safe to leave. This is deliberately a ref-only guard. It
+  // does not claim that an async IndexedDB write can finish during unload;
+  // it only keeps the native unload warning until a later save succeeds.
+  const autosaveNeedsUnloadWarningRef = useRef(false);
   const autosaveSavingRef = useRef(false);
   const autosaveSuspendedRef = useRef(false);
   const autosaveUrgentRef = useRef(false);
@@ -4280,6 +4286,7 @@ export default function App() {
         // write on the same autosave path.
         if (pendingScenePersistenceRef.current) commitPendingScenePersistence();
         if (!autosaveDirtyRef.current) {
+          autosaveNeedsUnloadWarningRef.current = false;
           setSaveStatus(autosaveStartupReadyRef.current ? "saved" : "saving");
           return;
         }
@@ -4307,6 +4314,7 @@ export default function App() {
         autosaveExitFlushSnapshotRef.current = null;
         autosaveExitFlushQueuedRef.current = false;
         autosaveDirtyRef.current = true;
+        autosaveNeedsUnloadWarningRef.current = true;
         setSaveStatus("error");
         if (error instanceof AutosaveConflictError) {
           // Preserve this tab's board without retrying over a newer revision.
@@ -4443,6 +4451,7 @@ export default function App() {
     autosaveExitFlushQueuedRef.current = false;
     autosaveDirtyRef.current = false;
     autosaveUrgentRef.current = false;
+    autosaveNeedsUnloadWarningRef.current = false;
     autosaveLastQueuedAtRef.current = Date.now();
     // The immediately following React publication is already durable and
     // must not enqueue an identical full-project write.
@@ -5184,6 +5193,10 @@ export default function App() {
       else autosaveExitFlushQueuedRef.current = false;
     };
     const flushBeforePageExit = (event: BeforeUnloadEvent) => {
+      // IndexedDB work started here is best effort only: browsers may tear
+      // down the document before its promise settles. The sticky ref below
+      // keeps the native warning honest after a failed write instead of
+      // implying that this async callback can guarantee recovery on unload.
       // A dismissed beforeunload prompt leaves this document alive and does
       // not reliably emit pageshow. Let the guard reopen on the next task in
       // that case; during a real navigation the document is torn down before
@@ -5198,6 +5211,7 @@ export default function App() {
         !pendingScenePersistenceRef.current
         && !autosaveDirtyRef.current
         && !autosaveSavingRef.current
+        && !autosaveNeedsUnloadWarningRef.current
       ) return;
       event.preventDefault();
       event.returnValue = "";
@@ -6436,7 +6450,12 @@ export default function App() {
       }
       return false;
     }
-    if (!replacementSaved) autosaveCoveredSnapshotRef.current = null;
+    if (!replacementSaved) {
+      autosaveCoveredSnapshotRef.current = null;
+      autosaveNeedsUnloadWarningRef.current = true;
+    } else {
+      autosaveNeedsUnloadWarningRef.current = false;
+    }
     pendingScenePersistenceRef.current = null;
     if (scenePersistenceTimerRef.current !== null) {
       window.clearTimeout(scenePersistenceTimerRef.current);
@@ -7378,6 +7397,7 @@ export default function App() {
       autosaveDirtyRef.current = newerSnapshotPending;
       followupNeeded = newerSnapshotPending;
       autosaveUrgentRef.current = false;
+      autosaveNeedsUnloadWarningRef.current = newerSnapshotPending;
       autosaveLastQueuedAtRef.current = Date.now();
       autosaveSuspendedRef.current = false;
       autosaveSuspensionGenerationRef.current = null;
@@ -7392,6 +7412,7 @@ export default function App() {
       autosaveExitFlushSnapshotRef.current = null;
       autosaveExitFlushQueuedRef.current = false;
       autosaveDirtyRef.current = true;
+      autosaveNeedsUnloadWarningRef.current = true;
       setSaveStatus("error");
       setErrorMessage(autosaveFailureMessage(error));
     } finally {

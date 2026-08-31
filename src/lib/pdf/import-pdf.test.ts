@@ -27,11 +27,20 @@ vi.mock("./embedded-image-limits", () => ({
 
 import { hasPdfByteSignature, importPdf, inspectPdfFile } from "./import-pdf";
 import { MAX_PDF_PAGES } from "../safety";
+import { getPdfRasterBudget } from "./raster-limits";
 
 const originalCreateElement = window.document.createElement.bind(window.document);
 const PDF_BYTES = new Uint8Array([
   0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37, 0x0a,
 ]);
+const STANDARD_RASTER_BUDGET = getPdfRasterBudget({
+  deviceMemory: 8,
+  hardwareConcurrency: 8,
+});
+const LOW_MEMORY_RASTER_BUDGET = getPdfRasterBudget({
+  deviceMemory: 4,
+  hardwareConcurrency: 8,
+});
 
 describe("PDF import PDF.js safety options", () => {
   const page = {
@@ -83,7 +92,7 @@ describe("PDF import PDF.js safety options", () => {
       type: "application/pdf",
     });
 
-    await importPdf(file);
+    await importPdf(file, { rasterBudget: STANDARD_RASTER_BUDGET });
 
     const options = getDocumentMock.mock.calls[0]?.[0] as {
       enableScripting?: boolean;
@@ -102,6 +111,27 @@ describe("PDF import PDF.js safety options", () => {
     expect(assertPdfEmbeddedImageLimitMock.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
       maxEdge: 8_192,
     }));
+  });
+
+  it("uses the explicit constrained-device raster envelope without unbounded PDF.js defaults", async () => {
+    const file = new File([PDF_BYTES], "constrained.pdf", {
+      type: "application/pdf",
+    });
+
+    await importPdf(file, { rasterBudget: LOW_MEMORY_RASTER_BUDGET });
+
+    expect(getDocumentMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      maxImageSize: 16_000_000,
+      canvasMaxAreaInBytes: 32_000_000,
+    }));
+    expect(assertPdfEmbeddedImageLimitMock).toHaveBeenCalledWith(
+      expect.any(Uint8Array),
+      16_000_000,
+      expect.objectContaining({
+        maxEdge: 6_144,
+        maxTotalPixels: 32_000_000,
+      }),
+    );
   });
 
   it("rejects a same-size source replacement during import", async () => {
@@ -147,7 +177,10 @@ describe("PDF import PDF.js safety options", () => {
     const file = new File([PDF_BYTES], "remaining-budget.pdf", {
       type: "application/pdf",
     });
-    const imported = await importPdf(file, { maxRasterPixelsForImport: 100_000 });
+    const imported = await importPdf(file, {
+      maxRasterPixelsForImport: 100_000,
+      rasterBudget: STANDARD_RASTER_BUDGET,
+    });
 
     expect(imported.rasterUsage.encodedBytes).toBe(1);
     expect(imported.rasterUsage.pixels).toBeGreaterThan(0);

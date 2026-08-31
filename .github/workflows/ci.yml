@@ -228,25 +228,17 @@ jobs:
               artifacts/production/deploy-html-route-headers.txt
           done
 
-          set +e
-          "${client[@]}" -c \
-            'wget -S -O /dev/null --post-data="" --header="Host: draw.spatterson.ca" http://patterdraw:8080/ 2>&1' \
+          "${client[@]}" -eu -c \
+            'printf "POST / HTTP/1.1\r\nHost: draw.spatterson.ca\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" | nc -w 5 patterdraw 8080' \
             > artifacts/production/deploy-method-headers.txt
-          method_status=$?
-          set -e
-          test "$method_status" -ne 0
           grep -q 'HTTP/1.1 405' artifacts/production/deploy-method-headers.txt
           grep -qi 'Allow: GET, HEAD' artifacts/production/deploy-method-headers.txt
           assert_security_headers artifacts/production/deploy-method-headers.txt
           grep -qi 'Cache-Control: no-store' artifacts/production/deploy-method-headers.txt
 
-          set +e
-          "${client[@]}" -c \
-            'wget -S -O /dev/null --header="Host: draw.spatterson.ca" http://patterdraw:8080/assets/missing-does-not-exist.js 2>&1' \
+          "${client[@]}" -eu -c \
+            'printf "GET /assets/missing-does-not-exist.js HTTP/1.1\r\nHost: draw.spatterson.ca\r\nConnection: close\r\n\r\n" | nc -w 5 patterdraw 8080' \
             > artifacts/production/deploy-missing-headers.txt
-          missing_status=$?
-          set -e
-          test "$missing_status" -ne 0
           grep -q 'HTTP/1.1 404' artifacts/production/deploy-missing-headers.txt
           assert_security_headers artifacts/production/deploy-missing-headers.txt
           grep -qi 'Cache-Control: no-store' \

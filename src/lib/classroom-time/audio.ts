@@ -20,6 +20,14 @@ export interface ClassroomAlarmAudioPreparationResult {
 }
 
 let sharedAudioContext: AudioContext | null = null;
+const AUDIO_CONTEXT_RESUME_TIMEOUT_MS = 750;
+
+class AudioContextResumeTimeoutError extends Error {
+  constructor() {
+    super("Alarm audio did not become ready in time.");
+    this.name = "AudioContextResumeTimeoutError";
+  }
+}
 
 function createBrowserAudioContext(): AudioContext | null {
   if (sharedAudioContext) return sharedAudioContext;
@@ -41,6 +49,10 @@ function safeVolume(value: number | undefined): number {
     : 0.7;
 }
 
+function isAudioContextRunning(context: AudioContext): boolean {
+  return context.state === "running";
+}
+
 /**
  * Call from Start or Test Alarm's trusted user gesture. It silently creates
  * and resumes the shared context so a later deadline does not first request
@@ -51,7 +63,23 @@ export async function prepareClassroomAlarmAudio(
 ): Promise<ClassroomAlarmAudioPreparationResult> {
   if (!context || context.state === "closed") return { status: "unavailable" };
   try {
-    if (context.state === "suspended") await context.resume();
+    if (context.state === "suspended") {
+      let timeoutId: ReturnType<typeof globalThis.setTimeout> | undefined;
+      const outcome = await Promise.race([
+        context.resume().then(() => "resumed" as const),
+        new Promise<"timed-out">((resolve) => {
+          timeoutId = globalThis.setTimeout(
+            () => resolve("timed-out"),
+            AUDIO_CONTEXT_RESUME_TIMEOUT_MS,
+          );
+        }),
+      ]).finally(() => {
+        if (timeoutId !== undefined) globalThis.clearTimeout(timeoutId);
+      });
+      if (outcome === "timed-out" && !isAudioContextRunning(context)) {
+        return { status: "blocked", error: new AudioContextResumeTimeoutError() };
+      }
+    }
     return context.state === "running" ? { status: "ready" } : { status: "blocked" };
   } catch (error) {
     return { status: "blocked", error };

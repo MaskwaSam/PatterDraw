@@ -156,8 +156,14 @@ async function addText(page: import("@playwright/test").Page, text: string): Pro
   const textEditor = page.locator("textarea.excalidraw-wysiwyg");
   await expect(textEditor).toBeVisible();
   await textEditor.fill(text);
-  await textEditor.press("ControlOrMeta+Enter");
+  // Escape is Excalidraw's documented finish-editing action and works across
+  // Chromium, Firefox, and WebKit without relying on platform-modifier mapping.
+  await textEditor.press("Escape");
   await expect(textEditor).toHaveCount(0);
+  await expect.poll(async () => (
+    liveElements(await autosavedProject(page))
+      .some((element) => element.type === "text" && element.text === text)
+  )).toBe(true);
 }
 
 async function addRectangle(
@@ -705,9 +711,27 @@ test("starts and persists a Classroom Timer across packaged engines and a 320px 
   expect((overlayBounds?.x || 0) + (overlayBounds?.width || 0)).toBeLessThanOrEqual(
     await page.evaluate(() => window.innerWidth + 1),
   );
+  await page.evaluate(() => {
+    class PendingAudioContext {
+      readonly state = "suspended";
+
+      resume(): Promise<void> {
+        return new Promise<void>(() => undefined);
+      }
+    }
+    Object.defineProperty(window, "AudioContext", {
+      configurable: true,
+      value: PendingAudioContext,
+      writable: true,
+    });
+  });
   await overlay.getByRole("button", { name: "Start", exact: true }).click();
   await expect.poll(async () => classroomTimeAnchors(await autosavedProject(page)))
     .toMatchObject([{ label: "Production Timer", runtime: { status: "running" } }]);
+  await expect(page.getByText(
+    "Countdown started, but your browser blocked alarm sound. Test the alarm before relying on it.",
+    { exact: true },
+  )).toBeVisible();
   await expect.poll(() => page.evaluate(() => {
     const stored = JSON.parse(localStorage.getItem("patterdraw:classroom-alarm-registry:v1") || "null") as {
       jobs?: unknown[];
@@ -716,7 +740,13 @@ test("starts and persists a Classroom Timer across packaged engines and a 320px 
   })).toBe(1);
   await page.waitForTimeout(1_100);
   await expect(page.getByText("Classroom alarm job is invalid", { exact: false })).toHaveCount(0);
-  await expect(page.locator(".error-toast")).toHaveCount(0);
+  const audioWarning = page.locator(".error-toast");
+  await expect(audioWarning).toHaveCount(1);
+  const dismissAudioWarning = audioWarning.getByRole("button", { name: "Dismiss", exact: true });
+  await expect(dismissAudioWarning).toBeVisible();
+  await expect(dismissAudioWarning).toBeEnabled();
+  await dismissAudioWarning.click();
+  await expect(audioWarning).toHaveCount(0);
 
   await overlay.getByRole("button", { name: "Pause", exact: true }).click();
   await expect.poll(async () => classroomTimeAnchors(await autosavedProject(page))[0]?.runtime.status)
