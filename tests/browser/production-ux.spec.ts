@@ -102,6 +102,26 @@ function classroomTimeAnchors(project: StoredProject | undefined): ProductionCla
   });
 }
 
+async function acknowledgeLocalReadinessAdvisory(
+  page: import("@playwright/test").Page,
+): Promise<void> {
+  const banner = page.locator(".local-readiness-banner");
+  const storageIsDurable = await page.evaluate(async () => {
+    try {
+      return typeof navigator.storage?.persisted === "function"
+        && await navigator.storage.persisted();
+    } catch {
+      return false;
+    }
+  });
+  if (!storageIsDurable) {
+    await expect(banner).toBeVisible({ timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
+  }
+  if (!await banner.isVisible()) return;
+  await banner.getByRole("button", { name: "Dismiss", exact: true }).click();
+  await expect(banner).toHaveCount(0);
+}
+
 async function addText(page: import("@playwright/test").Page, text: string): Promise<void> {
   const textTool = page.getByTestId("toolbar-text");
   await textTool.click({ force: true });
@@ -112,9 +132,27 @@ async function addText(page: import("@playwright/test").Page, text: string): Pro
     await page.keyboard.press("t");
   }
   await expect(textTool).toBeChecked();
-  const editor = await page.locator(".editor-host").boundingBox();
-  if (!editor) throw new Error("Editor host has no visible bounds.");
-  await page.mouse.click(editor.x + 220, editor.y + 180);
+  const canvas = page.locator(".editor-host canvas.excalidraw__canvas.interactive");
+  await expect(canvas).toBeVisible();
+  const position = await canvas.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const candidates = [
+      { x: 0.5, y: 0.65 },
+      { x: 0.25, y: 0.65 },
+      { x: 0.75, y: 0.65 },
+      { x: 0.5, y: 0.45 },
+    ];
+    for (const candidate of candidates) {
+      const x = bounds.width * candidate.x;
+      const y = bounds.height * candidate.y;
+      if (document.elementFromPoint(bounds.left + x, bounds.top + y) === element) {
+        return { x, y };
+      }
+    }
+    return null;
+  });
+  if (!position) throw new Error("The interactive canvas has no unobstructed text insertion point.");
+  await canvas.click({ position });
   const textEditor = page.locator("textarea.excalidraw-wysiwyg");
   await expect(textEditor).toBeVisible();
   await textEditor.fill(text);
@@ -224,6 +262,10 @@ test.beforeEach(async ({ page }) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
   await expect.poll(async () => Boolean(await autosavedProject(page))).toBe(true);
+  // Production UX scenarios exercise the working editor, not the startup
+  // storage advisory. Acknowledge it explicitly instead of force-clicking
+  // controls behind a visible mobile banner.
+  await acknowledgeLocalReadinessAdvisory(page);
 });
 
 test("keeps iPhone chrome compact without covering board controls", async ({ page }) => {
@@ -244,6 +286,8 @@ test("keeps iPhone chrome compact without covering board controls", async ({ pag
     await page.reload({ waitUntil: "domcontentloaded" });
     const editor = page.locator(".editor-host .excalidraw");
     await expect(editor).toBeVisible({ timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
+    await acknowledgeLocalReadinessAdvisory(page);
+    await expect(page.locator(".local-readiness-banner")).toHaveCount(0);
     await expect(
       editor,
       `Excalidraw should use its mobile controls at ${viewport.width}x${viewport.height}`,
@@ -347,6 +391,75 @@ test("keeps Project Find typing and Escape out of canvas shortcuts while navigat
 
   const canvasSearch = page.getByRole("button", { name: "Search current canvas", exact: true });
   const nativeSearch = page.locator(".layer-ui__search input");
+
+  // Opening Project Find schedules a second-frame focus fallback for browsers
+  // whose sidebar mounts late. A user can still move to another panel control
+  // in the opening task; that delayed fallback must not steal focus back.
+  await query.press("Escape");
+  await expect(query).toHaveCount(0);
+  await page.evaluate(() => {
+    type NestedRafState = {
+      callbacks: Map<number, FrameRequestCallback>;
+      insideFrame: boolean;
+      nextId: number;
+      request: typeof window.requestAnimationFrame;
+      cancel: typeof window.cancelAnimationFrame;
+    };
+    const host = window as Window & { __patterdrawNestedRaf?: NestedRafState };
+    const state: NestedRafState = {
+      callbacks: new Map(),
+      insideFrame: false,
+      nextId: -1,
+      request: window.requestAnimationFrame.bind(window),
+      cancel: window.cancelAnimationFrame.bind(window),
+    };
+    host.__patterdrawNestedRaf = state;
+    window.requestAnimationFrame = (callback) => {
+      if (state.insideFrame) {
+        const id = state.nextId--;
+        state.callbacks.set(id, callback);
+        return id;
+      }
+      return state.request((timestamp) => {
+        state.insideFrame = true;
+        try {
+          callback(timestamp);
+        } finally {
+          state.insideFrame = false;
+        }
+      });
+    };
+    window.cancelAnimationFrame = (id) => {
+      if (!state.callbacks.delete(id)) state.cancel(id);
+    };
+  });
+  await page.getByRole("button", { name: "Find in project", exact: true }).click();
+  await expect(query).toBeVisible();
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    const state = (window as Window & {
+      __patterdrawNestedRaf?: { request: typeof window.requestAnimationFrame };
+    }).__patterdrawNestedRaf;
+    if (!state) throw new Error("Nested animation-frame gate is unavailable.");
+    state.request(() => resolve());
+  }));
+  await canvasSearch.focus();
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    type NestedRafState = {
+      callbacks: Map<number, FrameRequestCallback>;
+      request: typeof window.requestAnimationFrame;
+      cancel: typeof window.cancelAnimationFrame;
+    };
+    const host = window as Window & { __patterdrawNestedRaf?: NestedRafState };
+    const state = host.__patterdrawNestedRaf;
+    if (!state) throw new Error("Nested animation-frame gate is unavailable.");
+    window.requestAnimationFrame = state.request;
+    window.cancelAnimationFrame = state.cancel;
+    delete host.__patterdrawNestedRaf;
+    for (const callback of state.callbacks.values()) state.request(callback);
+    state.request(() => state.request(() => resolve()));
+  }));
+  await expect(canvasSearch).toBeFocused();
+
   await canvasSearch.focus();
   await canvasSearch.press("Enter");
   await expect(nativeSearch).toBeVisible();

@@ -9,6 +9,7 @@ import {
   type FatalFailure,
 } from "./bootstrap";
 import { installLocalExcalidrawAssets, installOfflineNetworkGuard } from "./lib/offline-network";
+import { installOfflineAppShellExperience } from "./lib/offline-app-shell";
 
 function renderFatal(
   root: Root | null,
@@ -58,6 +59,10 @@ async function bootstrap(root: Root, mount: HTMLElement): Promise<void> {
     const { default: App } = await import("./App");
     if (fatalShown) return;
     renderApp(root, App);
+    // Registration is optional and deferred until window load. A new worker
+    // may install in the background, but it never replaces the code beneath
+    // this open classroom lesson or forces a reload.
+    if (import.meta.env.PROD) installOfflineAppShellExperience();
   } catch (error) {
     showFatal({ kind: "bootstrap", error });
   }

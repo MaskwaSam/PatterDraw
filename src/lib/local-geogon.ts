@@ -1,5 +1,10 @@
 export const LOCAL_GEOGON_VERSION = "0.2.10";
-export const LOCAL_GEOGON_RELATIVE_PATH = "./geogon/index.html?host=patterdraw";
+// This is the reviewed upstream commit recorded by PATTERDRAW_VENDOR.md and
+// verified by check:geogon-vendor. It is a public content identity, not a
+// secret. The offline app shell uses it to bind a newly created iframe to the
+// same immutable GeoGon release as its parent PatterDraw page.
+export const LOCAL_GEOGON_RELEASE_AUTHORITY = "386e47223740ed9955ae1fe8a022516fea98d57f";
+export const LOCAL_GEOGON_RELATIVE_PATH = "./geogon/index.html?host=patterdraw&patterdraw-geogon=386e47223740ed9955ae1fe8a022516fea98d57f";
 
 /**
  * Resolve only the reviewed, bundled GeoGon entry point beside PatterDraw.

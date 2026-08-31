@@ -71,7 +71,7 @@ async function encodeProject(
     }
     entries[source.archivePath] = bytes;
   }
-  return createProjectArchive(entries, maxUncompressedBytes);
+  return createProjectArchive(entries, maxUncompressedBytes, options.signal);
 }
 
 export function encodeProjectFile(

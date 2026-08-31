@@ -186,7 +186,8 @@ const localGeoGonSource = await readFile(path.join(root, "src/lib/local-geogon.t
 const embeddedContentPolicySource = await readFile(path.join(root, "src/lib/embedded-content-policy.ts"), "utf8");
 const productionServerSource = await readFile(path.join(root, "scripts/serve-production-dist.mjs"), "utf8");
 if (
-  !localGeoGonSource.includes('LOCAL_GEOGON_RELATIVE_PATH = "./geogon/index.html?host=patterdraw"')
+  !localGeoGonSource.includes('LOCAL_GEOGON_RELEASE_AUTHORITY = "386e47223740ed9955ae1fe8a022516fea98d57f"')
+  || !localGeoGonSource.includes('LOCAL_GEOGON_RELATIVE_PATH = "./geogon/index.html?host=patterdraw&patterdraw-geogon=386e47223740ed9955ae1fe8a022516fea98d57f"')
   || !localGeoGonSource.includes("url.origin !== baseUrl.origin")
   || !localGeoGonSource.includes('url.pathname.endsWith("/geogon/index.html")')
 ) {

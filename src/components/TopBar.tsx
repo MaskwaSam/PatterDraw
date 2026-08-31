@@ -41,6 +41,8 @@ interface TopBarProps {
   onPdfPreferenceChange: (key: PdfPreferenceKey, enabled: boolean) => void;
   onThemePreferenceChange: (preference: ThemePreference) => void;
   onOpenShortcutHelp: (returnFocusTarget?: HTMLElement | null) => void;
+  onOpenRecoveryHistory: (returnFocusTarget?: HTMLElement | null) => void;
+  recoveryHistoryCount: number;
   onRestoreFeaturePreferences: () => void;
   onRestorePdfPreferences: () => void;
   onOpen: () => void;
@@ -249,6 +251,8 @@ export function TopBar({
   onPdfPreferenceChange,
   onThemePreferenceChange,
   onOpenShortcutHelp,
+  onOpenRecoveryHistory,
+  recoveryHistoryCount,
   onRestoreFeaturePreferences,
   onRestorePdfPreferences,
   onOpen,
@@ -285,6 +289,8 @@ export function TopBar({
           onPdfPreferenceChange={onPdfPreferenceChange}
           onThemePreferenceChange={onThemePreferenceChange}
           onOpenShortcutHelp={onOpenShortcutHelp}
+          onOpenRecoveryHistory={onOpenRecoveryHistory}
+          recoveryHistoryCount={recoveryHistoryCount}
           onRestorePdfDefaults={onRestorePdfPreferences}
           onRestoreDefaults={onRestoreFeaturePreferences}
         />

@@ -30,6 +30,8 @@ export interface SettingsMenuProps {
   onPdfPreferenceChange?: (key: PdfPreferenceKey, enabled: boolean) => void;
   onThemePreferenceChange: (preference: ThemePreference) => void;
   onOpenShortcutHelp: (returnFocusTarget?: HTMLElement | null) => void;
+  onOpenRecoveryHistory?: (returnFocusTarget?: HTMLElement | null) => void;
+  recoveryHistoryCount?: number;
   onRestorePdfDefaults?: () => void;
   onRestoreDefaults: () => void;
 }
@@ -130,6 +132,8 @@ export function SettingsMenu({
   onPdfPreferenceChange,
   onThemePreferenceChange,
   onOpenShortcutHelp,
+  onOpenRecoveryHistory,
+  recoveryHistoryCount = 0,
   onRestorePdfDefaults,
   onRestoreDefaults,
 }: SettingsMenuProps) {
@@ -374,6 +378,25 @@ export function SettingsMenu({
 
           <div className="settings-group" role="group" aria-labelledby="help-settings-label">
             <h3 id="help-settings-label">Help</h3>
+            {onOpenRecoveryHistory ? (
+              <button
+                className="settings-help-link"
+                type="button"
+                onClick={() => {
+                  restoreSettingsFocusRef.current = false;
+                  setOpen(false);
+                  onOpenRecoveryHistory(triggerRef.current);
+                }}
+              >
+                <span>
+                  <strong>Recovery history</strong>
+                  <small>Review or remove protected local classroom copies</small>
+                </span>
+                <span className="settings-help-count" aria-label={`${recoveryHistoryCount} protected copies`}>
+                  {recoveryHistoryCount}
+                </span>
+              </button>
+            ) : null}
             <button
               className="settings-help-link"
               type="button"

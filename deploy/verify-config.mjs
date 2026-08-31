@@ -179,6 +179,22 @@ for (const [routeName, routePattern] of [
     `NGINX must keep the ${routeName} HTML response uncached and prevent proxy-side script injection.`,
   );
 }
+for (const [routeName, routePattern] of [
+  ["root", /location = \/ \{[^}]*add_header X-PatterDraw-App-Shell "patterdraw-app-shell-v1" always;[^}]*\}/],
+  ["direct index", /location = \/index\.html \{[^}]*add_header X-PatterDraw-App-Shell "patterdraw-app-shell-v1" always;[^}]*\}/],
+  ["SPA fallback", /location @patterdraw_app \{[^}]*add_header X-PatterDraw-App-Shell "patterdraw-app-shell-v1" always;[^}]*\}/],
+]) {
+  requireMatch(
+    nginx,
+    routePattern,
+    `NGINX must advertise the app-shell rollback protocol on the ${routeName} HTML response.`,
+  );
+}
+requireMatch(
+  nginx,
+  /location = \/service-worker\.js \{[^}]*default_type application\/javascript;[^}]*add_header Cache-Control "no-cache, no-transform" always;[^}]*try_files \$uri =404;[^}]*\}/,
+  "NGINX must revalidate the same-origin app-shell worker without allowing proxy transformation.",
+);
 requireMatch(nginx, /max-age=31536000, immutable/, "NGINX must cache hashed assets immutably.");
 requireMatch(
   nginx,

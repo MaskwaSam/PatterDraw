@@ -3,6 +3,7 @@ import { access, lstat, readFile, realpath, stat } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 
 const scriptRoot = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptRoot, "..");
@@ -18,7 +19,14 @@ const staticAssetPrefixes = [
 ];
 
 function parseArguments(argv) {
-  const options = { dist: "dist", host: "127.0.0.1", port: "4174" };
+  const options = {
+    dist: "dist",
+    host: "127.0.0.1",
+    port: "4174",
+    testGzipAssets: false,
+    testNavigationFaults: false,
+    testPerformanceProfile: false,
+  };
   const allowed = new Map([
     ["--dist", "dist"],
     ["--host", "host"],
@@ -27,6 +35,24 @@ function parseArguments(argv) {
   const seen = new Set();
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
+    if (flag === "--test-navigation-faults") {
+      if (seen.has(flag)) throw new Error(`Duplicate argument: ${flag}`);
+      options.testNavigationFaults = true;
+      seen.add(flag);
+      continue;
+    }
+    if (flag === "--test-gzip-assets") {
+      if (seen.has(flag)) throw new Error(`Duplicate argument: ${flag}`);
+      options.testGzipAssets = true;
+      seen.add(flag);
+      continue;
+    }
+    if (flag === "--test-performance-profile") {
+      if (seen.has(flag)) throw new Error(`Duplicate argument: ${flag}`);
+      options.testPerformanceProfile = true;
+      seen.add(flag);
+      continue;
+    }
     const key = allowed.get(flag);
     if (!key) throw new Error(`Unknown argument: ${flag}`);
     if (seen.has(flag)) throw new Error(`Duplicate argument: ${flag}`);
@@ -39,6 +65,9 @@ function parseArguments(argv) {
 }
 
 const options = parseArguments(process.argv.slice(2));
+if (options.testGzipAssets && options.testPerformanceProfile) {
+  throw new Error("--test-gzip-assets and --test-performance-profile cannot be combined.");
+}
 const distRoot = path.resolve(repoRoot, options.dist);
 const host = options.host;
 const port = Number(options.port);
@@ -60,6 +89,19 @@ const contentTypes = {
   ".wasm": "application/wasm",
   ".woff2": "font/woff2",
 };
+
+// Test-only packaged performance profile. Enforcing it at the HTTP server
+// makes the latency, bandwidth, and byte accounting apply to document, module,
+// and service-worker-global requests alike; a page-scoped CDP session cannot
+// reliably observe or throttle the worker's install fetches.
+const testPerformanceProfile = Object.freeze({
+  downloadBytesPerSecond: (10 * 1024 * 1024) / 8,
+  latencyMs: 40,
+});
+const testPerformanceEndpointPrefix = `${routePrefix}__patterdraw_test/performance/`;
+const testPerformanceCookie = "patterdraw_performance_session";
+const testPerformanceSessions = new Map();
+const testPerformanceTokenPattern = /^[a-f0-9]{32}$/;
 
 // Keep the header policy as strict as the offline student build permits. The
 // same baseline is present in index.html as a file-open fallback, while these
@@ -154,6 +196,30 @@ function isAssetPath(relativePath) {
     || staticAssetPrefixes.some((prefix) => relativePath.startsWith(prefix));
 }
 
+function acceptsGzip(rawHeader) {
+  const header = Array.isArray(rawHeader) ? rawHeader.join(",") : String(rawHeader || "");
+  let explicitGzip;
+  let wildcard = false;
+  for (const entry of header.split(",")) {
+    const [rawName, ...parameters] = entry.trim().split(";");
+    const name = rawName.trim().toLowerCase();
+    if (!name) continue;
+    const qualityParameter = parameters.find((parameter) => parameter.trim().toLowerCase().startsWith("q="));
+    const quality = qualityParameter
+      ? Number(qualityParameter.trim().slice(2))
+      : 1;
+    const accepted = Number.isFinite(quality) && quality > 0;
+    if (name === "gzip") explicitGzip = accepted;
+    if (name === "*" && accepted) wildcard = true;
+  }
+  return explicitGzip ?? wildcard;
+}
+
+function isTestCompressible(relativePath) {
+  return new Set([".css", ".html", ".js", ".json", ".mjs", ".svg", ".txt"])
+    .has(path.extname(relativePath).toLowerCase());
+}
+
 function sendNotFound(response, requestMethod) {
   setSecurityHeaders(response);
   response.statusCode = 404;
@@ -169,7 +235,208 @@ function sendMethodNotAllowed(response, requestMethod) {
   response.end(requestMethod === "HEAD" ? undefined : "Method not allowed");
 }
 
-async function serveFile(response, filePath, requestMethod) {
+function cookieValue(request, name) {
+  for (const cookie of String(request.headers.cookie || "").split(";")) {
+    const separator = cookie.indexOf("=");
+    if (separator < 0 || cookie.slice(0, separator).trim() !== name) continue;
+    return cookie.slice(separator + 1).trim();
+  }
+  return null;
+}
+
+function createTestPerformanceSession(token) {
+  return {
+    bodyBytes: 0,
+    completedResponseCount: 0,
+    nextTransferAt: 0,
+    requestCount: 0,
+    requests: new Map(),
+    startedAt: Date.now(),
+    token,
+  };
+}
+
+function activeTestPerformanceSession(request) {
+  if (!options.testPerformanceProfile) return null;
+  const token = cookieValue(request, testPerformanceCookie);
+  if (!testPerformanceTokenPattern.test(token || "")) return null;
+  return testPerformanceSessions.get(token) || null;
+}
+
+function recordTestPerformanceRequest(session, relativePath) {
+  session.requestCount += 1;
+  const metrics = session.requests.get(relativePath) || {
+    bodyBytes: 0,
+    completedResponseCount: 0,
+    requestCount: 0,
+  };
+  metrics.requestCount += 1;
+  session.requests.set(relativePath, metrics);
+  return metrics;
+}
+
+function testPerformanceSnapshot(session) {
+  return {
+    bodyBytes: session.bodyBytes,
+    completedResponseCount: session.completedResponseCount,
+    profile: testPerformanceProfile,
+    requestCount: session.requestCount,
+    requests: [...session.requests.entries()]
+      .map(([relativePath, metrics]) => ({ relativePath, ...metrics }))
+      .sort((left, right) => left.relativePath.localeCompare(right.relativePath)),
+    startedAt: session.startedAt,
+  };
+}
+
+function sendTestPerformanceJson(response, requestMethod, statusCode, payload, cookie = null) {
+  setSecurityHeaders(response);
+  response.statusCode = statusCode;
+  response.setHeader("Cache-Control", "no-store");
+  response.setHeader("Content-Type", "application/json; charset=utf-8");
+  if (cookie) response.setHeader("Set-Cookie", cookie);
+  response.end(requestMethod === "HEAD" ? undefined : `${JSON.stringify(payload)}\n`);
+}
+
+function handleTestPerformanceEndpoint(request, response, pathname, requestUrl) {
+  if (!options.testPerformanceProfile || !pathname.startsWith(testPerformanceEndpointPrefix)) {
+    return false;
+  }
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    sendMethodNotAllowed(response, request.method);
+    return true;
+  }
+  const action = pathname.slice(testPerformanceEndpointPrefix.length);
+  const token = requestUrl.searchParams.get("token") || "";
+  if (!testPerformanceTokenPattern.test(token)) {
+    sendTestPerformanceJson(response, request.method, 400, {
+      error: "Invalid performance-session token.",
+    });
+    return true;
+  }
+  if (action === "start") {
+    testPerformanceSessions.set(token, createTestPerformanceSession(token));
+    sendTestPerformanceJson(
+      response,
+      request.method,
+      200,
+      { profile: testPerformanceProfile, started: true },
+      `${testPerformanceCookie}=${token}; HttpOnly; Path=${routePrefix}; SameSite=Strict`,
+    );
+    return true;
+  }
+  const session = testPerformanceSessions.get(token);
+  if (!session) {
+    sendTestPerformanceJson(response, request.method, 404, {
+      error: "Performance session not found.",
+    });
+    return true;
+  }
+  if (action === "metrics") {
+    sendTestPerformanceJson(response, request.method, 200, testPerformanceSnapshot(session));
+    return true;
+  }
+  if (action === "stop") {
+    const snapshot = testPerformanceSnapshot(session);
+    testPerformanceSessions.delete(token);
+    sendTestPerformanceJson(
+      response,
+      request.method,
+      200,
+      snapshot,
+      `${testPerformanceCookie}=; HttpOnly; Max-Age=0; Path=${routePrefix}; SameSite=Strict`,
+    );
+    return true;
+  }
+  sendTestPerformanceJson(response, request.method, 404, {
+    error: "Unknown performance endpoint.",
+  });
+  return true;
+}
+
+function streamTestPerformanceFile(response, filePath, session, relativePath) {
+  const requestMetrics = recordTestPerformanceRequest(session, relativePath);
+  const stream = createReadStream(filePath, { highWaterMark: 32 * 1024 });
+  let timer = null;
+  let responseCompleted = false;
+  let sourceEnded = false;
+  let pendingChunk = false;
+  const stop = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    if (!stream.destroyed) stream.destroy();
+  };
+  const finishIfReady = () => {
+    if (!sourceEnded || pendingChunk || responseCompleted || response.destroyed) return;
+    responseCompleted = true;
+    session.completedResponseCount += 1;
+    requestMetrics.completedResponseCount += 1;
+    response.end();
+  };
+
+  response.once("close", () => {
+    if (!responseCompleted) stop();
+  });
+  stream.once("error", () => response.destroy());
+  stream.once("end", () => {
+    sourceEnded = true;
+    finishIfReady();
+  });
+
+  timer = setTimeout(() => {
+    timer = null;
+    stream.on("data", (chunk) => {
+      stream.pause();
+      pendingChunk = true;
+      const now = Date.now();
+      const transferStartsAt = Math.max(now, session.nextTransferAt);
+      const transferFinishesAt = transferStartsAt
+        + (chunk.length / testPerformanceProfile.downloadBytesPerSecond) * 1_000;
+      session.nextTransferAt = transferFinishesAt;
+      timer = setTimeout(() => {
+        timer = null;
+        if (response.destroyed) {
+          stop();
+          return;
+        }
+        response.write(chunk, () => {
+          if (response.destroyed) {
+            stop();
+            return;
+          }
+          session.bodyBytes += chunk.length;
+          requestMetrics.bodyBytes += chunk.length;
+          pendingChunk = false;
+          stream.resume();
+          finishIfReady();
+        });
+      }, Math.max(0, Math.ceil(transferFinishesAt - now)));
+    });
+  }, testPerformanceProfile.latencyMs);
+}
+
+function sendSimulatedRollbackHtml(response, requestMethod) {
+  const body = Buffer.from(
+    "<!doctype html><html><head><meta charset=\"utf-8\"><title>PatterDraw rollback fixture</title></head><body>Previous PatterDraw release</body></html>\n",
+    "utf8",
+  );
+  setSecurityHeaders(response);
+  response.statusCode = 200;
+  response.setHeader("Cache-Control", "no-store");
+  response.setHeader("Content-Type", "text/html; charset=utf-8");
+  response.setHeader("Content-Length", String(body.byteLength));
+  response.end(requestMethod === "HEAD" ? undefined : body);
+}
+
+async function serveFile(
+  response,
+  filePath,
+  requestMethod,
+  {
+    acceptEncoding = "",
+    performanceSession = null,
+    suppressAppShellMarker = false,
+  } = {},
+) {
   let resolvedFilePath;
   try {
     resolvedFilePath = await realpath(filePath);
@@ -196,18 +463,42 @@ async function serveFile(response, filePath, requestMethod) {
   response.setHeader("Content-Type", contentTypes[path.extname(resolvedFilePath).toLowerCase()] || "application/octet-stream");
   response.setHeader("Content-Length", String(fileStats.size));
   response.setHeader("X-PatterDraw-Production-Dist", "1");
+  if (path.basename(resolvedFilePath) === "index.html" && !suppressAppShellMarker) {
+    response.setHeader("X-PatterDraw-App-Shell", "patterdraw-app-shell-v1");
+  }
   const isHashedBuildAsset = relativePath.startsWith("assets/")
     && /-[A-Za-z0-9_-]{8,}\.[^.]+$/.test(path.basename(relativePath));
+  const isServiceWorker = path.basename(resolvedFilePath) === "service-worker.js";
   response.setHeader(
     "Cache-Control",
     path.basename(resolvedFilePath) === "index.html"
       ? "no-store"
-      : isHashedBuildAsset
-        ? "public, max-age=31536000, immutable"
-        : "public, max-age=0, must-revalidate",
+      : isServiceWorker
+        ? "no-cache, no-transform"
+        : isHashedBuildAsset
+          ? "public, max-age=31536000, immutable"
+          : "public, max-age=0, must-revalidate",
   );
+  const isTestGzipEligible = options.testGzipAssets
+    && !isServiceWorker
+    && isTestCompressible(relativePath);
+  if (isTestGzipEligible) response.setHeader("Vary", "Accept-Encoding");
+  const useTestGzip = isTestGzipEligible && acceptsGzip(acceptEncoding);
+  if (useTestGzip) {
+    const sourceBytes = await readFile(resolvedFilePath);
+    const compressedBytes = gzipSync(sourceBytes, { level: 9 });
+    response.setHeader("Content-Encoding", "gzip");
+    response.setHeader("Content-Length", String(compressedBytes.byteLength));
+    // Test-only provenance lets the browser lifecycle prove that the worker
+    // cached the decoded representation rather than compressed wire bytes.
+    response.setHeader("X-PatterDraw-Test-Uncompressed-Length", String(sourceBytes.byteLength));
+    response.end(requestMethod === "HEAD" ? undefined : compressedBytes);
+    return true;
+  }
   if (requestMethod === "HEAD") {
     response.end();
+  } else if (performanceSession) {
+    streamTestPerformanceFile(response, resolvedFilePath, performanceSession, relativePath);
   } else {
     createReadStream(resolvedFilePath).on("error", () => response.destroy()).pipe(response);
   }
@@ -235,6 +526,7 @@ if (!indexText.includes("PatterDraw") || indexText.includes("/src/main.tsx")) {
   throw new Error("dist/index.html does not look like a production PatterDraw build.");
 }
 
+let simulatedRollbackActive = false;
 const server = http.createServer(async (request, response) => {
   try {
     setSecurityHeaders(response);
@@ -251,6 +543,15 @@ const server = http.createServer(async (request, response) => {
       return;
     }
     const requestUrl = new URL(request.url || "/", `http://${request.headers.host || "127.0.0.1"}`);
+    if (handleTestPerformanceEndpoint(request, response, pathname, requestUrl)) return;
+    const performanceSession = activeTestPerformanceSession(request);
+    if (options.testNavigationFaults) {
+      if (requestUrl.searchParams.get("__patterdraw_test_reintroduce") === "1") {
+        simulatedRollbackActive = false;
+      } else if (requestUrl.searchParams.get("__patterdraw_test_rollback") === "1") {
+        simulatedRollbackActive = true;
+      }
+    }
     const routeWithoutTrailingSlash = routePrefix.slice(0, -1);
     if (pathname === routeWithoutTrailingSlash) {
       response.statusCode = 308;
@@ -269,9 +570,52 @@ const server = http.createServer(async (request, response) => {
     const relativePath = nestedRequest
       ? pathname.slice(routePrefix.length)
       : pathname.slice(1);
+    if (simulatedRollbackActive && relativePath === "service-worker.js") {
+      sendNotFound(response, request.method);
+      return;
+    }
+    if (
+      options.testNavigationFaults
+      && requestUrl.searchParams.get("__patterdraw_test_navigation_abort") === "1"
+      && !isAssetPath(relativePath)
+    ) {
+      // Deterministically exercise the worker's thrown-network-error branch,
+      // including after the rollback fixture has retired cached routing.
+      // Keeping this before rollback HTML avoids browser-specific offline
+      // emulation while proving both normal fallback and fail-closed routing.
+      response.destroy();
+      return;
+    }
+    if (simulatedRollbackActive && !isAssetPath(relativePath)) {
+      // A true rollback serves the previous, pre-service-worker application,
+      // not the candidate JavaScript that would immediately register again.
+      // Keep this fixture intentionally inert so retirement can be observed
+      // without a race against a second candidate registration.
+      sendSimulatedRollbackHtml(response, request.method);
+      return;
+    }
+    const simulatedStatus = options.testNavigationFaults
+      ? Number(requestUrl.searchParams.get("__patterdraw_test_navigation_status"))
+      : 0;
+    if (
+      (simulatedStatus === 502 || simulatedStatus === 503)
+      && !isAssetPath(relativePath)
+    ) {
+      setSecurityHeaders(response);
+      response.statusCode = simulatedStatus;
+      response.setHeader("Cache-Control", "no-store");
+      response.setHeader("Content-Type", "text/plain; charset=utf-8");
+      response.end(request.method === "HEAD" ? undefined : `Simulated ${simulatedStatus}`);
+      return;
+    }
+    const suppressAppShellMarker = simulatedRollbackActive;
     const requestedFile = safeDistPath(relativePath);
     if (requestedFile) {
-      const served = await serveFile(response, requestedFile, request.method);
+      const served = await serveFile(response, requestedFile, request.method, {
+        acceptEncoding: request.headers["accept-encoding"],
+        performanceSession,
+        suppressAppShellMarker,
+      });
       if (served === true || served === null) {
         if (served === null) sendNotFound(response, request.method);
         return;
@@ -279,7 +623,11 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (pathname === "/") {
-      const served = await serveFile(response, realIndexPath, request.method);
+      const served = await serveFile(response, realIndexPath, request.method, {
+        acceptEncoding: request.headers["accept-encoding"],
+        performanceSession,
+        suppressAppShellMarker,
+      });
       if (served !== true) sendNotFound(response, request.method);
       return;
     }
@@ -296,7 +644,11 @@ const server = http.createServer(async (request, response) => {
     // a realistic Moodle-style nested subdirectory. Unknown application paths
     // under that subdirectory still receive the built entry point.
     if (nestedRequest) {
-      const served = await serveFile(response, realIndexPath, request.method);
+      const served = await serveFile(response, realIndexPath, request.method, {
+        acceptEncoding: request.headers["accept-encoding"],
+        performanceSession,
+        suppressAppShellMarker,
+      });
       if (served !== true) sendNotFound(response, request.method);
       return;
     }

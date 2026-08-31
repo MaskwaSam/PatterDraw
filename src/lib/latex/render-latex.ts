@@ -4,6 +4,7 @@ const MAX_LATEX_COMMANDS = 500;
 const RENDER_TIMEOUT_MS = 8_000;
 const MAX_SVG_ELEMENTS = 12_000;
 const MAX_SVG_BYTES = 2_000_000;
+const OFFLINE_ASSET_AUTHORITY_PARAMETER = "patterdraw-asset-sha256";
 const BLOCKED_LATEX_COMMAND = /\\(?:href|url|style|class|cssId|html(?:Data|Class|Id|Style)?|includegraphics|require|autoload|unicode|input|include|openin|read|write|special|def|edef|gdef|xdef|let|futurelet|csname|catcode|newcommand|renewcommand|providecommand|DeclareMathOperator|newenvironment|renewenvironment)\b/i;
 const BLOCKED_LATEX_VALUE = /url\s*\(|(?:javascript|data|file|https?|ftp)\s*:/i;
 const ALLOWED_SVG_TAGS = new Set([
@@ -128,6 +129,15 @@ function mathJaxConfiguration(): Record<string, unknown> {
     options: {
       enableMenu: false,
       enableExplorer: false,
+      // MathJax launches its speech engine from a blob-backed worker. During
+      // an app-shell cutover that worker has no intercepted creation request
+      // from which the active service worker can inherit its page lineage.
+      // Bind its first local import to the exact bundled bytes; the service
+      // worker can then authorize only that dedicated blob worker and keep its
+      // subsequent local math-map requests on the same verified release.
+      worker: {
+        worker: `speech-worker.js?${OFFLINE_ASSET_AUTHORITY_PARAMETER}=${__PATTERDRAW_MATHJAX_SPEECH_WORKER_SHA256__}`,
+      },
       safeOptions: {
         allow: {
           URLs: "none",

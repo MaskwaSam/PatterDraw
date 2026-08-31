@@ -6,6 +6,8 @@ export const DEFAULT_PDF_INSERTION_PLACEMENT: PdfInsertionPlacement = "after";
 /** One inspected local PDF in the user-controlled batch order. */
 export interface PdfImportSelection {
   file: File;
+  /** Teacher-facing source label; defaults to the local file name. */
+  sourceName?: string;
   /** SHA-256 of the immutable local source bytes. */
   sha256: string;
   /** Authoritative source page count reported by PDF.js. */

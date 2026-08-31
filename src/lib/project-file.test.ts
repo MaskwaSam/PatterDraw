@@ -111,6 +111,18 @@ describe("classroom project files", () => {
     )).rejects.toMatchObject({ name: "AbortError" });
   });
 
+  it("rejects an already-cancelled archive save", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(encodeProjectFile(
+      createBlankProject(),
+      {},
+      undefined,
+      { signal: controller.signal },
+    )).rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("round-trips canonical project calendar events and upgrades legacy manifests", async () => {
     const event: ClassroomCalendarEventV1 = {
       schemaVersion: 1,

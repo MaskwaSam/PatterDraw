@@ -1192,7 +1192,13 @@ export async function exportAnnotatedPdfWithDiagnostics(
     0,
     scenes.length,
   );
-  const savedBytes = await awaitPdfOperation(output.save(), options.signal);
+  // pdf-lib's final serialization is one non-interruptible operation. Do not
+  // race it against AbortSignal and pretend it stopped while the underlying
+  // buffer continues consuming memory. The UI removes its Cancel action when
+  // the `saving` phase begins; an earlier cancellation is checked above and a
+  // superseding intent is still honored before any bytes are returned.
+  throwIfPdfOperationAborted(options.signal);
+  const savedBytes = await output.save();
   resources.chargeOutputBytes(savedBytes.byteLength);
   throwIfPdfOperationAborted(options.signal);
   const diagnostics = Object.freeze({
@@ -1324,7 +1330,8 @@ export async function exportSlidesPdf(
     project.slideOrder.length,
     `${project.title} — slides`,
   );
-  const savedBytes = await awaitPdfOperation(output.save(), options.signal);
+  throwIfPdfOperationAborted(options.signal);
+  const savedBytes = await output.save();
   resources.chargeOutputBytes(savedBytes.byteLength);
   throwIfPdfOperationAborted(options.signal);
   return new Blob([bytesForBlob(savedBytes)], { type: "application/pdf" });

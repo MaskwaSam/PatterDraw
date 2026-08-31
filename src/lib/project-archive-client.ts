@@ -1,9 +1,12 @@
 type ArchiveOperation =
   | { operation: "zip"; entries: Record<string, Uint8Array>; maxBytes: number }
-  | { operation: "unzip"; bytes: Uint8Array; maxBytes: number };
+  | { operation: "unzip"; bytes: Uint8Array; maxBytes: number }
+  | { operation: "preflight" };
 
 /** Bound worker hangs while leaving headroom for a 150 MiB archive on classroom hardware. */
 export const PROJECT_ARCHIVE_WORKER_TIMEOUT_MS = 60_000;
+/** A readiness check should fail quickly enough to remain a startup advisory. */
+export const PROJECT_ARCHIVE_PREFLIGHT_TIMEOUT_MS = 5_000;
 
 interface ArchiveWorkerResponse {
   id: number;
@@ -11,6 +14,18 @@ interface ArchiveWorkerResponse {
   message?: string;
   archive?: Uint8Array;
   entries?: Record<string, Uint8Array>;
+  ready?: boolean;
+}
+
+function isUint8Array(value: unknown): value is Uint8Array {
+  return value instanceof Uint8Array;
+}
+
+function isArchiveEntries(value: unknown): value is Record<string, Uint8Array> {
+  return Boolean(value)
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.values(value as Record<string, unknown>).every(isUint8Array);
 }
 
 /**
@@ -62,6 +77,7 @@ function canFallbackToSynchronousArchive(): boolean {
 function runArchiveWorker(
   operation: ArchiveOperation,
   signal?: AbortSignal,
+  timeoutMs = PROJECT_ARCHIVE_WORKER_TIMEOUT_MS,
 ): Promise<ArchiveWorkerResponse> {
   throwIfAborted(signal);
   return new Promise((resolve, reject) => {
@@ -133,7 +149,7 @@ function runArchiveWorker(
       rejectOnce(new ArchiveWorkerInfrastructureError(
         "Project archive worker timed out.",
       ));
-    }, PROJECT_ARCHIVE_WORKER_TIMEOUT_MS);
+    }, timeoutMs);
 
     try {
       if (operation.operation === "zip") {
@@ -144,6 +160,10 @@ function runArchiveWorker(
           { id: requestId, ...operation, entries: transferableEntries },
           Object.values(transferableEntries).map((entry) => entry.buffer as ArrayBuffer),
         );
+        return;
+      }
+      if (operation.operation === "preflight") {
+        worker.postMessage({ id: requestId, ...operation });
         return;
       }
       const transferableBytes = operation.bytes.slice();
@@ -161,6 +181,58 @@ function runArchiveWorker(
   });
 }
 
+export type ProjectArchiveWorkerReadiness = Readonly<
+  | { available: true }
+  | { available: false; message: string }
+>;
+
+/**
+ * Start the exact production module worker and complete a round trip before
+ * students depend on Save/Open. Unsupported or blocked workers are reported
+ * as a capability result rather than throwing; caller cancellation still
+ * rejects with AbortError.
+ */
+export async function preflightProjectArchiveWorker(
+  signal?: AbortSignal,
+): Promise<ProjectArchiveWorkerReadiness> {
+  throwIfAborted(signal);
+  if (!isBrowserRuntime()) {
+    return Object.freeze({
+      available: false,
+      message: "Project archive readiness can only be checked in a browser.",
+    });
+  }
+  if (!canUseArchiveWorker()) {
+    return Object.freeze({
+      available: false,
+      message: "This browser cannot start the project archive worker. Save and Open may be unavailable.",
+    });
+  }
+  try {
+    const response = await runArchiveWorker(
+      { operation: "preflight" },
+      signal,
+      PROJECT_ARCHIVE_PREFLIGHT_TIMEOUT_MS,
+    );
+    throwIfAborted(signal);
+    if (!response.ok || response.ready !== true) {
+      return Object.freeze({
+        available: false,
+        message: response.message || "The project archive worker did not pass its readiness check.",
+      });
+    }
+    return Object.freeze({ available: true });
+  } catch (error) {
+    throwIfAborted(signal);
+    return Object.freeze({
+      available: false,
+      message: error instanceof Error && error.message
+        ? error.message
+        : "The project archive worker did not pass its readiness check.",
+    });
+  }
+}
+
 function isArchiveWorkerInfrastructureError(error: unknown): boolean {
   return error instanceof ArchiveWorkerInfrastructureError;
 }
@@ -168,28 +240,38 @@ function isArchiveWorkerInfrastructureError(error: unknown): boolean {
 export async function createProjectArchive(
   entries: Record<string, Uint8Array>,
   maxBytes: number,
+  signal?: AbortSignal,
 ): Promise<Uint8Array> {
+  throwIfAborted(signal);
   if (!canUseArchiveWorker()) {
     if (isBrowserRuntime() && !canFallbackToSynchronousArchive()) {
       throw new ArchiveWorkerInfrastructureError("Project archive worker is unavailable.");
     }
     const { createProjectArchiveSync } = await import("./project-archive-engine");
-    return createProjectArchiveSync(entries, maxBytes);
+    throwIfAborted(signal);
+    const archive = createProjectArchiveSync(entries, maxBytes);
+    throwIfAborted(signal);
+    return archive;
   }
   try {
-    const response = await runArchiveWorker({ operation: "zip", entries, maxBytes });
+    const response = await runArchiveWorker({ operation: "zip", entries, maxBytes }, signal);
+    throwIfAborted(signal);
     if (!response.ok) {
       throw new Error(response.message || "Project archive processing failed.");
     }
-    if (!response.archive) {
+    if (!isUint8Array(response.archive)) {
       throw new ArchiveWorkerInfrastructureError("Project archive worker returned no data.");
     }
     return response.archive;
   } catch (error) {
     if (!isArchiveWorkerInfrastructureError(error)) throw error;
     if (isBrowserRuntime() && !canFallbackToSynchronousArchive()) throw error;
+    throwIfAborted(signal);
     const { createProjectArchiveSync } = await import("./project-archive-engine");
-    return createProjectArchiveSync(entries, maxBytes);
+    throwIfAborted(signal);
+    const archive = createProjectArchiveSync(entries, maxBytes);
+    throwIfAborted(signal);
+    return archive;
   }
 }
 
@@ -215,7 +297,7 @@ export async function extractProjectArchive(
     if (!response.ok) {
       throw new Error(response.message || "Project archive processing failed.");
     }
-    if (!response.entries) {
+    if (!isArchiveEntries(response.entries)) {
       throw new ArchiveWorkerInfrastructureError("Project archive worker returned no entries.");
     }
     return response.entries;

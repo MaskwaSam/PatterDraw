@@ -2,6 +2,16 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ClassroomSlide } from "../types";
+import {
+  DEFAULT_CLASSROOM_ALARM_SETTINGS,
+  DEFAULT_CLASSROOM_CALENDAR_SETTINGS,
+  DEFAULT_CLASSROOM_CLOCK_SETTINGS,
+  DEFAULT_CLASSROOM_POMODORO_SETTINGS,
+  DEFAULT_CLASSROOM_TIME_APPEARANCE,
+  DEFAULT_CLASSROOM_TIMER_SETTINGS,
+  createIdlePomodoroRuntime,
+  type ClassroomTimeWidgetMetadataV1,
+} from "../lib/classroom-time/types";
 import { PresentationOverlay } from "./PresentationOverlay";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -14,6 +24,44 @@ const SLIDES: readonly ClassroomSlide[] = [
 
 const roots: Root[] = [];
 
+function runningTimerMetadata(): ClassroomTimeWidgetMetadataV1 {
+  return {
+    version: 1,
+    ownerId: "presentation-timer",
+    kind: "timer",
+    label: "Group work",
+    appearance: { ...DEFAULT_CLASSROOM_TIME_APPEARANCE },
+    timer: { ...DEFAULT_CLASSROOM_TIMER_SETTINGS },
+    runtime: {
+      status: "running",
+      remainingMs: 300_000,
+      deadlineMs: 400_000,
+      completedAtMs: null,
+    },
+    alarm: { ...DEFAULT_CLASSROOM_ALARM_SETTINGS },
+  };
+}
+
+function dashboardMetadata(): ClassroomTimeWidgetMetadataV1 {
+  const timer = { ...DEFAULT_CLASSROOM_TIMER_SETTINGS };
+  const pomodoro = { ...DEFAULT_CLASSROOM_POMODORO_SETTINGS };
+  return {
+    version: 1,
+    ownerId: "presentation-dashboard",
+    kind: "dashboard",
+    label: "Class dashboard",
+    appearance: { ...DEFAULT_CLASSROOM_TIME_APPEARANCE },
+    panels: { clock: true, timer: true, pomodoro: true, calendar: false },
+    clock: { ...DEFAULT_CLASSROOM_CLOCK_SETTINGS },
+    timer,
+    timerRuntime: { status: "idle", remainingMs: timer.durationMs, deadlineMs: null, completedAtMs: null },
+    pomodoro,
+    pomodoroRuntime: createIdlePomodoroRuntime(pomodoro),
+    calendar: { ...DEFAULT_CLASSROOM_CALENDAR_SETTINGS, projectEventIds: [], transferCache: null },
+    alarm: { ...DEFAULT_CLASSROOM_ALARM_SETTINGS },
+  };
+}
+
 function button(container: ParentNode, label: string): HTMLButtonElement {
   const match = [...container.querySelectorAll<HTMLButtonElement>("button")]
     .find((candidate) => candidate.getAttribute("aria-label") === label);
@@ -25,6 +73,7 @@ function mount(overrides: Partial<Parameters<typeof PresentationOverlay>[0]> = {
   const callbacks = {
     onIndexChange: vi.fn(),
     onToolChange: vi.fn(),
+    onClassroomTimeCommand: vi.fn(),
     onInkColourChange: vi.fn(),
     onInkWidthChange: vi.fn(),
     onExit: vi.fn(),
@@ -167,6 +216,71 @@ describe("PresentationOverlay controls", () => {
     expect(callbacks.onExit).toHaveBeenCalledOnce();
   });
 
+  it("exposes a React-owned eraser and keeps tool shortcuts synchronized", () => {
+    const { callbacks, container } = mount({ tool: "eraser" });
+    const eraser = button(container, "Eraser");
+
+    expect(eraser.getAttribute("aria-pressed")).toBe("true");
+    expect(eraser.getAttribute("aria-keyshortcuts")).toBe("E 0");
+    expect(button(container, "Ink").getAttribute("aria-keyshortcuts")).toBe("P 7");
+    expect(button(container, "Laser").getAttribute("aria-keyshortcuts")).toBe("K");
+
+    act(() => eraser.click());
+    expect(keydown(document.body, "e").defaultPrevented).toBe(true);
+    expect(keydown(document.body, "0").defaultPrevented).toBe(true);
+    expect(keydown(document.body, "p").defaultPrevented).toBe(true);
+    expect(keydown(document.body, "7").defaultPrevented).toBe(true);
+    expect(keydown(document.body, "k").defaultPrevented).toBe(true);
+    expect(keydown(document.body, "e", { repeat: true }).defaultPrevented).toBe(true);
+
+    expect(callbacks.onToolChange.mock.calls).toEqual([
+      ["eraser"],
+      ["eraser"],
+      ["eraser"],
+      ["freedraw"],
+      ["freedraw"],
+      ["laser"],
+    ]);
+  });
+
+  it("keeps selected timer controls usable during presentation", () => {
+    const { callbacks, container } = mount({
+      classroomTime: {
+        metadata: runningTimerMetadata(),
+        nowMs: 100_000,
+        activeTarget: "timer",
+      },
+    });
+
+    expect(container.textContent).toContain("Group work · 05:00");
+    act(() => button(container, "Pause").click());
+    act(() => button(container, "Reset").click());
+    act(() => button(container, "Add one minute").click());
+
+    expect(callbacks.onClassroomTimeCommand.mock.calls).toEqual([
+      ["pause", "timer"],
+      ["reset", "timer"],
+      ["add-minute", "timer"],
+    ]);
+  });
+
+  it("lets a dashboard switch between Timer and Pomodoro controls", () => {
+    const onClassroomTimeTargetChange = vi.fn();
+    const { container } = mount({
+      classroomTime: {
+        metadata: dashboardMetadata(),
+        nowMs: 100_000,
+        activeTarget: "timer",
+      },
+      onClassroomTimeTargetChange,
+    });
+
+    expect(button(container, "Control dashboard timer").getAttribute("aria-pressed")).toBe("true");
+    expect(button(container, "Control dashboard Pomodoro").getAttribute("aria-pressed")).toBe("false");
+    act(() => button(container, "Control dashboard Pomodoro").click());
+    expect(onClassroomTimeTargetChange).toHaveBeenCalledWith("pomodoro");
+  });
+
   it("does not intercept shortcuts from editable or modal interaction surfaces", () => {
     const { callbacks, container } = mount();
     const surfaces = [
@@ -186,6 +300,7 @@ describe("PresentationOverlay controls", () => {
       if (!target) throw new Error(`${label} surface did not render a keyboard target.`);
 
       expect(keydown(target, "c").defaultPrevented, label).toBe(false);
+      expect(keydown(target, "e").defaultPrevented, label).toBe(false);
       expect(keydown(target, "ArrowRight").defaultPrevented, label).toBe(false);
       expect(keydown(target, "Escape").defaultPrevented, label).toBe(false);
       host.remove();
@@ -193,6 +308,7 @@ describe("PresentationOverlay controls", () => {
 
     expect(callbacks.onIndexChange).not.toHaveBeenCalled();
     expect(callbacks.onExit).not.toHaveBeenCalled();
+    expect(callbacks.onToolChange).not.toHaveBeenCalled();
     expect(button(container, "Collapse presentation controls")).toBeTruthy();
   });
 
@@ -202,6 +318,7 @@ describe("PresentationOverlay controls", () => {
 
     const events = [
       keydown(document.body, "c"),
+      keydown(document.body, "e"),
       keydown(document.body, "ArrowRight"),
       keydown(document.body, "Home"),
       keydown(document.body, "Escape"),
@@ -209,6 +326,7 @@ describe("PresentationOverlay controls", () => {
     expect(events.every((event) => !event.defaultPrevented)).toBe(true);
     expect(callbacks.onIndexChange).not.toHaveBeenCalled();
     expect(callbacks.onExit).not.toHaveBeenCalled();
+    expect(callbacks.onToolChange).not.toHaveBeenCalled();
 
     act(() => button(container, "Collapse presentation controls").click());
     expect(button(container, "Expand presentation controls")).toBe(document.activeElement);

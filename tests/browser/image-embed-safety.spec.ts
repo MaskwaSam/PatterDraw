@@ -575,6 +575,15 @@ test("pastes and restores a local 3DGeoGon vector export", async ({ page }) => {
     mimeType: "application/vnd.patterdraw+zip",
     buffer: savedBytes,
   });
+  const projectSwitch = page.getByRole("dialog", {
+    name: "Open another project?",
+    exact: true,
+  });
+  await expect(projectSwitch).toBeVisible();
+  await projectSwitch.getByRole("button", {
+    name: "Open without downloading",
+    exact: true,
+  }).click();
   await expect(projectTitle).toHaveValue("3DGeoGon save verification");
   await expect.poll(() => autosavedImageSummary(page)).toMatchObject({
     count: 1,
@@ -622,7 +631,10 @@ test("builds in the bundled GeoGon dialog and persists only its local vector han
   const frame = page.frameLocator("iframe.geogon-frame");
   const insert = dialog.getByTestId("geogon-insert");
   await expect(dialog).toBeVisible();
-  await expect(frameElement).toHaveAttribute("src", /\/geogon\/index\.html\?host=patterdraw$/);
+  await expect(frameElement).toHaveAttribute(
+    "src",
+    /\/geogon\/index\.html\?host=patterdraw&patterdraw-geogon=386e47223740ed9955ae1fe8a022516fea98d57f$/,
+  );
   await expect(frameElement).toHaveAttribute("sandbox", "allow-scripts allow-same-origin allow-downloads");
   await expect(frameElement).toHaveAttribute("referrerpolicy", "no-referrer");
   await expect(frame.getByRole("button", { name: "Add", exact: true })).toBeVisible({ timeout: 30_000 });

@@ -196,6 +196,19 @@ button { color: inherit; }
 .settings-help-link > span { min-width: 0; display: grid; gap: 2px; }
 .settings-help-link strong { color: #2b3549; font-size: 12px; font-weight: 680; }
 .settings-help-link small { color: var(--muted); font-size: 10px; font-weight: 500; line-height: 1.35; }
+.settings-help-link > .settings-help-count {
+  min-width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 1px solid #aeb9c9;
+  border-radius: 999px;
+  background: #fff;
+  color: #3d4b63;
+  font-size: 11px;
+  font-weight: 750;
+}
 .settings-help-link kbd {
   min-width: 28px;
   height: 28px;
@@ -957,6 +970,32 @@ button { color: inherit; }
 .editor-host { min-height: 0; position: relative; }
 .editor-host > .excalidraw { height: 100%; }
 .editor-host .excalidraw { --color-primary: #2859c5; --color-primary-darker: #204aa5; }
+.scene-hydration-input-guard {
+  position: absolute;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  cursor: wait;
+  background: rgb(242 244 247 / 12%);
+  touch-action: none;
+  user-select: none;
+}
+.scene-hydration-input-guard > span {
+  padding: 7px 11px;
+  border: 1px solid rgb(119 130 151 / 32%);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 92%);
+  color: #465066;
+  box-shadow: 0 2px 8px rgb(15 23 42 / 10%);
+  font-size: 12px;
+  font-weight: 700;
+}
+.app-shell[data-theme="dark"] .scene-hydration-input-guard > span {
+  border-color: rgb(187 197 218 / 28%);
+  background: rgb(34 38 49 / 94%);
+  color: #e4e8f1;
+}
 /* Keep Excalidraw's mobile bottom island because it also exposes contextual
    object actions. Offset its side tools from an iPhone landscape safe area. */
 .editor-host .excalidraw.excalidraw--mobile .mobile-misc-tools-container {
@@ -1521,7 +1560,12 @@ button { color: inherit; }
   .screenshot-capture-overlay,
   .lasso-overlay,
   .bucket-fill-settings,
-  .spinner-pointer-overlays
+  .spinner-pointer-overlays,
+  .autosave-recovery-banner,
+  .busy-overlay,
+  .error-toast,
+  .app-toast-stack,
+  .pdf-annotation-clear-toast
 ) { display: none !important; }
 .is-clean-fullscreen .editor-region,
 .is-clean-fullscreen.is-slide-mode .editor-region,
@@ -1543,6 +1587,11 @@ button { color: inherit; }
   .HintViewer
 ) { display: none !important; }
 body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-menu) {
+  display: none !important;
+}
+body:has(.app-shell.is-clean-fullscreen) #patterdraw-offline-app-shell-status,
+body:has(.app-shell.is-presenting) #patterdraw-offline-app-shell-status,
+body:has(.app-shell:fullscreen.is-obs-capture-enabled) #patterdraw-offline-app-shell-status {
   display: none !important;
 }
 
@@ -1761,6 +1810,65 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
 .pdf-clear-annotations-actions { margin-top: 15px; }
 .pdf-clear-annotations-actions .dialog-primary.is-danger { border-color: #9f2f2f; background: #b63737; }
 .pdf-clear-annotations-actions .dialog-primary.is-danger:hover:not(:disabled) { background: #962c2c; }
+
+.recovery-history-dialog {
+  width: min(720px, 100%);
+  max-height: calc(100dvh - 40px);
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  gap: 12px;
+  overflow: hidden;
+  padding: 22px;
+  border: 1px solid #cfd5df;
+  border-radius: 11px;
+  background: #fff;
+  box-shadow: 0 18px 60px rgb(15 23 42 / 25%);
+}
+.recovery-history-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.recovery-history-heading h2 { margin: 2px 0 0; color: #253047; font-size: 20px; }
+.recovery-history-heading > span { flex: 0 0 auto; color: var(--muted); font-size: 11px; font-weight: 720; }
+.recovery-history-description { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.recovery-history-status { margin: 0; padding: 9px 10px; border: 1px solid #cbd7ef; border-radius: 7px; background: #f4f7ff; color: #314b7e; font-size: 11px; line-height: 1.45; }
+.recovery-history-status.is-warning { border-color: #e0be7a; background: #fff8e9; color: #704b0e; }
+.recovery-history-status.is-error { border-color: #e4b2b2; background: #fff5f5; color: #812f2f; }
+.recovery-history-list {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  margin: 0;
+  padding: 1px 4px 1px 1px;
+  border: 0;
+}
+.recovery-history-entry {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  background: #fff;
+  color: #263249;
+  cursor: pointer;
+}
+.recovery-history-entry:has(input:checked) { border-color: #6f91dc; background: var(--accent-soft); box-shadow: inset 0 0 0 1px #6f91dc; }
+.recovery-history-entry.is-damaged { border-color: #dfaaaa; }
+.recovery-history-entry input { flex: 0 0 auto; margin: 3px 0 0; accent-color: var(--accent); }
+.recovery-history-entry-copy { min-width: 0; display: grid; gap: 3px; }
+.recovery-history-entry-copy strong { overflow-wrap: anywhere; font-size: 12px; line-height: 1.3; }
+.recovery-history-entry-copy > span { color: var(--muted); font-size: 10px; line-height: 1.4; }
+.recovery-history-entry-copy small { color: #8d3030; font-size: 10px; line-height: 1.4; }
+.recovery-history-empty { min-height: 150px; display: grid; place-content: center; justify-items: center; gap: 5px; padding: 20px; border: 1px dashed #bdc7d5; border-radius: 8px; color: var(--muted); text-align: center; }
+.recovery-history-empty strong { color: #354057; font-size: 13px; }
+.recovery-history-empty span { font-size: 11px; }
+.recovery-history-confirmation { padding: 13px; border: 1px solid #dfaaaa; border-radius: 8px; background: #fff7f7; }
+.recovery-history-confirmation h3 { margin: 0 0 5px; color: #812f2f; font-size: 14px; }
+.recovery-history-confirmation p { margin: 0; color: #6f3838; font-size: 11px; line-height: 1.5; }
+.recovery-history-confirmation .dialog-actions { margin-top: 12px; }
+.recovery-history-actions { margin-top: 0; }
 
 .pdf-insert-dialog {
   width: min(760px, 100%);
@@ -2256,6 +2364,9 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
 .dialog-primary { padding: 8px 13px; border: 1px solid #204aa5; border-radius: 7px; background: var(--accent); color: #fff; font-weight: 680; cursor: pointer; }
 .dialog-primary:hover:not(:disabled) { background: #204aa5; }
 .dialog-primary:disabled { opacity: .45; cursor: default; }
+.dialog-danger { padding: 8px 13px; border: 1px solid #972f2f; border-radius: 7px; background: #b63737; color: #fff; font-weight: 680; cursor: pointer; }
+.dialog-danger:hover:not(:disabled) { background: #962c2c; }
+.dialog-danger:disabled { opacity: .45; cursor: default; }
 .dialog-preview { padding: 8px 13px; border: 1px solid #9db1df; border-radius: 7px; background: #f2f6ff; color: #204aa5; font-weight: 680; cursor: pointer; }
 .dialog-preview:hover:not(:disabled) { border-color: #6f8fd8; background: #e6eeff; }
 .dialog-preview:disabled { opacity: .45; cursor: default; }
@@ -2511,6 +2622,44 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
 }
 .app-shell.is-nav-hidden .autosave-recovery-banner,
 .app-shell.is-presenting .autosave-recovery-banner { top: 12px; }
+.local-readiness-banner {
+  left: auto;
+  right: 12px;
+  width: min(360px, calc(100vw - 24px));
+  transform: none;
+  max-height: calc(100vh - 140px);
+  overflow-y: auto;
+  /* Readiness is advisory and may remain visible while a teacher works.
+     Never let its copy trap controls underneath it; only the banner's own
+     explicit actions should accept pointer input. */
+  pointer-events: none;
+}
+.local-readiness-banner .autosave-recovery-actions { pointer-events: auto; }
+/* Project Find, native canvas search, Personal Library, and temporary dialogs
+   all own work surfaces that must remain fully interactive. Yield while one is
+   open; the advisory returns unchanged as soon as the teacher closes it. */
+.app-shell:is(.is-project-find-open, .is-library-open) .local-readiness-banner,
+.app-shell:has(.layer-ui__search) .local-readiness-banner,
+.app-shell:has(
+  .bucket-fill-settings,
+  .busy-overlay,
+  .classroom-time-dialog-backdrop,
+  .classroom-time-overlay,
+  .context-menu,
+  .dropdown-menu,
+  .lasso-overlay,
+  .math-interaction-panel,
+  .modal-backdrop,
+  .pdf-add-page-menu,
+  .pdf-page-actions-menu,
+  .probability-randomizer,
+  .screenshot-capture-overlay,
+  .settings-popover,
+  .slide-frame-draw-overlay,
+  .slide-settings-popover,
+  .slide-thumbnail-menu,
+  .topbar-menu-popover
+) .local-readiness-banner { display: none; }
 .autosave-recovery-copy { display: grid; gap: 4px; font-size: 13px; line-height: 1.45; }
 .autosave-recovery-copy strong { font-size: 14px; }
 .autosave-recovery-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
@@ -2527,6 +2676,7 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
 }
 .autosave-recovery-actions button:hover { background: #fff4d9; }
 .autosave-recovery-actions button:focus-visible { outline: 2px solid #9b6511; outline-offset: 2px; }
+.autosave-recovery-actions button:disabled { opacity: .55; cursor: wait; }
 .autosave-recovery-actions button.is-primary { border-color: #7b5313; background: #7b5313; color: #fff; }
 .autosave-recovery-actions button.is-primary:hover { background: #65420c; }
 .loading-screen { width: 100%; height: 100%; display: grid; place-items: center; background: #f2f4f7; color: #465066; font: 600 14px Inter, sans-serif; }
@@ -2639,6 +2789,7 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
   .statusbar,
   .export-dialog,
   .pdf-clear-annotations-dialog,
+  .recovery-history-dialog,
   .pdf-insert-dialog,
   .keyboard-shortcuts-dialog,
   .math-tools-dialog,
@@ -2676,16 +2827,29 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
   .zoom-status,
   .math-tool-card h3,
   .dialog-heading h2,
+  .recovery-history-heading h2,
+  .recovery-history-entry-copy strong,
   .keyboard-shortcuts-group h3,
   .keyboard-shortcut-row dt strong,
   .screenshot-library-heading h2
 ) { color: #e7edf7; }
+.app-shell[data-theme="dark"] .recovery-history-entry { border-color: #45536b; background: #111a28; color: #e7edf7; }
+.app-shell[data-theme="dark"] .recovery-history-entry:has(input:checked) { border-color: #7fa7ff; background: #263248; }
+.app-shell[data-theme="dark"] .recovery-history-entry.is-damaged { border-color: #9c5b5b; }
+.app-shell[data-theme="dark"] .recovery-history-empty { border-color: #52617a; }
+.app-shell[data-theme="dark"] .recovery-history-empty strong { color: #e7edf7; }
+.app-shell[data-theme="dark"] .recovery-history-status { border-color: #45536b; background: #202b3e; color: #cbd9f4; }
+.app-shell[data-theme="dark"] .recovery-history-status.is-warning { border-color: #80683d; background: #2a251a; color: #efd49a; }
+.app-shell[data-theme="dark"] .recovery-history-status.is-error,
+.app-shell[data-theme="dark"] .recovery-history-confirmation { border-color: #784848; background: #2c1d21; color: #f0b8b8; }
+.app-shell[data-theme="dark"] .recovery-history-confirmation :is(h3, p) { color: #f0b8b8; }
 .app-shell[data-theme="dark"] .settings-recording-note {
   background: #111a28;
   color: #a8b3c6;
 }
 .app-shell[data-theme="dark"] .settings-help-link:hover { border-color: #52617a; background: #202b3e; }
 .app-shell[data-theme="dark"] .settings-help-link kbd,
+.app-shell[data-theme="dark"] .settings-help-link > .settings-help-count,
 .app-shell[data-theme="dark"] .keyboard-shortcut-chord kbd {
   border-color: #5f6e85;
   background: #111a28;
@@ -3206,6 +3370,21 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
 }
 
 @media (max-width: 640px) {
+  .local-readiness-banner {
+    top: calc(108px + var(--safe-area-top));
+    right: 8px;
+    bottom: auto;
+    left: 8px;
+    width: auto;
+    max-height: calc(100dvh - 176px - var(--safe-area-top) - var(--safe-area-bottom));
+  }
+  .app-shell.is-nav-hidden .autosave-recovery-banner.local-readiness-banner { top: 12px; }
+  /* Phone rails are dismissible drawers. Their controls take priority over a
+     persistent advisory so no safety action can cover slide/PDF operations. */
+  .app-shell.is-slide-mode:not(.is-slide-rail-hidden) .local-readiness-banner,
+  .app-shell.is-pdf-mode:not(.is-pdf-rail-hidden) .local-readiness-banner {
+    display: none;
+  }
   .app-shell, .app-shell.is-slide-mode, .app-shell.is-pdf-mode {
     grid-template-columns: 1fr;
     grid-template-rows: calc(96px + var(--safe-area-top)) minmax(0, 1fr);
@@ -3350,7 +3529,7 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
   .keyboard-shortcut-bindings { justify-content: flex-start; }
   .keyboard-shortcuts-actions .dialog-primary { width: 100%; min-height: 42px; }
   .modal-backdrop { padding: 10px; }
-  :is(.pdf-insert-backdrop, .pdf-clear-annotations-backdrop) {
+  :is(.pdf-insert-backdrop, .pdf-clear-annotations-backdrop, .recovery-history-backdrop) {
     padding: calc(8px + var(--safe-area-top)) calc(8px + var(--safe-area-right)) calc(8px + var(--safe-area-bottom)) calc(8px + var(--safe-area-left));
   }
   .pdf-clear-annotations-dialog {
@@ -3361,6 +3540,13 @@ body:has(.app-shell.is-clean-fullscreen) :is(.Modal, .context-menu, .dropdown-me
   .pdf-clear-annotation-scopes label { min-height: 48px; align-items: center; }
   .pdf-clear-annotations-actions { display: grid; grid-template-columns: 1fr 1fr; }
   .pdf-clear-annotations-actions :is(.dialog-cancel, .dialog-primary) { min-height: 44px; width: 100%; }
+  .recovery-history-dialog {
+    width: 100%;
+    max-height: calc(100dvh - var(--safe-area-top) - var(--safe-area-bottom) - 16px);
+    padding: 15px;
+  }
+  .recovery-history-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .recovery-history-actions :is(.dialog-cancel, .dialog-primary) { width: 100%; min-height: 44px; }
   .pdf-insert-dialog {
     width: 100%;
     max-height: calc(100dvh - var(--safe-area-top) - var(--safe-area-bottom) - 16px);

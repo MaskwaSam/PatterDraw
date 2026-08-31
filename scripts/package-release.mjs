@@ -7,6 +7,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import {
+  assertLocalReleaseReadiness,
+  FINAL_NODE_VERSION_PATTERN,
+  FINAL_NPM_VERSION,
+} from "./release-readiness.mjs";
 
 const execFile = promisify(execFileCallback);
 const scriptRoot = path.dirname(fileURLToPath(import.meta.url));
@@ -28,6 +33,7 @@ const allowedBuildTopLevelEntries = new Set([
   "mathjax",
   "mathjax-fonts",
   "pdfjs",
+  "service-worker.js",
 ]);
 const manifestSchema = "patterdraw.release-manifest.v1";
 const provenanceSchema = "patterdraw.provenance.v1";
@@ -82,8 +88,8 @@ const threeBomRef = `vendor:3dgeogon/three@${threeVendor.version}`;
 
 function usage() {
   return `Usage:
-  node scripts/package-release.mjs [--build] [--allow-dirty] [--dist <directory>] [--out <directory>]
-  node scripts/package-release.mjs --verify [--allow-dirty] [--out <release-directory>]
+  node scripts/package-release.mjs [--build] [--allow-dirty] [development overrides] [--dist <directory>] [--out <directory>]
+  node scripts/package-release.mjs --verify [--allow-dirty] [development overrides] [--out <release-directory>]
 
 The default output is dist/release/. Packaging requires a clean git worktree unless
 --allow-dirty is supplied. SOURCE_DATE_EPOCH may be set to a commit-compatible
@@ -92,6 +98,15 @@ must be a top-level release or release-* directory inside the build directory.
 --build performs a fresh empty-output Vite build first and is required by the
 supported npm release:package workflow. Clean final builds use an immutable archive
 of HEAD so provenance cannot describe stale or concurrently modified source bytes.
+
+Final packaging additionally requires Node 22.13.x, npm 11.12.1, and HEAD to
+exactly equal both the local refs/remotes/origin/main tracking ref and a fresh
+read-only lookup of origin refs/heads/main. The local-only
+preparation flags --allow-unpushed-development and
+--allow-toolchain-mismatch-development always produce a development artifact
+and must never be used for deployment. Development verification requires the
+exact same preparation flags recorded during packaging; no development flag
+can be used to verify a final artifact.
 `;
 }
 
@@ -142,6 +157,8 @@ function isWithin(parent, candidate) {
 function parseArguments(argv) {
   const options = {
     allowDirty: false,
+    allowToolchainMismatchDevelopment: false,
+    allowUnpushedDevelopment: false,
     build: false,
     dist: defaultDist,
     help: false,
@@ -152,6 +169,10 @@ function parseArguments(argv) {
     const argument = argv[index];
     if (argument === "--allow-dirty" || argument === "--development") {
       options.allowDirty = true;
+    } else if (argument === "--allow-toolchain-mismatch-development") {
+      options.allowToolchainMismatchDevelopment = true;
+    } else if (argument === "--allow-unpushed-development") {
+      options.allowUnpushedDevelopment = true;
     } else if (argument === "--build") {
       options.build = true;
     } else if (argument === "--verify") {
@@ -167,6 +188,49 @@ function parseArguments(argv) {
     }
   }
   return options;
+}
+
+function isDevelopmentRelease(options) {
+  return options.allowDirty
+    || options.allowToolchainMismatchDevelopment
+    || options.allowUnpushedDevelopment;
+}
+
+function developmentOverrideArguments(options) {
+  return [
+    ...(options.allowDirty ? ["--allow-dirty"] : []),
+    ...(options.allowUnpushedDevelopment ? ["--allow-unpushed-development"] : []),
+    ...(options.allowToolchainMismatchDevelopment
+      ? ["--allow-toolchain-mismatch-development"]
+      : []),
+  ];
+}
+
+function readinessOptions(options) {
+  return {
+    allowDirtyDevelopment: options.allowDirty,
+    allowToolchainMismatchDevelopment: options.allowToolchainMismatchDevelopment,
+    allowUnpushedDevelopment: options.allowUnpushedDevelopment,
+    cwd: repoRoot,
+  };
+}
+
+async function assertReleaseReadinessUnchanged(options, expected, phase) {
+  const actual = await assertLocalReleaseReadiness(readinessOptions(options));
+  for (const key of [
+    "head",
+    "nodeVersion",
+    "npmVersion",
+    "originMain",
+    "remoteMain",
+    "sourceDirty",
+    "developmentOnly",
+  ]) {
+    if (actual[key] !== expected[key]) {
+      fail(`Release readiness changed during ${phase} (${key}).`);
+    }
+  }
+  return actual;
 }
 
 async function command(commandName, args, { allowFailure = false, cwd = repoRoot } = {}) {
@@ -653,7 +717,7 @@ async function packageRelease(
   } = {},
 ) {
   const { dist: distRoot, out: outputRoot } = options;
-  if (!options.build && !options.allowDirty) {
+  if (!options.build && !isDevelopmentRelease(options)) {
     fail("Final release packaging requires --build so the payload is rebuilt from the recorded source. Use --allow-dirty only for an explicitly prebuilt development artifact.");
   }
   await ensureDirectory(distRoot, "Build directory");
@@ -713,7 +777,8 @@ async function packageRelease(
   if (sourceMaps.length > 0) fail(`Source maps are not publishable release files: ${sourceMaps.map((file) => file.relative).join(", ")}`);
   const vendoredComponents = await verifyPackagedGeoGon(distRoot, payload);
   const licenses = await licenseVerification({ distRoot, sourceRoot });
-  const releaseMode = options.allowDirty ? "development" : "final";
+  const releaseMode = isDevelopmentRelease(options) ? "development" : "final";
+  const recordedDevelopmentOverrides = developmentOverrideArguments(options);
 
   await removeExistingOutput(outputRoot);
   await mkdir(outputRoot, { recursive: true });
@@ -730,6 +795,7 @@ async function packageRelease(
   const provenance = {
     schemaVersion: provenanceSchema,
     releaseMode,
+    developmentOverrides: recordedDevelopmentOverrides,
     source: {
       commit: source.commit,
       commitShort: source.commitShort,
@@ -747,6 +813,7 @@ async function packageRelease(
   const manifest = {
     schemaVersion: manifestSchema,
     releaseMode,
+    developmentOverrides: recordedDevelopmentOverrides,
     gitCommit: source.commit,
     sourceDirty: source.dirty,
     toolVersions: toolchain,
@@ -796,7 +863,8 @@ async function packageRelease(
   console.log(`Release directory: ${artifactDisplayPath}`);
   console.log(`Payload: ${payload.length} files, ${totalBytes} bytes`);
   console.log(`Source: ${source.commitShort} (dirty=${source.dirty})`);
-  console.log(`Verify: node scripts/package-release.mjs --verify${options.allowDirty ? " --allow-dirty" : ""} --out ${artifactDisplayPath}`);
+  const verifyOverrides = developmentOverrideArguments(options);
+  console.log(`Verify: node scripts/package-release.mjs --verify${verifyOverrides.length > 0 ? ` ${verifyOverrides.join(" ")}` : ""} --out ${artifactDisplayPath}`);
 }
 
 async function buildAndPackageRelease(options) {
@@ -861,14 +929,25 @@ async function buildFinalReleaseFromCommit(options, source) {
     await verifyRelease({ ...snapshotOptions, verify: true });
     await assertSourceStateUnchanged(source, "immutable package");
 
-    await installCanonicalDist(snapshotDist, sourceDateEpoch(source.commitEpoch), options);
+    await assertReleaseReadinessUnchanged(
+      options,
+      options.releaseReadiness,
+      "immutable build before artifact installation",
+    );
+    await installCanonicalDist(snapshotDist, sourceDateEpoch(source.commitEpoch), options, {
+      assertReadiness: () => assertReleaseReadinessUnchanged(
+        options,
+        options.releaseReadiness,
+        "canonical artifact handoff",
+      ),
+    });
     await assertSourceStateUnchanged(source, "artifact installation");
   } finally {
     await rm(temporaryRoot, { force: true, recursive: true });
   }
 }
 
-async function installCanonicalDist(snapshotDist, epoch, options) {
+async function installCanonicalDist(snapshotDist, epoch, options, { assertReadiness } = {}) {
   const stagingRoot = await mkdtemp(path.join(repoRoot, ".patterdraw-dist-stage-"));
   const candidateDist = path.join(stagingRoot, "dist");
   const previousDist = `${stagingRoot}-previous`;
@@ -879,6 +958,7 @@ async function installCanonicalDist(snapshotDist, epoch, options) {
     await cp(snapshotDist, candidateDist, { preserveTimestamps: true, recursive: true });
     await setDeterministicTimes(path.join(candidateDist, "release"), epoch);
     await verifyRelease({ ...options, out: path.join(candidateDist, "release"), verify: true });
+    await assertReadiness?.();
 
     let currentStats;
     try {
@@ -906,6 +986,7 @@ async function installCanonicalDist(snapshotDist, epoch, options) {
     }
 
     await verifyRelease({ ...options, out: defaultOutput, verify: true });
+    await assertReadiness?.();
     if (previousMoved) {
       await rm(previousDist, { force: true, recursive: true });
       previousMoved = false;
@@ -963,14 +1044,38 @@ async function verifyRelease(options) {
   if (manifest.releaseMode !== "final" && manifest.releaseMode !== "development") {
     fail(`Unsupported release mode: ${manifest.releaseMode}`);
   }
+  const expectedDevelopmentOverrides = developmentOverrideArguments(options);
+  if (manifest.releaseMode === "final" && expectedDevelopmentOverrides.length > 0) {
+    fail("Development override flags cannot be used to verify a final release artifact.");
+  }
+  if (
+    !Array.isArray(manifest.developmentOverrides)
+    || !manifest.developmentOverrides.every((value) => typeof value === "string")
+    || new Set(manifest.developmentOverrides).size !== manifest.developmentOverrides.length
+    || !sameJson(manifest.developmentOverrides, expectedDevelopmentOverrides)
+  ) {
+    fail("Release verification requires the exact development override flags recorded during packaging.");
+  }
+  if (
+    manifest.releaseMode === "final"
+    && options.releaseReadiness?.head !== manifest.source?.commit
+  ) {
+    fail("Final release source commit does not match the locally reviewed HEAD.");
+  }
   if (manifest.releaseMode === "final" && manifest.source?.dirty !== false) {
     fail("A final release cannot have dirty source provenance.");
   }
   if (manifest.source?.dirty === true && !options.allowDirty) {
     fail("Release provenance is dirty; pass --allow-dirty only for development verification.");
   }
-  if (manifest.releaseMode !== "final" && !options.allowDirty) {
-    fail("Release was packaged in development mode; pass --allow-dirty only for development verification.");
+  if (manifest.releaseMode !== "final" && !isDevelopmentRelease(options)) {
+    fail("Release was packaged in development mode; pass the same explicit development flags used during packaging.");
+  }
+  if (manifest.releaseMode === "final" && (
+    !FINAL_NODE_VERSION_PATTERN.test(manifest.toolchain?.node || "")
+    || manifest.toolchain?.npm !== FINAL_NPM_VERSION
+  )) {
+    fail(`Final release manifest requires Node 22.13.x and npm ${FINAL_NPM_VERSION}.`);
   }
   if (manifest.gitCommit !== manifest.source?.commit || manifest.sourceDirty !== manifest.source?.dirty) {
     fail("Manifest top-level provenance aliases do not match the source object.");
@@ -1153,6 +1258,7 @@ async function verifyRelease(options) {
     }
   }
   if (provenance.releaseMode !== manifest.releaseMode
+    || !sameJson(provenance.developmentOverrides, manifest.developmentOverrides)
     || !sameJson(provenance.source, manifest.source)
     || !sameJson(provenance.toolchain, manifest.toolchain)
     || !sameJson(provenance.package, manifest.package)
@@ -1203,9 +1309,16 @@ async function main() {
   }
   const releaseLock = await acquireReleaseLock();
   try {
-    if (options.verify) await verifyRelease(options);
-    else if (options.build) await buildAndPackageRelease(options);
-    else await packageRelease(options);
+    const releaseReadiness = await assertLocalReleaseReadiness(readinessOptions(options));
+    const readyOptions = { ...options, releaseReadiness };
+    if (options.verify) await verifyRelease(readyOptions);
+    else if (options.build) await buildAndPackageRelease(readyOptions);
+    else await packageRelease(readyOptions);
+    await assertReleaseReadinessUnchanged(
+      readyOptions,
+      releaseReadiness,
+      options.verify ? "artifact verification" : "artifact packaging",
+    );
   } finally {
     await releaseLock();
   }

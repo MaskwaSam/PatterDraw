@@ -80,6 +80,8 @@ const {
   classroomTimeAlarmReconciliationNeeded,
   classroomTimeAlarmNoticeAfterSupersedingJob,
   classroomTimeAlarmNoticeCanDismiss,
+  classroomAlarmStartWarning,
+  classroomTimeActiveTargetAfterSelection,
   classroomTimeAlarmDescriptorsNeedingTrustedStart,
   classroomTimeControlPublicationFenceMatches,
   classroomTimeOperationSceneSignature,
@@ -91,6 +93,7 @@ const {
   darkPdfDisplaySceneIsCurrent,
   forkNativeClassroomTimeWidgetDuplicates,
   finalizeClassroomTimeSchedulerAlarmReservation,
+  hydrationChangeMatchesSnapshot,
   hydrationChangesMatch,
   importClassroomTimeCalendarTransfer,
   materializeProjectClassroomTimeWidgets,
@@ -101,8 +104,10 @@ const {
   projectWithPendingScene,
   pdfAnnotationSummaryMatches,
   pdfAnnotationUndoFitsContentBudget,
+  presentationClassroomTimeSelectionForLiveScene,
   presentationInkPointerDownIsCurrent,
   presentationInkStrokeIsCurrent,
+  protectPresentationSlideFrameElements,
   preserveDeletedForPendingPdfUndo,
   preserveDeletedSceneRecords,
   preservePendingScenePersistence,
@@ -116,8 +121,10 @@ const {
   sceneOperationIsCurrent,
   scheduleClassroomTimeConfirmationToast,
   shouldAllowNativePersonalLibraryCanvasDrop,
+  snapshotSceneHydrationChange,
   startupLoadGenerationIsCurrent,
   updateClassroomTimeSchedulerSceneIndex,
+  updateRememberedPresentationClassroomTimeSelection,
 } = await import("./App");
 const {
   CLASSROOM_CALENDAR_SCHEMA_VERSION,
@@ -1080,6 +1087,72 @@ describe("Classroom Time persistence and alarm display boundaries", () => {
     )).toBe(false);
   });
 
+  it("accepts a revision-normalized trusted Start publication without accepting stale idle content", () => {
+    const timer = createDefaultClassroomTimeWidgetMetadata(
+      "timer",
+      "trusted-start-fence-owner",
+    );
+    if (timer.kind !== "timer") throw new Error("Timer defaults changed kind.");
+    const idle = createClassroomTimeWidgetScene({
+      metadata: timer,
+      x: 0,
+      y: 0,
+      now: 1_000,
+      createId: idSequence("trusted-start-fence-element"),
+    }).elements;
+    const running = createClassroomTimeWidgetScene({
+      metadata: {
+        ...timer,
+        runtime: {
+          status: "running",
+          remainingMs: timer.timer.durationMs,
+          deadlineMs: 1_000 + timer.timer.durationMs,
+          completedAtMs: null,
+        },
+      },
+      x: 0,
+      y: 0,
+      now: 1_000,
+      createId: idSequence("trusted-start-fence-element"),
+    }).elements;
+    const normalizeRevisions = (elements: typeof idle) => elements.map((element) => ({
+      ...element,
+      version: element.version + 1,
+      versionNonce: element.versionNonce + 1,
+      updated: element.updated + 1,
+    }));
+    const runningFence = {
+      sceneId: "timer-scene",
+      elementFingerprint: "running-revisions",
+      fileFingerprint: "",
+      expectedDisplayContentFingerprint: classroomTimeDisplayTickContentFingerprint(running),
+    };
+
+    expect(classroomTimeTickFenceMatches(
+      runningFence,
+      "timer-scene",
+      normalizeRevisions(idle),
+      {},
+    )).toBe(false);
+
+    const runningCallback = normalizeRevisions(running);
+    expect(classroomTimeTickFenceMatches(
+      runningFence,
+      "timer-scene",
+      runningCallback,
+      {},
+    )).toBe(true);
+    const movedRunningCallback = runningCallback.map((element, index) => (
+      index === 0 ? { ...element, x: element.x + 1 } : element
+    ));
+    expect(classroomTimeTickFenceMatches(
+      runningFence,
+      "timer-scene",
+      movedRunningCallback,
+      {},
+    )).toBe(false);
+  });
+
   it("expires widget-added confirmation on a hard deadline without clearing a newer notice", () => {
     vi.useFakeTimers();
     try {
@@ -1736,6 +1809,7 @@ describe("same-project archive alarm authority", () => {
       activeSceneId: project.activeSceneId,
       hydrationGeneration: 4,
       operationGeneration: 7,
+      elementContentFingerprint: "before-content",
       elementFingerprint: "before-elements",
       fileFingerprint: "before-files",
     };
@@ -1765,6 +1839,12 @@ describe("same-project archive alarm authority", () => {
       ...expected,
       project: { ...project },
       elementFingerprint: "student-drew-while-lock-waited",
+    })).toBe(true);
+    expect(classroomTimeControlPublicationFenceMatches(expected, {
+      ...expected,
+      project: { ...project },
+      elementContentFingerprint: "student-drew-while-lock-waited",
+      elementFingerprint: "student-drew-while-lock-waited",
     })).toBe(false);
     expect(classroomTimeSchedulerPublicationFenceMatches(expected, expected, true)).toBe(false);
   });
@@ -1784,6 +1864,7 @@ describe("same-project archive alarm authority", () => {
       activeSceneId: project.activeSceneId,
       hydrationGeneration: 8,
       operationGeneration: 13,
+      elementContentFingerprint: "content-before-lock",
       elementFingerprint: "elements-before-lock",
       fileFingerprint: "files-before-lock",
     };
@@ -1815,6 +1896,12 @@ describe("same-project archive alarm authority", () => {
     expect(classroomTimeControlPublicationFenceMatches(expected, {
       ...expected,
       project: { ...project, id: "different-project" },
+    })).toBe(false);
+    expect(classroomTimeControlPublicationFenceMatches(expected, {
+      ...expected,
+      project: { ...project },
+      elementContentFingerprint: "student-drew-during-lock",
+      elementFingerprint: "student-drew-during-lock",
     })).toBe(false);
   });
 });
@@ -2162,6 +2249,16 @@ describe("wrapper tool hydration", () => {
   });
 });
 
+describe("classroom alarm start warnings", () => {
+  it("keeps silent countdowns usable while clearly describing the alarm risk", () => {
+    expect(classroomAlarmStartWarning("ready", false, 0.7)).toBeNull();
+    expect(classroomAlarmStartWarning("blocked", false, 0.7)).toContain("browser blocked alarm sound");
+    expect(classroomAlarmStartWarning("unavailable", false, 0.7)).toContain("unavailable in this browser");
+    expect(classroomAlarmStartWarning("ready", true, 0.7)).toContain("alarms are muted");
+    expect(classroomAlarmStartWarning("ready", false, 0)).toContain("volume is 0%");
+  });
+});
+
 describe("presentation ink lifecycle guard", () => {
   const stroke = { sceneId: "scene-a", generation: 7 };
 
@@ -2177,9 +2274,215 @@ describe("presentation ink lifecycle guard", () => {
     { sceneId: "scene-b", generation: 7, tool: "freedraw" as const },
     { sceneId: "scene-a", generation: 8, tool: "freedraw" as const },
     { sceneId: "scene-a", generation: 7, tool: "laser" as const },
+    { sceneId: "scene-a", generation: 7, tool: "eraser" as const },
     { sceneId: null, generation: 7, tool: null },
   ])("rejects a stale callback (%s)", (current) => {
     expect(presentationInkStrokeIsCurrent(stroke, current)).toBe(false);
+  });
+});
+
+describe("presentation eraser slide-boundary guard", () => {
+  it("conservatively rejects a simultaneous frame-and-child erasure inside the slide", () => {
+    const previousElements = [
+      { id: "frame", type: "frame", isDeleted: false, frameId: null },
+      { id: "child", type: "freedraw", isDeleted: false, frameId: "frame" },
+      { id: "other", type: "freedraw", isDeleted: false, frameId: null },
+    ] as unknown as Parameters<typeof protectPresentationSlideFrameElements>[2];
+    const elements = [
+      { id: "frame", type: "frame", isDeleted: true, frameId: null },
+      { id: "child", type: "freedraw", isDeleted: true, frameId: "frame" },
+      { id: "other", type: "freedraw", isDeleted: true, frameId: null },
+    ] as unknown as Parameters<typeof protectPresentationSlideFrameElements>[0];
+
+    const protectedElements = protectPresentationSlideFrameElements(
+      elements,
+      new Set(["frame"]),
+      previousElements,
+    );
+    expect(protectedElements.find((element) => element.id === "frame")?.isDeleted).toBe(false);
+    expect(protectedElements.find((element) => element.id === "child")?.isDeleted).toBe(false);
+    expect(protectedElements.find((element) => element.id === "other")?.isDeleted).toBe(true);
+  });
+
+  it("does not resurrect a child erased before the boundary-touch gesture", () => {
+    const previousElements = [
+      { id: "frame", type: "frame", isDeleted: false, frameId: null },
+      { id: "old-child", type: "freedraw", isDeleted: true, frameId: "frame" },
+      { id: "new-child", type: "freedraw", isDeleted: false, frameId: "frame" },
+    ] as unknown as Parameters<typeof protectPresentationSlideFrameElements>[2];
+    const elements = [
+      { id: "frame", type: "frame", isDeleted: true, frameId: null },
+      { id: "old-child", type: "freedraw", isDeleted: true, frameId: "frame" },
+      { id: "new-child", type: "freedraw", isDeleted: true, frameId: "frame" },
+    ] as unknown as Parameters<typeof protectPresentationSlideFrameElements>[0];
+
+    const protectedElements = protectPresentationSlideFrameElements(
+      elements,
+      new Set(["frame"]),
+      previousElements,
+    );
+    expect(protectedElements.find((element) => element.id === "frame")?.isDeleted).toBe(false);
+    expect(protectedElements.find((element) => element.id === "old-child")?.isDeleted).toBe(true);
+    expect(protectedElements.find((element) => element.id === "new-child")?.isDeleted).toBe(false);
+  });
+
+  it("allows a direct child erasure when its slide frame remains intact", () => {
+    const elements = [
+      { id: "frame", type: "frame", isDeleted: false, frameId: null },
+      { id: "child", type: "freedraw", isDeleted: true, frameId: "frame" },
+    ] as unknown as Parameters<typeof protectPresentationSlideFrameElements>[0];
+    expect(protectPresentationSlideFrameElements(elements, new Set(["frame"]))).toBe(elements);
+  });
+});
+
+describe("presentation classroom-time selection hydration", () => {
+  const presentationWidget = () => {
+    const metadata = createDefaultClassroomTimeWidgetMetadata(
+      "dashboard",
+      "presentation-dashboard-owner",
+    );
+    const created = createClassroomTimeWidgetScene({
+      metadata,
+      x: 0,
+      y: 0,
+      now: 1_000,
+      createId: idSequence("presentation-dashboard-element"),
+    });
+    const anchor = created.elements.find((element) => classroomTimeWidgetMetadata(element));
+    if (!anchor) throw new Error("Presentation Dashboard anchor is missing.");
+    return {
+      elements: created.elements,
+      selection: {
+        anchorId: anchor.id,
+        elementIds: created.elements.map((element) => element.id),
+        metadata,
+        ownerId: metadata.ownerId,
+        projectId: "presentation-project",
+        sceneId: "scene-a",
+      },
+    };
+  };
+
+  it("preserves the remembered widget while hydration clears or changes the editor selection", () => {
+    const { selection } = presentationWidget();
+    const liveContext = { projectId: selection.projectId, sceneId: selection.sceneId };
+    expect(updateRememberedPresentationClassroomTimeSelection(selection, null, liveContext)).toBe(selection);
+    expect(updateRememberedPresentationClassroomTimeSelection(selection, {
+      ...selection,
+      anchorId: "different-anchor",
+    }, liveContext)).toBe(selection);
+    const refreshed = { ...selection, elementIds: [selection.anchorId] };
+    expect(updateRememberedPresentationClassroomTimeSelection(
+      selection,
+      refreshed,
+      liveContext,
+    )).toEqual(refreshed);
+    expect(updateRememberedPresentationClassroomTimeSelection(
+      selection,
+      refreshed,
+      { ...liveContext, sceneId: "scene-b" },
+    )).toBe(selection);
+  });
+
+  it("preserves the teacher's dashboard target during presentation hydration", () => {
+    const { selection } = presentationWidget();
+    const timer = createDefaultClassroomTimeWidgetMetadata("timer", "incoming-timer-owner");
+    expect(classroomTimeActiveTargetAfterSelection("pomodoro", {
+      ...selection,
+      anchorId: "incoming-timer-anchor",
+      metadata: timer,
+      ownerId: timer.ownerId,
+    }, true)).toBe("pomodoro");
+    expect(classroomTimeActiveTargetAfterSelection("pomodoro", {
+      ...selection,
+      anchorId: "incoming-timer-anchor",
+      metadata: timer,
+      ownerId: timer.ownerId,
+    }, false)).toBe("timer");
+  });
+
+  it("exposes controls only after the exact remembered anchor and owner are live", () => {
+    const { elements, selection } = presentationWidget();
+    expect(presentationClassroomTimeSelectionForLiveScene(
+      selection,
+      elements,
+      {
+        activeSceneId: "scene-a",
+        hydratedSceneId: "scene-a",
+        projectId: selection.projectId,
+        switching: false,
+      },
+    )).toEqual(expect.objectContaining({
+      anchorId: selection.anchorId,
+      ownerId: selection.ownerId,
+      metadata: selection.metadata,
+    }));
+
+    expect(presentationClassroomTimeSelectionForLiveScene(
+      selection,
+      elements,
+      {
+        activeSceneId: "scene-b",
+        hydratedSceneId: "scene-a",
+        projectId: selection.projectId,
+        switching: false,
+      },
+    )).toBeNull();
+    expect(presentationClassroomTimeSelectionForLiveScene(
+      selection,
+      elements,
+      {
+        activeSceneId: "scene-a",
+        hydratedSceneId: "scene-a",
+        projectId: selection.projectId,
+        switching: true,
+      },
+    )).toBeNull();
+    expect(presentationClassroomTimeSelectionForLiveScene(
+      selection,
+      elements.filter((element) => element.id !== selection.anchorId),
+      {
+        activeSceneId: "scene-a",
+        hydratedSceneId: "scene-a",
+        projectId: selection.projectId,
+        switching: false,
+      },
+    )).toBeNull();
+
+    expect(presentationClassroomTimeSelectionForLiveScene(
+      selection,
+      elements,
+      {
+        activeSceneId: "scene-b",
+        hydratedSceneId: "scene-b",
+        projectId: selection.projectId,
+        switching: false,
+      },
+    )).toBeNull();
+
+    const otherMetadata = createDefaultClassroomTimeWidgetMetadata(
+      "dashboard",
+      "other-presentation-dashboard-owner",
+    );
+    const other = createClassroomTimeWidgetScene({
+      metadata: otherMetadata,
+      x: 0,
+      y: 0,
+      now: 1_000,
+      createId: idSequence("other-presentation-dashboard-element"),
+    });
+    const otherAnchor = other.elements.find((element) => classroomTimeWidgetMetadata(element));
+    if (!otherAnchor) throw new Error("Other presentation Dashboard anchor is missing.");
+    expect(presentationClassroomTimeSelectionForLiveScene(
+      selection,
+      [{ ...otherAnchor, id: selection.anchorId }],
+      {
+        activeSceneId: "scene-a",
+        hydratedSceneId: "scene-a",
+        projectId: selection.projectId,
+        switching: false,
+      },
+    )).toBeNull();
   });
 });
 
@@ -2236,6 +2539,38 @@ describe("scene hydration persistence equality", () => {
         zoom: { value: 1 },
       }),
     )).toBe(true);
+  });
+
+  it("keeps an immutable baseline when the live editor mutates an element in place", () => {
+    const element = {
+      id: "annotation-a",
+      type: "rectangle",
+      x: 20,
+      y: 30,
+      width: 100,
+      height: 60,
+      isDeleted: false,
+    };
+    const file = {
+      id: "file-a",
+      dataURL: "data:image/png;base64,AA==",
+      mimeType: "image/png",
+      created: 1,
+    };
+    const live = {
+      sceneId: "scene-a",
+      elements: [element],
+      appState: { scrollX: 0, scrollY: 0, zoom: { value: 1 } },
+      files: { "file-a": file },
+    } as unknown as PendingScene;
+    const snapshot = snapshotSceneHydrationChange(live);
+
+    element.x = 140;
+    file.created = 2;
+
+    expect((snapshot.elements[0] as unknown as { x: number }).x).toBe(20);
+    expect((snapshot.files["file-a"] as unknown as { created: number }).created).toBe(1);
+    expect(hydrationChangeMatchesSnapshot(live, snapshot)).toBe(false);
   });
 });
 

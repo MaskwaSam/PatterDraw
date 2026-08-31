@@ -10,6 +10,8 @@ const productionOrigin = `http://127.0.0.1:${productionPort}`;
 const reuseExistingProductionServer = process.env.PW_PRODUCTION_REUSE_SERVER === "1";
 const productionDistSpec = "**/production-dist.spec.ts";
 const productionUxSpec = "**/production-ux.spec.ts";
+const productionPerformanceSpec = "**/production-performance.spec.ts";
+const crossEnginePdfLifecycleSpec = "**/production-pdf-lifecycle.spec.ts";
 const imageEmbedSafetySpec = "**/image-embed-safety.spec.ts";
 const geoGonFunctionalTest = /builds in the bundled GeoGon dialog and persists only its local vector handoff$/;
 
@@ -18,6 +20,8 @@ export default defineConfig({
   testMatch: [
     productionDistSpec,
     productionUxSpec,
+    productionPerformanceSpec,
+    crossEnginePdfLifecycleSpec,
     imageEmbedSafetySpec,
   ],
   // Packaged PDF/MathJax flows and cross-engine page setup are intentionally
@@ -38,7 +42,13 @@ export default defineConfig({
     : "list",
   outputDir: "test-results/production",
   projects: [
-    { name: "chromium", use: { browserName: "chromium" } },
+    {
+      name: "chromium",
+      // The PDF lifecycle smoke is deliberately a bounded Firefox/WebKit
+      // parity gate. Chromium already owns the deeper PDF worker scenarios.
+      testIgnore: crossEnginePdfLifecycleSpec,
+      use: { browserName: "chromium" },
+    },
     {
       name: "firefox-dist",
       // The adversarial file/clipboard tests synthesize browser-native
@@ -62,6 +72,16 @@ export default defineConfig({
     {
       name: "webkit-ux",
       testMatch: productionUxSpec,
+      use: { browserName: "webkit" },
+    },
+    {
+      name: "firefox-pdf-lifecycle",
+      testMatch: crossEnginePdfLifecycleSpec,
+      use: { browserName: "firefox" },
+    },
+    {
+      name: "webkit-pdf-lifecycle",
+      testMatch: crossEnginePdfLifecycleSpec,
       use: { browserName: "webkit" },
     },
     {
@@ -92,7 +112,7 @@ export default defineConfig({
     // process from satisfying this gate with unrelated or old output. CI may
     // set PW_PRODUCTION_REUSE_SERVER=1 after recording the independently
     // built dist and starting this same harness with captured logs.
-    command: `npm run release:package -- --allow-dirty && npm run release:verify -- --allow-dirty && node scripts/serve-production-dist.mjs --dist dist/release --port ${productionPort}`,
+    command: `npm run release:package -- --allow-dirty --allow-unpushed-development --allow-toolchain-mismatch-development && npm run release:verify -- --allow-dirty --allow-unpushed-development --allow-toolchain-mismatch-development && node scripts/serve-production-dist.mjs --dist dist/release --port ${productionPort}`,
     url: `${productionOrigin}${productionRoute}`,
     reuseExistingServer: reuseExistingProductionServer,
     // A clean package performs a full production build plus deterministic

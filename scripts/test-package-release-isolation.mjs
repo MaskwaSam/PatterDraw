@@ -11,6 +11,7 @@ const execFile = promisify(execFileCallback);
 const scriptRoot = path.dirname(fileURLToPath(import.meta.url));
 const sourceRoot = path.resolve(scriptRoot, "..");
 const sourceReleaseScript = path.join(scriptRoot, "package-release.mjs");
+const sourceReadinessScript = path.join(scriptRoot, "release-readiness.mjs");
 
 async function run(command, args, options = {}) {
   return execFile(command, args, { encoding: "utf8", ...options });
@@ -31,6 +32,7 @@ async function waitForFile(filePath) {
 
 const fixtureParent = await mkdtemp(path.join(tmpdir(), "patterdraw-release-isolation-"));
 const fixtureRoot = path.join(fixtureParent, "repo");
+const fixtureRemote = path.join(fixtureParent, "origin.git");
 const readyPath = path.join(fixtureParent, "build-ready");
 const allowReadPath = path.join(fixtureParent, "allow-read");
 const readDonePath = path.join(fixtureParent, "read-done");
@@ -44,6 +46,7 @@ try {
   await mkdir(path.join(fixtureRoot, "public"), { recursive: true });
   await mkdir(path.join(fixtureRoot, "vendor", "fixture-dependency"), { recursive: true });
   await copyFile(sourceReleaseScript, path.join(fixtureRoot, "scripts", "package-release.mjs"));
+  await copyFile(sourceReadinessScript, path.join(fixtureRoot, "scripts", "release-readiness.mjs"));
   await copyFile(
     path.join(scriptRoot, "verify-geogon-vendor.mjs"),
     path.join(fixtureRoot, "scripts", "verify-geogon-vendor.mjs"),
@@ -110,12 +113,24 @@ await copyFile("THIRD_PARTY_NOTICES.md", "dist/licenses/THIRD_PARTY_NOTICES.md")
   await run("git", ["init", "--quiet"], { cwd: fixtureRoot });
   await run("git", ["config", "user.name", "PatterDraw Release Test"], { cwd: fixtureRoot });
   await run("git", ["config", "user.email", "release-test@invalid.example"], { cwd: fixtureRoot });
+  await run("git", ["commit", "--quiet", "--allow-empty", "-m", "Base"], { cwd: fixtureRoot });
   await run("git", ["add", "."], { cwd: fixtureRoot });
   await run("git", ["commit", "--quiet", "-m", "Fixture"], { cwd: fixtureRoot });
+  await run("git", ["init", "--bare", "--quiet", fixtureRemote], { cwd: fixtureRoot });
+  await run("git", ["remote", "add", "origin", fixtureRemote], { cwd: fixtureRoot });
+  await run("git", ["push", "--quiet", "--set-upstream", "origin", "HEAD:refs/heads/main"], {
+    cwd: fixtureRoot,
+  });
+
+  const installedNpm = (await run("npm", ["--version"], { cwd: fixtureRoot })).stdout.trim();
+  const developmentOverrides = /^v22\.13\.\d+$/.test(process.version) && installedNpm === "11.12.1"
+    ? []
+    : ["--allow-toolchain-mismatch-development"];
+  const packagingArguments = ["scripts/package-release.mjs", "--build", ...developmentOverrides];
 
   const packaging = run(
     process.execPath,
-    ["scripts/package-release.mjs", "--build"],
+    packagingArguments,
     {
       cwd: fixtureRoot,
       env: {
@@ -129,7 +144,7 @@ await copyFile("THIRD_PARTY_NOTICES.md", "dist/licenses/THIRD_PARTY_NOTICES.md")
   );
   await waitForFile(readyPath);
   try {
-    await run(process.execPath, ["scripts/package-release.mjs", "--build"], { cwd: fixtureRoot });
+    await run(process.execPath, packagingArguments, { cwd: fixtureRoot });
     throw new Error("A concurrent release command unexpectedly acquired the release lock.");
   } catch (error) {
     if (!String(error?.stderr || error?.message || error).includes("Another release package or verification is active")) {
@@ -148,14 +163,87 @@ await copyFile("THIRD_PARTY_NOTICES.md", "dist/licenses/THIRD_PARTY_NOTICES.md")
 
   const packagedSource = await readFile(path.join(fixtureRoot, "dist", "release", "index.html"), "utf8");
   if (packagedSource !== safeSource + safeDependency) {
-    throw new Error("Final release included transient source or dependency bytes instead of the committed snapshot.");
+    throw new Error("Release included transient source or dependency bytes instead of the committed snapshot.");
   }
   const provenance = JSON.parse(
     await readFile(path.join(fixtureRoot, "dist", "release", "provenance.json"), "utf8"),
   );
-  if (provenance.releaseMode !== "final" || provenance.source?.dirty !== false) {
-    throw new Error("Fixture release did not retain final clean provenance.");
+  const expectedReleaseMode = developmentOverrides.length > 0 ? "development" : "final";
+  if (provenance.releaseMode !== expectedReleaseMode || provenance.source?.dirty !== false) {
+    throw new Error("Fixture release did not retain clean, correctly labelled provenance.");
   }
+
+  const verificationArguments = [
+    "scripts/package-release.mjs",
+    "--verify",
+    ...developmentOverrides,
+  ];
+  await run(process.execPath, verificationArguments, { cwd: fixtureRoot });
+  try {
+    await run(process.execPath, [
+      ...verificationArguments,
+      "--allow-unpushed-development",
+    ], { cwd: fixtureRoot });
+    throw new Error("Release verification unexpectedly accepted different development flags.");
+  } catch (error) {
+    if (!String(error?.stderr || error?.message || error).match(
+      /exact development override flags|cannot be used to verify a final release/,
+    )) {
+      throw error;
+    }
+  }
+
+  const installedManifestBeforeRace = await readFile(
+    path.join(fixtureRoot, "dist", "release", "release-manifest.json"),
+  );
+  await Promise.all([
+    readyPath,
+    allowReadPath,
+    readDonePath,
+    allowFinishPath,
+  ].map((filePath) => rm(filePath, { force: true })));
+  const racingPackage = run(
+    process.execPath,
+    packagingArguments,
+    {
+      cwd: fixtureRoot,
+      env: {
+        ...process.env,
+        PATTERDRAW_ISOLATION_ALLOW_FINISH: allowFinishPath,
+        PATTERDRAW_ISOLATION_ALLOW_READ: allowReadPath,
+        PATTERDRAW_ISOLATION_READ_DONE: readDonePath,
+        PATTERDRAW_ISOLATION_READY: readyPath,
+      },
+    },
+  );
+  await waitForFile(readyPath);
+  const remoteHead = (await run("git", ["rev-parse", "HEAD"], { cwd: fixtureRoot })).stdout.trim();
+  const remoteParent = (await run("git", ["rev-parse", "HEAD^"], { cwd: fixtureRoot })).stdout.trim();
+  await run("git", ["--git-dir", fixtureRemote, "update-ref", "refs/heads/main", remoteParent], {
+    cwd: fixtureRoot,
+  });
+  await writeFile(allowReadPath, "read now\n");
+  await waitForFile(readDonePath);
+  await writeFile(allowFinishPath, "finish now\n");
+  try {
+    await racingPackage;
+    throw new Error("Release packaging ignored a remote main change during the build.");
+  } catch (error) {
+    if (!String(error?.stderr || error?.message || error).match(
+      /does not exactly match|Release readiness changed/,
+    )) {
+      throw error;
+    }
+  }
+  const installedManifestAfterRace = await readFile(
+    path.join(fixtureRoot, "dist", "release", "release-manifest.json"),
+  );
+  if (!installedManifestAfterRace.equals(installedManifestBeforeRace)) {
+    throw new Error("A stale-readiness build replaced the canonical release artifact.");
+  }
+  await run("git", ["--git-dir", fixtureRemote, "update-ref", "refs/heads/main", remoteHead], {
+    cwd: fixtureRoot,
+  });
   console.log("Immutable release source isolation check passed.");
 } finally {
   await rm(fixtureParent, { force: true, recursive: true });

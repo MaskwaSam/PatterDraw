@@ -4,7 +4,11 @@ export default defineConfig({
   testDir: "./tests/browser",
   // The production-dist smoke is intentionally run with its own config so
   // the normal Vite development suite remains the fast, full browser gate.
-  testIgnore: "**/production-dist.spec.ts",
+  testIgnore: [
+    "**/production-dist.spec.ts",
+    "**/production-performance.spec.ts",
+    "**/production-pdf-lifecycle.spec.ts",
+  ],
   forbidOnly: Boolean(process.env.CI),
   failOnFlakyTests: true,
   retries: 1,

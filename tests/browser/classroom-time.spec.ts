@@ -17,12 +17,69 @@ const AUTOSAVE_KEY = "patterdraw:autosave:project:v1";
 const AUTOSAVE_REVISION_KEY = "patterdraw:autosave:revision:v1";
 const DEVICE_CALENDAR_KEY = "patterdraw:classroom-calendar:v1";
 const ALARM_REGISTRY_KEY = "patterdraw:classroom-alarm-registry:v1";
+const ALARM_WRITE_LOCK_NAME = `${ALARM_REGISTRY_KEY}:write`;
 const pdfStandardFontDataUrl = decodeURIComponent(new URL(
   "./standard_fonts/",
   import.meta.resolve("pdfjs-dist/package.json"),
 ).pathname);
 
 type ClassroomWidgetKind = "calendar" | "clock" | "dashboard" | "pomodoro" | "timer";
+
+type AlarmWriteLockGateWindow = Window & {
+  __alarmWriteLockGate?: {
+    release: () => void;
+    requests: number;
+  };
+};
+
+async function installAlarmWriteLockGate(page: Page): Promise<void> {
+  await page.evaluate((alarmWriteLockName) => {
+    const state = window as AlarmWriteLockGateWindow;
+    const nativeLocks = navigator.locks;
+    if (!nativeLocks) throw new Error("Web Locks are unavailable in this browser.");
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    state.__alarmWriteLockGate = { release, requests: 0 };
+    const delegatedLocks = new Proxy(nativeLocks, {
+      get(target, property) {
+        if (property !== "request") {
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return async (name: string, ...args: unknown[]) => {
+          if (name !== alarmWriteLockName) {
+            return Reflect.apply(target.request, target, [name, ...args]);
+          }
+          const operation = args.at(-1);
+          if (typeof operation !== "function") {
+            throw new TypeError("Web Lock request is missing its operation callback.");
+          }
+          const testState = state.__alarmWriteLockGate;
+          if (!testState) return operation({ name, mode: "exclusive" } as Lock);
+          testState.requests += 1;
+          if (testState.requests === 1) await gate;
+          return operation({ name, mode: "exclusive" } as Lock);
+        };
+      },
+    });
+    Object.defineProperty(navigator, "locks", {
+      configurable: true,
+      value: delegatedLocks,
+    });
+  }, ALARM_WRITE_LOCK_NAME);
+}
+
+async function alarmWriteLockRequestCount(page: Page): Promise<number> {
+  return page.evaluate(() => (
+    (window as AlarmWriteLockGateWindow).__alarmWriteLockGate?.requests ?? 0
+  ));
+}
+
+async function releaseAlarmWriteLockGate(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    (window as AlarmWriteLockGateWindow).__alarmWriteLockGate?.release();
+  });
+}
 
 type StoredElement = Record<string, unknown> & {
   id: string;
@@ -278,6 +335,9 @@ async function waitForOnlyWidget(page: Page, kind: ClassroomWidgetKind): Promise
 }
 
 async function focusEditorForClipboard(page: Page): Promise<void> {
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0, {
+    timeout: EDITOR_MOUNT_TIMEOUT,
+  });
   const editor = page.locator(".editor-host .excalidraw");
   await editor.focus();
   await expect.poll(() => page.evaluate(() => (
@@ -836,6 +896,9 @@ test.beforeEach(async ({ context, page }, testInfo) => {
 
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: EDITOR_MOUNT_TIMEOUT });
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0, {
+    timeout: EDITOR_MOUNT_TIMEOUT,
+  });
   await expect.poll(async () => Boolean(await autosavedProject(page))).toBe(true);
 });
 
@@ -1388,6 +1451,15 @@ test("rekeys and pauses Dashboard duplicates, paste, and library transfer while 
       files: {},
     })),
   });
+  const projectSwitch = page.getByRole("dialog", {
+    name: "Open another project?",
+    exact: true,
+  });
+  await expect(projectSwitch).toBeVisible();
+  await projectSwitch.getByRole("button", {
+    name: "Open without downloading",
+    exact: true,
+  }).click();
   await expect.poll(async () => liveWidgetAnchors(await autosavedProject(page)).length).toBe(0);
   await pasteCopiedElements(page);
   let destination = await waitForWidgetCount(page, 1);
@@ -1496,13 +1568,20 @@ test("durably cancels a running Timer on delete, restores it paused with native 
   await expect.poll(async () => (await waitForOnlyWidget(page, "timer")).runtime?.status).toBe("paused");
   expect((await localStorageJson<{ jobs?: unknown[] }>(page, ALARM_REGISTRY_KEY))?.jobs ?? []).toEqual([]);
 
+  await installAlarmWriteLockGate(page);
   await page.getByRole("button", { name: "More classroom time actions", exact: true }).click();
   await page.getByRole("menuitem", { name: "Convert to ordinary elements", exact: true }).click();
+  await expect.poll(() => alarmWriteLockRequestCount(page)).toBe(1);
+  const projectTitle = page.getByRole("textbox", { name: "Project title", exact: true });
+  await projectTitle.fill("Timer conversion classroom board");
+  await expect(projectTitle).toHaveValue("Timer conversion classroom board");
+  await releaseAlarmWriteLockGate(page);
   const converted = await waitForWidgetCount(page, 0);
   const convertedElements = activeScene(converted)?.elements.filter((element) => !element.isDeleted) ?? [];
   expect(convertedElements.length).toBe(beforeLiveCount);
   expect(convertedElements.every((element) => element.customData?.classroomTimeWidget === undefined)).toBe(true);
   await expect(page.getByTestId("classroom-time-overlay")).toHaveCount(0);
+  await expect.poll(async () => (await autosavedProject(page))?.title).toBe("Timer conversion classroom board");
 });
 
 test("keeps overlapping PDF Undo and alarm controls actionable, restores the exact running Timer, and exports one annotation", async ({ page }) => {

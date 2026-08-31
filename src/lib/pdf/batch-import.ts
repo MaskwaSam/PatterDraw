@@ -55,6 +55,39 @@ export interface AtomicPdfBatchImportResult extends LoadedClassroomProject {
   insertedSceneIds: SceneId[];
 }
 
+/** Identifies the exact staged source that failed without exposing partial state. */
+export class PdfBatchImportSelectionError extends Error {
+  readonly selectionIndex: number;
+  readonly sourceInstanceId: string;
+  readonly fileName: string;
+  override readonly cause: unknown;
+
+  constructor(
+    selectionIndex: number,
+    selection: Pick<PdfImportSelection, "sourceInstanceId" | "file">,
+    cause: unknown,
+  ) {
+    const detail = cause instanceof Error && cause.message
+      ? cause.message
+      : "This PDF could not be imported.";
+    super(detail, { cause });
+    this.name = "PdfBatchImportSelectionError";
+    this.selectionIndex = selectionIndex;
+    this.sourceInstanceId = selection.sourceInstanceId;
+    this.fileName = selection.file.name;
+    this.cause = cause;
+  }
+}
+
+function isAbortFailure(error: unknown, signal?: AbortSignal): boolean {
+  return signal?.aborted === true
+    || Boolean(
+      error
+      && typeof error === "object"
+      && (error as { name?: unknown }).name === "AbortError",
+    );
+}
+
 function totalSelectedPages(selections: readonly PdfImportSelection[]): number {
   let total = 0;
   const sourceInstances = new Set<string>();
@@ -152,24 +185,32 @@ export async function importPdfBatchAtomically(
         (maxProjectBytes - currentSize.totalBytes - additionalSourceBytes) * 3 / 4,
       )),
     );
-    const imported = await importOne(selection.file, {
-      documentId: reusedDocumentId,
-      documentPosition: index + 1,
-      documentTotal: selections.length,
-      inspection: {
-        pageCount: selection.pageCount,
-        sha256: selection.sha256,
-      },
-      maxEncodedBytesPerDocument,
-      maxPages: remainingProjectPdfPageCapacity(stagedProject),
-      maxRasterPixelsForImport: remainingRaster.pixels,
-      onProgress: options.onProgress,
-      rasterBudget,
-      signal: options.signal,
-      sourceInstanceId: selection.sourceInstanceId,
-      sourceName: selection.file.name,
-      sourcePageIndices: selection.sourcePageIndices,
-    });
+    let imported: ImportedPdf;
+    try {
+      imported = await importOne(selection.file, {
+        documentId: reusedDocumentId,
+        documentPosition: index + 1,
+        documentTotal: selections.length,
+        inspection: {
+          pageCount: selection.pageCount,
+          sha256: selection.sha256,
+        },
+        maxEncodedBytesPerDocument,
+        maxPages: remainingProjectPdfPageCapacity(stagedProject),
+        maxRasterPixelsForImport: remainingRaster.pixels,
+        onProgress: options.onProgress,
+        rasterBudget,
+        signal: options.signal,
+        sourceInstanceId: selection.sourceInstanceId,
+        sourceName: selection.sourceName ?? selection.file.name,
+        sourcePageIndices: selection.sourcePageIndices,
+      });
+    } catch (error) {
+      // Cancellation remains AbortError so existing operation teardown and UI
+      // never mistake it for a compatibility-recovery opportunity.
+      if (isAbortFailure(error, options.signal)) throw error;
+      throw new PdfBatchImportSelectionError(index, selection, error);
+    }
     throwIfPdfOperationAborted(options.signal);
     if (imported.source.sha256 !== selection.sha256) {
       throw new Error(`The local PDF ${selection.file.name} changed while it was being imported.`);

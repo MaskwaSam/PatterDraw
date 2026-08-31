@@ -363,6 +363,32 @@ describe("PatterDraw autosave persistence", () => {
     expect(transaction.committed.get("patterdraw:autosave:project:v1")).toBe(original);
   });
 
+  it("runs the caller precommit guard inside the transaction before any write", async () => {
+    const project = createBlankProject();
+    const original = structuredClone(project);
+    const replacement = { ...structuredClone(project), title: "Stale candidate" };
+    const failure = new Error("Live project changed");
+    const transaction = fakeTransactionStore([
+      ["patterdraw:autosave:project:v1", original],
+    ]);
+
+    await expect(commitAutosaveTransaction(
+      transaction.store,
+      replacement,
+      {},
+      new Set(),
+      false,
+      undefined,
+      undefined,
+      () => { throw failure; },
+    )).rejects.toBe(failure);
+
+    expect(transaction.puts).toEqual([]);
+    expect(transaction.deletes).toEqual([]);
+    expect(transaction.transaction.abort).toHaveBeenCalledOnce();
+    expect(transaction.committed.get("patterdraw:autosave:project:v1")).toBe(original);
+  });
+
   it("rolls back an active autosave transaction when cancellation arrives before commit", async () => {
     const project = createBlankProject();
     const original = structuredClone(project);

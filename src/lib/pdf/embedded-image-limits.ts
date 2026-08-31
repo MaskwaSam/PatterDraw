@@ -242,18 +242,56 @@ const PDF_CONTENT_OPERATOR_ARITIES: Readonly<Record<string, PdfContentOperatorAr
   BX: { maxArgs: 0 }, EX: { maxArgs: 0 },
 };
 
+export type PdfEmbeddedImageFailureCode =
+  | "source-image-over-budget"
+  | "content-uninspectable"
+  | "filtered-image-over-budget"
+  | "safety-worker-unavailable"
+  | "safety-inspection-timeout";
+
+export class PdfEmbeddedImageSafetyError extends Error {
+  readonly code: PdfEmbeddedImageFailureCode;
+
+  constructor(code: PdfEmbeddedImageFailureCode, message: string) {
+    super(message);
+    this.name = "PdfEmbeddedImageSafetyError";
+    this.code = code;
+  }
+}
+
+export function pdfEmbeddedImageFailureCode(
+  error: unknown,
+): PdfEmbeddedImageFailureCode | null {
+  if (!error || typeof error !== "object") return null;
+  const code = (error as { code?: unknown }).code;
+  return code === "source-image-over-budget"
+    || code === "content-uninspectable"
+    || code === "filtered-image-over-budget"
+    || code === "safety-worker-unavailable"
+    || code === "safety-inspection-timeout"
+    ? code
+    : null;
+}
+
 function embeddedImageLimitError(): Error {
-  return new Error(
+  return new PdfEmbeddedImageSafetyError(
+    "source-image-over-budget",
     "This PDF contains an embedded image that is too large to import safely. Reduce the image resolution and try again.",
   );
 }
 
 function contentInspectionError(): Error {
-  return new Error("This PDF's page content could not be checked for safe embedded-image sizes.");
+  return new PdfEmbeddedImageSafetyError(
+    "content-uninspectable",
+    "This PDF's page content could not be checked for safe embedded-image sizes.",
+  );
 }
 
 function imageFilterLimitError(): Error {
-  return new Error("This PDF's filtered image data exceeds the safe decoded-byte budget.");
+  return new PdfEmbeddedImageSafetyError(
+    "filtered-image-over-budget",
+    "This PDF's filtered image data exceeds the safe decoded-byte budget.",
+  );
 }
 
 function isImageFilterLimitError(error: unknown): boolean {
@@ -2597,6 +2635,7 @@ async function inspectEmbeddedImageLimitsInline(
 }
 
 interface EmbeddedImageWorkerResponse {
+  code?: PdfEmbeddedImageFailureCode;
   message?: string;
   name?: string;
   ok: boolean;
@@ -2605,25 +2644,25 @@ interface EmbeddedImageWorkerResponse {
 /** Worker startup/transport failures are terminal in the browser. Retrying a
  * hostile document on the UI thread would turn a contained worker failure into
  * an uninterruptible main-thread stall. */
-class EmbeddedImageWorkerInfrastructureError extends Error {
+class EmbeddedImageWorkerInfrastructureError extends PdfEmbeddedImageSafetyError {
   constructor(message: string) {
-    super(message);
+    super("safety-worker-unavailable", message);
     this.name = "EmbeddedImageWorkerInfrastructureError";
   }
 }
 
 const MAX_PDF_INSPECTION_MILLISECONDS = 30_000;
 
-class EmbeddedImageInspectionTimeoutError extends Error {
+class EmbeddedImageInspectionTimeoutError extends PdfEmbeddedImageSafetyError {
   constructor() {
-    super("PDF safety inspection timed out. Try a smaller or simpler PDF.");
+    super("safety-inspection-timeout", "PDF safety inspection timed out. Try a smaller or simpler PDF.");
     this.name = "EmbeddedImageInspectionTimeoutError";
   }
 }
 
-class EmbeddedImageWorkerProtocolError extends Error {
+class EmbeddedImageWorkerProtocolError extends PdfEmbeddedImageSafetyError {
   constructor(message: string) {
-    super(message);
+    super("safety-worker-unavailable", message);
     this.name = "EmbeddedImageWorkerProtocolError";
   }
 }
@@ -2688,8 +2727,13 @@ function inspectEmbeddedImageLimitsInWorker(
         resolve();
         return;
       }
-      const error = new Error(response.message || contentInspectionError().message);
-      if (response.name) error.name = response.name;
+      const error = response.code
+        ? new PdfEmbeddedImageSafetyError(
+          response.code,
+          response.message || contentInspectionError().message,
+        )
+        : new Error(response.message || contentInspectionError().message);
+      if (response.name && !response.code) error.name = response.name;
       fail(error);
     };
     worker.onerror = (event) => fail(new EmbeddedImageWorkerInfrastructureError(

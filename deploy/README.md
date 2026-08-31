@@ -16,7 +16,7 @@ The public route is intended to be public without Cloudflare Access. Adding the 
 
 ## Release gate
 
-1. Review and commit the exact source tree. Do not deploy an artifact created with `--allow-dirty`.
+1. Review and commit the exact source tree. Do not deploy an artifact created with `--allow-dirty`. The final readiness gate must also verify the current remote `main` with its read-only `git ls-remote` check; a local tracking ref alone is not sufficient provenance.
 2. Run the repository's full production checks, security audit, final package command, and final verifier.
 3. Run `node deploy/verify-config.mjs`. It re-runs the release verifier without a dirty override, requires the current checkout to be clean and at the release commit, and prints five non-secret Compose values derived from the commit, manifest, release tree, reviewed deployment files, and image tag.
 4. Render `deploy/compose.yaml` with those values and verify that it has no `ports` entry, is hard-bound to the pre-existing external `patterdraw_edge` network, and names a unique immutable image tag.
@@ -83,6 +83,7 @@ Before adding a public hostname:
 - confirm it is non-root, read-only, capability-free, resource-bounded, log-bounded, and has no host port;
 - from the connector's actual Docker network, require `Host: draw.spatterson.ca` to return the app and an arbitrary Host to return no usable response;
 - require GET/HEAD-only behavior, uncached `404` responses for missing or traversal-like assets, `no-store, no-transform` on every HTML entry/fallback path, immutable caching only for existing hashed `assets/`, and CSP/HSTS/nosniff/frame protections;
+- require `/service-worker.js` to exactly match the packaged bytes with JavaScript MIME, `no-cache, no-transform`, and the full security-header policy; require every main-app HTML response to carry `X-PatterDraw-App-Shell: patterdraw-app-shell-v1`;
 - require the main app to allow only same-origin frames while remaining unframeable itself, and require `/geogon/` to use its narrower child CSP with `connect-src 'none'`, `frame-ancestors 'self'`, and `X-Frame-Options: SAMEORIGIN`;
 - restart only PatterDraw and prove health returns without touching the main site or connector.
 
@@ -90,7 +91,7 @@ Before adding a public hostname:
 
 Only after the private origin passes, replace the captured `draw` behavior with one Cloudflare Tunnel Published application route whose Service URL is `http://patterdraw:8080`. Resolve only an exact conflicting `draw` record and remove only the confirmed hostname-scoped redirect behavior.
 
-Acceptance requires public HTTPS `200` for the PatterDraw entry point, a valid certificate, expected security/cache headers, a working board and local persistence, no redirect to Moodle, and no remote application requests. The final edge must preserve `Cache-Control: no-store, no-transform` on HTML and must not inject an analytics beacon. Recheck that `https://spatterson.ca`, `https://www.spatterson.ca`, `https://mesconline.ca`, the standalone connector, email DNS, and router TCP 443 ownership are unchanged.
+Acceptance requires public HTTPS `200` for the PatterDraw entry point, a valid certificate, expected security/cache headers, a working board and local persistence, no redirect to Moodle, and no remote application requests. The final edge must preserve `Cache-Control: no-store, no-transform` and `X-PatterDraw-App-Shell: patterdraw-app-shell-v1` on HTML, must serve the exact packaged `/service-worker.js` with JavaScript MIME and `no-cache, no-transform`, and must not inject an analytics beacon. Recheck that `https://spatterson.ca`, `https://www.spatterson.ca`, `https://mesconline.ca`, the standalone connector, email DNS, and router TCP 443 ownership are unchanged.
 
 ## Image rollback checkpoint
 
@@ -103,3 +104,31 @@ For the first deployment there is no prior PatterDraw image. Its rollback is to 
 ## Rollback
 
 If public acceptance fails, restore only the captured `draw` rule/route/DNS state in the order that points traffic back to its previous behavior. Do not stop or recreate `spatterson-cloudflared`. If the hostname is healthy but the candidate image fails, use the printed `--no-build` checkpoint to switch only the PatterDraw service back to the retained and label-verified prior image. Keep the exact release tree, current and prior images, Cloudflare before-state, Compose checkpoints, and rollback command until the acceptance window closes.
+
+### First app-shell release rollback
+
+The first service-worker deployment is a browser migration. Current HTML sends
+`X-PatterDraw-App-Shell: patterdraw-app-shell-v1`; a pre-service-worker rollback
+image does not. When an installed candidate worker receives a successful online
+navigation without that marker, it durably marks that document lineage as
+network-only before returning the rollback response. It deliberately keeps the
+same registration and verified scoped cache: other already-open lesson
+lineages can still invoke lazy classroom tools, while rollback and unknown
+lineages cannot receive cached HTML or overlapping fixed assets. This retained
+registration also ensures that a future marked worker waits until every client
+of the prior release closes before activation and scope-local cleanup.
+
+After switching to a pre-service-worker image, keep the origin online and open
+the app once in every classroom browser profile that used the candidate. Verify
+that the online rollback page is shown, the PatterDraw registration remains,
+and a new offline navigation cannot show candidate code. Protected tabs that
+were already open may continue their exact cached lesson until closed; that is
+intentional continuity, not rollback failure. Scoped
+`patterdraw-app-shell-v2:` caches remain bounded storage for those tabs and for
+safe future reintroduction, so cache presence alone is not evidence of offline
+rollback resurrection.
+Do not call rollback complete from a server health check alone. A device that
+never reconnects cannot learn that the server rolled back and can still hold
+candidate bytes; if immediate fleet-wide invalidation is required, deploy a
+forward rollback image that keeps a reviewed cleanup worker rather than merely
+swapping to an older image.

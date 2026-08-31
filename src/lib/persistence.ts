@@ -70,6 +70,12 @@ export interface SaveAutosaveOptions {
   /** Cancel an obsolete preflight before any autosave write is queued. */
   signal?: AbortSignal;
   /**
+   * Synchronous final caller invariant, evaluated inside the serialized
+   * read-write transaction immediately before its first write is queued.
+   * Throwing aborts the complete transaction without changing any key.
+   */
+  precommitGuard?: () => void;
+  /**
    * Opaque revision observed by the caller before it started editing. `null`
    * means the caller expects no current autosave. Omitting the field uses the
    * process-local observation for backwards-compatible callers; a stored
@@ -333,6 +339,7 @@ export function commitAutosaveTransaction(
   replacePdfBlobs = false,
   expected?: AutosaveCasExpectation,
   signal?: AbortSignal,
+  precommitGuard?: () => void,
 ): Promise<AutosaveCommitResult> {
   if (signal?.aborted) return Promise.reject(autosaveAbortReason(signal));
   const nextRevision = nextAutosaveRevision(
@@ -387,12 +394,15 @@ export function commitAutosaveTransaction(
     let writesQueued = false;
 
     const abort = (error: unknown) => {
+      // Preserve the actionable caller/write failure. Some IndexedDB
+      // implementations surface only a generic AbortError on transaction
+      // abort, but this branch always runs before commit is possible.
+      settleReject(error);
       try {
         transaction.abort();
       } catch {
         // The transaction may already have aborted because of the request.
       }
-      settleReject(error);
     };
     const queueWrites = () => {
       if (!projectReady || !revisionReady || !keysReady || writesQueued) return;
@@ -412,6 +422,10 @@ export function commitAutosaveTransaction(
         return;
       }
       try {
+        // This callback shares the same JavaScript turn as the first put. A
+        // caller can therefore close a live-state TOCTOU after async
+        // verification and Web Lock waiting without allowing a partial write.
+        precommitGuard?.();
         for (const [key, value] of getAutosaveWriteEntries(
           verifiedProject,
           pdfBytes,
@@ -931,6 +945,7 @@ async function setManyAndDeleteStaleAtomically(
   replacePdfBlobs = false,
   expected?: AutosaveCasExpectation,
   signal?: AbortSignal,
+  precommitGuard?: () => void,
 ): Promise<AutosaveCommitResult> {
   // Unit environments can replace createStore with an unavailable test
   // double. Production browsers always use this single readwrite transaction,
@@ -965,6 +980,7 @@ async function setManyAndDeleteStaleAtomically(
     );
     if (expected) entries.push([AUTOSAVE_REVISION_KEY, nextRevision]);
     throwIfAutosaveAborted(signal);
+    precommitGuard?.();
     await setMany(entries);
     return { revision: nextRevision.revision, writerId: nextRevision.writerId };
   }
@@ -978,6 +994,7 @@ async function setManyAndDeleteStaleAtomically(
       replacePdfBlobs,
       expected,
       signal,
+      precommitGuard,
     ),
   );
 }
@@ -1098,6 +1115,7 @@ export async function saveAutosave(
         options.replacePdfBlobs,
         expected,
         options.signal,
+        options.precommitGuard,
       );
       return;
     }
@@ -1129,6 +1147,7 @@ export async function saveAutosave(
     );
     if (expected) entries.push([AUTOSAVE_REVISION_KEY, nextRevision]);
     throwIfAutosaveAborted(options.signal);
+    options.precommitGuard?.();
     await setMany(entries);
     commitResult = { revision: nextRevision.revision, writerId };
 

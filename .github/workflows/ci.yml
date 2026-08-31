@@ -24,6 +24,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
+      - run: test "$(node --version)" = "v${NODE_VERSION}"
       - run: npm install --global npm@11.12.1 --ignore-scripts --no-audit --no-fund
       - run: test "$(npm --version)" = "11.12.1"
       - run: npm ci
@@ -42,6 +43,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
+      - run: test "$(node --version)" = "v${NODE_VERSION}"
       - run: npm install --global npm@11.12.1 --ignore-scripts --no-audit --no-fund
       - run: test "$(npm --version)" = "11.12.1"
       - run: npm ci
@@ -65,11 +67,16 @@ jobs:
     steps:
       # v4.2.2
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          # Final packaging checks the real local origin/main tracking ref.
+          # PR merge commits remain explicitly development-only below.
+          fetch-depth: 0
       # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
+      - run: test "$(node --version)" = "v${NODE_VERSION}"
       - run: npm install --global npm@11.12.1 --ignore-scripts --no-audit --no-fund
       - run: test "$(npm --version)" = "11.12.1"
       - run: npm ci
@@ -94,15 +101,19 @@ jobs:
         run: |
           set -o pipefail
           production_diag_dir="$RUNNER_TEMP/patterdraw-production"
+          release_preparation_args=()
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            release_preparation_args+=(--allow-unpushed-development)
+          fi
           printf 'stale build probe\n' > dist/stale-release-probe.js
-          npm run release:package 2>&1 | tee "$production_diag_dir/package.log"
+          npm run release:package -- "${release_preparation_args[@]}" 2>&1 | tee "$production_diag_dir/package.log"
           test ! -e dist/stale-release-probe.js
           test ! -e dist/release/stale-release-probe.js
           sha256sum dist/release/release-manifest.json dist/release/provenance.json dist/release/sbom.cdx.json dist/release/SHA256SUMS > "$production_diag_dir/release-first.sha256"
-          npm run release:package 2>&1 | tee "$production_diag_dir/package-repeat.log"
+          npm run release:package -- "${release_preparation_args[@]}" 2>&1 | tee "$production_diag_dir/package-repeat.log"
           sha256sum dist/release/release-manifest.json dist/release/provenance.json dist/release/sbom.cdx.json dist/release/SHA256SUMS > "$production_diag_dir/release-second.sha256"
           diff -u "$production_diag_dir/release-first.sha256" "$production_diag_dir/release-second.sha256"
-          npm run release:verify 2>&1 | tee "$production_diag_dir/package-verify.log"
+          npm run release:verify -- "${release_preparation_args[@]}" 2>&1 | tee "$production_diag_dir/package-verify.log"
       - name: Prepare production diagnostics
         if: ${{ always() }}
         run: |
@@ -116,7 +127,7 @@ jobs:
           fi
       - id: production-container
         name: Build and smoke-test deployment container
-        if: ${{ always() && steps.production-package.outcome == 'success' }}
+        if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.production-package.outcome == 'success' }}
         run: |
           set -euo pipefail
           deploy_env="$RUNNER_TEMP/patterdraw-deploy.env"
@@ -203,6 +214,7 @@ jobs:
           assert_security_headers artifacts/production/deploy-root-headers.txt
           grep -qi 'Cache-Control: no-store' artifacts/production/deploy-root-headers.txt
           grep -qi 'Cache-Control: no-store, no-transform' artifacts/production/deploy-root-headers.txt
+          grep -qi 'X-PatterDraw-App-Shell: patterdraw-app-shell-v1' artifacts/production/deploy-root-headers.txt
 
           for html_path in /index.html /classroom/deployment-acceptance; do
             "${client[@]}" -c \
@@ -211,6 +223,8 @@ jobs:
             grep -q 'HTTP/1.1 200' artifacts/production/deploy-html-route-headers.txt
             assert_security_headers artifacts/production/deploy-html-route-headers.txt
             grep -qi 'Cache-Control: no-store, no-transform' \
+              artifacts/production/deploy-html-route-headers.txt
+            grep -qi 'X-PatterDraw-App-Shell: patterdraw-app-shell-v1' \
               artifacts/production/deploy-html-route-headers.txt
           done
 
@@ -275,6 +289,16 @@ jobs:
             artifacts/production/deploy-pdf-worker-headers.txt
           grep -Eqi '^[[:space:]]*Cache-Control:[[:space:]]*public, max-age=31536000, immutable[[:space:]]*$' \
             artifacts/production/deploy-pdf-worker-headers.txt
+
+          "${client[@]}" -eu -c \
+            'wget -S -O /tmp/patterdraw-service-worker.js --header="Host: draw.spatterson.ca" http://patterdraw:8080/service-worker.js && cmp /tmp/patterdraw-service-worker.js /usr/share/nginx/html/service-worker.js' \
+            > artifacts/production/deploy-service-worker-headers.txt 2>&1
+          grep -q 'HTTP/1.1 200' artifacts/production/deploy-service-worker-headers.txt
+          assert_security_headers artifacts/production/deploy-service-worker-headers.txt
+          grep -Eqi '^[[:space:]]*Content-Type:[[:space:]]*application/javascript([[:space:]]*;.*)?[[:space:]]*$' \
+            artifacts/production/deploy-service-worker-headers.txt
+          grep -Eqi '^[[:space:]]*Cache-Control:[[:space:]]*no-cache, no-transform[[:space:]]*$' \
+            artifacts/production/deploy-service-worker-headers.txt
       - name: Start packaged release server
         if: ${{ always() && steps.production-package.outcome == 'success' }}
         run: |
@@ -332,7 +356,13 @@ jobs:
       - id: production-postverify
         name: Verify browser tests preserved the release artifact
         if: ${{ always() && steps.production-package.outcome == 'success' }}
-        run: npm run release:verify 2>&1 | tee artifacts/production/release-postverify.log
+        run: |
+          release_preparation_args=()
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            release_preparation_args+=(--allow-unpushed-development)
+          fi
+          npm run release:verify -- "${release_preparation_args[@]}" 2>&1 \
+            | tee artifacts/production/release-postverify.log
       - name: Stop packaged release server
         if: ${{ always() }}
         run: |
@@ -351,7 +381,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Upload verified production release
-        if: ${{ steps.production-package.outcome == 'success' && steps.production-container.outcome == 'success' && steps.production-browser.outcome == 'success' && steps.production-postverify.outcome == 'success' }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.production-package.outcome == 'success' && steps.production-container.outcome == 'success' && steps.production-browser.outcome == 'success' && steps.production-postverify.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: patterdraw-release-${{ github.run_id }}

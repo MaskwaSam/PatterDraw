@@ -170,6 +170,9 @@ export const LaserIcon = (props: IconProps) => (
 export const InkIcon = (props: IconProps) => (
   <IconBase {...props}><path d="m4 19 4.5-1 9.7-9.7-3.5-3.5L5 14.5zM13.5 6l3.5 3.5"/></IconBase>
 );
+export const EraserIcon = (props: IconProps) => (
+  <IconBase {...props}><path d="m5.2 14.8 7.6-7.6 5 5-7.6 7.6H5.8L3.6 17.6zM13.5 19.8h6.9M8.8 11.2l5 5"/></IconBase>
+);
 export const EyeIcon = (props: IconProps) => (
   <IconBase {...props}><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z"/><circle cx="12" cy="12" r="2.5"/></IconBase>
 );

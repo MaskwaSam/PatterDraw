@@ -8,6 +8,7 @@ import {
 } from "react";
 import {
   ALARM_TONES,
+  DEFAULT_CLASSROOM_TIME_APPEARANCE,
   createIdlePomodoroRuntime,
   createIdleTimerRuntime,
   sanitizeClassroomTimeWidgetMetadata,
@@ -83,6 +84,62 @@ const TONE_LABELS: Readonly<Record<ClassroomAlarmTone, string>> = {
   "gentle-bell": "Gentle bell",
   "warm-chime": "Warm chime",
 };
+
+function relativeLuminance(hex: string): number {
+  const match = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (!match) return 0;
+  const channels = [0, 2, 4].map((offset) => {
+    const value = Number.parseInt(match[1].slice(offset, offset + 2), 16) / 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+}
+
+export function classroomTimeContrastRatio(foreground: string, background: string): number {
+  const first = relativeLuminance(foreground);
+  const second = relativeLuminance(background);
+  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+}
+
+export function classroomTimeReadabilityWarning(
+  appearance: ReturnType<typeof resolveClassroomTimeAppearance>,
+  opacity: number,
+): string | null {
+  const warnings: string[] = [];
+  const textContrast = classroomTimeContrastRatio(
+    appearance.foregroundColor,
+    appearance.backgroundColor,
+  );
+  const accentContrast = classroomTimeContrastRatio(
+    appearance.accentColor,
+    appearance.backgroundColor,
+  );
+  if (textContrast < 4.5) {
+    warnings.push(`Text contrast is ${textContrast.toFixed(1)}:1; aim for at least 4.5:1.`);
+  }
+  if (accentContrast < 4.5) {
+    warnings.push(`Accent contrast is ${accentContrast.toFixed(1)}:1; aim for at least 4.5:1.`);
+  }
+  if (opacity < 0.7) {
+    warnings.push("Low opacity can make the widget hard to read over board content.");
+  }
+  return warnings.length ? warnings.join(" ") : null;
+}
+
+export function readableClassroomTimeAppearance(
+  current: ClassroomTimeAppearanceV1,
+  resolvedTheme: ClassroomTimeBoardTheme,
+): ClassroomTimeAppearanceV1 {
+  return {
+    ...DEFAULT_CLASSROOM_TIME_APPEARANCE,
+    foregroundColor: resolvedTheme === "dark" ? "#ffffff" : "#111827",
+    backgroundColor: resolvedTheme === "dark" ? "#000000" : "#ffffff",
+    accentColor: resolvedTheme === "dark" ? "#bfdbfe" : "#1d4ed8",
+    borderColor: resolvedTheme === "dark" ? "#cbd5e1" : "#64748b",
+    opacity: 1,
+    theme: current.theme,
+  };
+}
 
 function cloneMetadata(metadata: ClassroomTimeWidgetMetadataV1): ClassroomTimeWidgetMetadataV1 {
   return sanitizeClassroomTimeWidgetMetadata(JSON.parse(JSON.stringify(metadata)));
@@ -305,6 +362,17 @@ export function ClassroomTimeDialog({
   const calendar = metadata.kind === "calendar" || metadata.kind === "dashboard" ? metadata.calendar : null;
   const alarm = metadata.kind === "timer" || metadata.kind === "pomodoro" || metadata.kind === "dashboard" ? metadata.alarm : null;
   const previewAppearance = resolveClassroomTimeAppearance(metadata.appearance, boardTheme);
+  const readabilityWarning = classroomTimeReadabilityWarning(
+    previewAppearance,
+    metadata.appearance.opacity,
+  );
+  const alarmTestUnavailableReason = !alarm?.enabled
+    ? "Turn on the alarm before testing it."
+    : alarmMuted
+      ? "Test alarm is unavailable while classroom alarms are muted on this device."
+      : alarmVolume <= 0
+        ? "Raise alarm volume above 0% to hear a test."
+        : null;
   const timeZoneError = clock && !validTimeZone(clock.timeZone) ? "Enter a valid IANA timezone, such as America/Edmonton." : null;
   const eventError = !eventTitle.trim()
     ? "Add an event title."
@@ -408,6 +476,19 @@ export function ClassroomTimeDialog({
           <strong>{metadata.label || "Ready for class"}</strong>
           <small>Live on the board · controls stay in the editor</small>
         </div>
+        {readabilityWarning ? (
+          <div className="classroom-time-field-error" role="alert">
+            <span>{readabilityWarning}</span>{" "}
+            <button
+              type="button"
+              className="classroom-time-secondary-button"
+              onClick={() => setMetadata(updateAppearance(
+                metadata,
+                readableClassroomTimeAppearance(metadata.appearance, previewAppearance.theme),
+              ))}
+            >Use readable colours</button>
+          </div>
+        ) : null}
 
         <nav className="classroom-time-dialog-tabs" aria-label="Widget settings">
           {sections.map((candidate) => (
@@ -522,7 +603,19 @@ export function ClassroomTimeDialog({
               <SwitchField checked={alarm.repeat} onChange={(repeat) => setMetadata(updateAlarm(metadata, { ...alarm, repeat }))}>Repeat every 10 seconds for one minute</SwitchField>
               <SwitchField checked={alarmMuted} onChange={(muted) => onAlarmPreferencesChange({ muted, volume: alarmVolume })}>Mute all classroom alarms on this device</SwitchField>
               <label>Alarm volume <output>{Math.round(alarmVolume * 100)}%</output><input type="range" min="0" max="1" step="0.05" value={alarmVolume} onChange={(event) => onAlarmPreferencesChange({ muted: alarmMuted, volume: event.target.valueAsNumber })} /></label>
-              <button type="button" className="classroom-time-secondary-button" disabled={alarmMuted || !alarm.enabled} onClick={() => onTestAlarm(alarm.tone)}>Test alarm</button>
+              <button
+                type="button"
+                className="classroom-time-secondary-button"
+                disabled={!!alarmTestUnavailableReason}
+                aria-describedby={alarmTestUnavailableReason ? "classroom-time-alarm-test-help" : undefined}
+                title={alarmTestUnavailableReason ?? "Play the selected alarm tone"}
+                onClick={() => onTestAlarm(alarm.tone)}
+              >Test alarm</button>
+              {alarmTestUnavailableReason ? (
+                <p id="classroom-time-alarm-test-help" className="classroom-time-quiet-help" role="status" aria-live="polite">
+                  {alarmTestUnavailableReason}
+                </p>
+              ) : null}
               <p className="classroom-time-quiet-help">Sounds are bundled locally. PatterDraw does not request browser notifications.</p>
             </div>
           ) : null}

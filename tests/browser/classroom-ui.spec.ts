@@ -25,6 +25,67 @@ const pdfStandardFontDataUrl = decodeURIComponent(new URL(
 ).pathname);
 
 const DEVELOPMENT_EDITOR_MOUNT_TIMEOUT = 90_000;
+const AUTOSAVE_MUTATION_LOCK_NAME = "patterdraw:autosave:mutation:v1";
+
+type AutosaveMutationLockGateWindow = Window & {
+  __autosaveMutationLockGate?: {
+    release: () => void;
+    requests: number;
+  };
+};
+
+async function installAutosaveMutationLockGate(page: Page): Promise<void> {
+  await page.evaluate((autosaveLockName) => {
+    const state = window as AutosaveMutationLockGateWindow;
+    const nativeLocks = navigator.locks;
+    if (!nativeLocks) throw new Error("Web Locks are unavailable in this browser.");
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    state.__autosaveMutationLockGate = { release, requests: 0 };
+    const delegatedLocks = new Proxy(nativeLocks, {
+      get(target, property) {
+        if (property !== "request") {
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return async (name: string, ...args: unknown[]) => {
+          if (name !== autosaveLockName) {
+            return Reflect.apply(target.request, target, [name, ...args]);
+          }
+          const operation = args.at(-1);
+          if (typeof operation !== "function") {
+            throw new TypeError("Web Lock request is missing its operation callback.");
+          }
+          const testState = state.__autosaveMutationLockGate;
+          if (!testState) {
+            return operation({ name, mode: "exclusive" } as Lock);
+          }
+          testState.requests += 1;
+          if (testState.requests === 1) await gate;
+          return operation({ name, mode: "exclusive" } as Lock);
+        };
+      },
+    });
+    Object.defineProperty(navigator, "locks", {
+      configurable: true,
+      value: delegatedLocks,
+    });
+  }, AUTOSAVE_MUTATION_LOCK_NAME);
+}
+
+async function autosaveMutationLockRequestCount(page: Page): Promise<number> {
+  return page.evaluate(() => (
+    (window as AutosaveMutationLockGateWindow).__autosaveMutationLockGate?.requests || 0
+  ));
+}
+
+async function releaseAutosaveMutationLockGate(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    (window as AutosaveMutationLockGateWindow).__autosaveMutationLockGate?.release();
+  });
+}
 
 interface RenderedPdfPage {
   width: number;
@@ -310,11 +371,159 @@ async function openTestPdf(page: import("@playwright/test").Page, pageCount = 1)
   await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(pageCount, {
     timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
   });
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0, {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
   await expect.poll(
     () => autosavedPdfBackgroundPosition(page),
     { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT },
   )
     .toMatchObject({ locked: true });
+}
+
+type PdfStorageEstimateStep =
+  | { availableBytes: number }
+  | { quotaExceeded: true }
+  | { neverResolve: true };
+
+async function installPdfStorageEstimateSequence(
+  page: import("@playwright/test").Page,
+  steps: readonly PdfStorageEstimateStep[],
+): Promise<void> {
+  await page.evaluate((configuredSteps) => {
+    if (!navigator.storage) throw new Error("StorageManager is unavailable in this browser.");
+    const state = window as Window & { __pdfStorageEstimateCalls?: number };
+    state.__pdfStorageEstimateCalls = 0;
+    Object.defineProperty(navigator.storage, "estimate", {
+      configurable: true,
+      value: async () => {
+        const call = state.__pdfStorageEstimateCalls || 0;
+        state.__pdfStorageEstimateCalls = call + 1;
+        const step = configuredSteps[Math.min(call, configuredSteps.length - 1)];
+        if (!step) throw new Error("No PDF storage estimate was configured.");
+        if ("quotaExceeded" in step) {
+          throw new DOMException("Storage is full.", "QuotaExceededError");
+        }
+        if ("neverResolve" in step) {
+          return new Promise<StorageEstimate>(() => undefined);
+        }
+        return { quota: step.availableBytes, usage: 0 };
+      },
+    });
+  }, steps);
+}
+
+async function pdfStorageEstimateCallCount(
+  page: import("@playwright/test").Page,
+): Promise<number> {
+  return page.evaluate(() => (
+    (window as Window & { __pdfStorageEstimateCalls?: number })
+      .__pdfStorageEstimateCalls || 0
+  ));
+}
+
+async function failPdfCandidateAutosaveWithQuota(
+  page: import("@playwright/test").Page,
+): Promise<void> {
+  await page.evaluate(() => {
+    const originalPut = IDBObjectStore.prototype.put;
+    Object.defineProperty(IDBObjectStore.prototype, "put", {
+      configurable: true,
+      value(this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+        if (
+          typeof key === "string"
+          && key.startsWith("patterdraw:autosave:pdf:v1:")
+        ) {
+          throw new DOMException("Storage is full.", "QuotaExceededError");
+        }
+        return key === undefined
+          ? originalPut.call(this, value)
+          : originalPut.call(this, value, key);
+      },
+    });
+  });
+}
+
+type BlankPdfFinalCommitFailureState = {
+  failed: boolean;
+  keys: string[];
+};
+
+async function failNextBlankPdfFinalCommitWithQuota(
+  page: import("@playwright/test").Page,
+): Promise<void> {
+  await page.evaluate(() => {
+    const projectKey = "patterdraw:autosave:project:v1";
+    const revisionKey = "patterdraw:autosave:revision:v1";
+    const descriptor = Object.getOwnPropertyDescriptor(IDBObjectStore.prototype, "put");
+    const originalPut = IDBObjectStore.prototype.put;
+    if (!descriptor) throw new Error("IDBObjectStore.put could not be instrumented.");
+    type TestState = BlankPdfFinalCommitFailureState & {
+      candidateTransaction: IDBTransaction | null;
+      restore: () => void;
+    };
+    const testWindow = window as Window & { __blankPdfFinalCommitFailure?: TestState };
+    const state: TestState = {
+      candidateTransaction: null,
+      failed: false,
+      keys: [],
+      restore: () => {
+        Object.defineProperty(IDBObjectStore.prototype, "put", descriptor);
+        delete testWindow.__blankPdfFinalCommitFailure;
+      },
+    };
+    testWindow.__blankPdfFinalCommitFailure = state;
+    Object.defineProperty(IDBObjectStore.prototype, "put", {
+      ...descriptor,
+      value(this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+        const stringKey = typeof key === "string" ? key : null;
+        if (
+          !state.failed
+          && state.candidateTransaction === null
+          && stringKey === projectKey
+          && value
+          && typeof value === "object"
+          && "pdfDocuments" in value
+          && Object.values((value as {
+            pdfDocuments?: Record<string, { name?: unknown }>;
+          }).pdfDocuments || {}).some((source) => source.name === "Blank page")
+        ) {
+          state.candidateTransaction = this.transaction;
+        }
+        if (state.candidateTransaction === this.transaction && stringKey) {
+          state.keys.push(stringKey);
+          if (stringKey === revisionKey) {
+            state.failed = true;
+            throw new DOMException("Storage is full at final commit.", "QuotaExceededError");
+          }
+        }
+        return key === undefined
+          ? originalPut.call(this, value)
+          : originalPut.call(this, value, key);
+      },
+    });
+  });
+}
+
+async function blankPdfFinalCommitFailureState(
+  page: import("@playwright/test").Page,
+): Promise<BlankPdfFinalCommitFailureState | null> {
+  return page.evaluate(() => {
+    const state = (window as Window & {
+      __blankPdfFinalCommitFailure?: BlankPdfFinalCommitFailureState;
+    }).__blankPdfFinalCommitFailure;
+    return state ? { failed: state.failed, keys: [...state.keys] } : null;
+  });
+}
+
+async function restoreBlankPdfFinalCommitFailure(
+  page: import("@playwright/test").Page,
+): Promise<void> {
+  await page.evaluate(() => {
+    (window as Window & {
+      __blankPdfFinalCommitFailure?: { restore: () => void };
+    }).__blankPdfFinalCommitFailure?.restore();
+  });
 }
 
 async function labelledPdfBytes(labels: readonly string[]): Promise<Uint8Array> {
@@ -338,6 +547,9 @@ async function drawPdfRectangleAnnotation(
   startOffset: { x: number; y: number },
   endOffset: { x: number; y: number },
 ): Promise<void> {
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0, {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
   await page.getByTestId("toolbar-rectangle").check({ force: true });
   await dragOnBoard(page, startOffset, endOffset);
   await page.getByTestId("toolbar-selection").check({ force: true });
@@ -347,6 +559,9 @@ async function typePdfTextAnnotation(
   page: import("@playwright/test").Page,
   text: string,
 ): Promise<void> {
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0, {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
   await page.getByTestId("toolbar-text").check({ force: true });
   const editor = await page.locator(".editor-host").boundingBox();
   if (!editor) throw new Error("PDF editor has no visible bounds.");
@@ -1074,13 +1289,39 @@ async function openClassroomFixture(
     mimeType: "application/vnd.patterdraw+zip",
     buffer: Buffer.from(bytes),
   });
-  await whileOpening?.();
+  const switchDialog = page.getByRole("dialog", { name: "Open another project?", exact: true });
+  if (whileOpening) {
+    await whileOpening();
+    await expect(switchDialog).toHaveCount(0, { timeout: 30_000 });
+  } else {
+    await page.waitForTimeout(0);
+  }
+  if (!whileOpening && await switchDialog.isVisible()) {
+    await switchDialog.getByRole("button", {
+      name: "Open without downloading",
+      exact: true,
+    }).click();
+  }
   await expect(page.getByRole("textbox", { name: "Project title" }))
     .toHaveValue(project.title);
   await expect.poll(async () => (
     await keyvalValue<{ id: string }>(page, "patterdraw:autosave:project:v1")
   )?.id).toBe(project.id);
   await expect(page.locator(".busy-overlay")).toHaveCount(0);
+}
+
+async function confirmProjectOpenWithoutDownloading(page: Page): Promise<void> {
+  const switchDialog = page.getByRole("dialog", {
+    name: "Open another project?",
+    exact: true,
+  });
+  await expect(switchDialog).toBeVisible();
+  await switchDialog.getByRole("button", {
+    name: "Open without downloading",
+    exact: true,
+  }).click();
+  await expect(switchDialog).toHaveCount(0, { timeout: 30_000 });
+  await expect(page.locator(".busy-overlay")).toHaveCount(0, { timeout: 30_000 });
 }
 
 async function openSlideSettings(page: Page) {
@@ -1192,6 +1433,28 @@ async function keyvalValue<T>(page: import("@playwright/test").Page, key: string
     database.close();
     return value;
   }, key) as Promise<T | undefined>;
+}
+
+async function autosavePdfKeys(page: import("@playwright/test").Page): Promise<string[]> {
+  return page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const keys = await new Promise<IDBValidKey[]>((resolve, reject) => {
+      const transaction = database.transaction("keyval", "readonly");
+      const request = transaction.objectStore("keyval").getAllKeys();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    return keys
+      .filter((key): key is string => (
+        typeof key === "string" && key.startsWith("patterdraw:autosave:pdf:v1:")
+      ))
+      .sort();
+  });
 }
 
 async function installDeferredFullscreenProbe(page: import("@playwright/test").Page): Promise<void> {
@@ -2084,6 +2347,58 @@ async function autosavedPresentationInkStack(page: import("@playwright/test").Pa
   });
 }
 
+async function autosavedPresentationEraserState(page: Page): Promise<{
+  liveFrameIds: string[];
+  liveInkIds: string[];
+  markerStates: Record<string, {
+    height: number;
+    isDeleted: boolean;
+    width: number;
+    x: number;
+    y: number;
+  }>;
+  slideCount: number;
+} | null> {
+  const project = await keyvalValue<{
+    activeSceneId: string;
+    scenes: Record<string, {
+      elements: Array<{
+        height?: number;
+        id: string;
+        isDeleted?: boolean;
+        type?: string;
+        width?: number;
+        x?: number;
+        y?: number;
+      }>;
+    }>;
+    slideOrder: unknown[];
+  }>(page, "patterdraw:autosave:project:v1");
+  if (!project) return null;
+  const elements = project.scenes[project.activeSceneId]?.elements || [];
+  const markerIds = new Set(["presentation-unrelated-marker", "presentation-off-slide-marker"]);
+  return {
+    liveFrameIds: elements
+      .filter((element) => element.type === "frame" && element.isDeleted !== true)
+      .map((element) => element.id)
+      .sort(),
+    liveInkIds: elements
+      .filter((element) => element.type === "freedraw" && element.isDeleted !== true)
+      .map((element) => element.id)
+      .sort(),
+    markerStates: Object.fromEntries(elements
+      .filter((element) => markerIds.has(element.id))
+      .map((element) => [element.id, {
+        height: element.height || 0,
+        isDeleted: element.isDeleted === true,
+        width: element.width || 0,
+        x: element.x || 0,
+        y: element.y || 0,
+      }])),
+    slideCount: project.slideOrder.length,
+  };
+}
+
 async function autosavedSlideDeletion(page: import("@playwright/test").Page): Promise<{
   slideCount: number;
   frameCount: number;
@@ -2293,6 +2608,9 @@ test.beforeEach(async ({ context, page }) => {
   await installRuntimeGuard(context, page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0, {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
 });
 
 test.afterEach(async ({ context }, testInfo: TestInfo) => {
@@ -2944,7 +3262,11 @@ test("finds and activates text across Board, Slides, and PDF pages", async ({ pa
   await page.locator(".project-find-result").filter({ hasText: "Board lesson" }).click();
   await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
   await page.getByRole("button", { name: "Search current canvas", exact: true }).click();
-  await expect(page.locator(".layer-ui__search input")).toBeVisible();
+  const nativeSearch = page.locator(".layer-ui__search input");
+  await expect(nativeSearch).toBeVisible();
+  await nativeSearch.press("Escape");
+  await expect(nativeSearch).toHaveCount(0);
+  await page.locator(".editor-host .excalidraw").focus();
   await page.keyboard.press("ControlOrMeta+f");
   await expect(query).toBeVisible();
   await expect(query).toBeFocused();
@@ -3567,19 +3889,71 @@ test("downsamples a large RGB PDF image instead of importing a blank page", asyn
 });
 
 test("rejects a PDF image above the bounded source-image budget atomically", async ({ page }) => {
+  const originalBytes = await largeEmbeddedImagePdfBytes(true, 5_657, 5_657);
   await page.getByLabel("Open project file").setInputFiles({
     name: "source-image-over-budget.pdf",
     mimeType: "application/pdf",
     // 5,657² = 32,001,649 pixels: just above the standard-tier source cap,
     // but still below the independent 8,192-pixel edge guard.
-    buffer: Buffer.from(await largeEmbeddedImagePdfBytes(true, 5_657, 5_657)),
+    buffer: Buffer.from(originalBytes),
   });
 
-  await expect(page.getByRole("alert")).toContainText(
-    "This PDF contains an embedded image that is too large to import safely.",
-  );
+  const recovery = page.getByRole("dialog", { name: "Use a converted PDF copy?", exact: true });
+  await expect(recovery).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect(recovery).toContainText("not an unrestricted override");
+  await expect(recovery).toContainText("will not decode or store the rejected original");
   await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
   await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
+
+  const wrongPageCount = await PDFDocument.create();
+  wrongPageCount.addPage([300, 200]);
+  wrongPageCount.addPage([300, 200]);
+  await recovery.getByLabel("Choose converted PDF copy").setInputFiles({
+    name: "wrong-page-count.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await wrongPageCount.save()),
+  });
+  await expect(recovery).toBeVisible();
+  await expect(page.locator(".error-toast")).toContainText(
+    "The compatibility copy has 2 pages, but the original has 1",
+  );
+  await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
+
+  const converted = await PDFDocument.create();
+  converted.addPage([612, 792]);
+  const convertedBytes = await converted.save();
+  await recovery.getByLabel("Choose converted PDF copy").setInputFiles({
+    name: "teacher-flattened-copy.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(convertedBytes),
+  });
+  await expect(recovery).toHaveCount(0, { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/);
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1);
+  await expect(page.locator("#pdf-page-rail")).toContainText(
+    "source-image-over-budget (visual compatibility copy).pdf",
+  );
+  await expect.poll(async () => {
+    const saved = await keyvalValue<{
+      pdfDocuments: Record<string, { id: string; byteLength: number; name: string }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    return Object.values(saved?.pdfDocuments || {})[0] ?? null;
+  }).not.toBeNull();
+  const saved = await keyvalValue<{
+    pdfDocuments: Record<string, { id: string; byteLength: number; name: string }>;
+  }>(page, "patterdraw:autosave:project:v1");
+  const source = Object.values(saved?.pdfDocuments || {})[0];
+  if (!source) throw new Error("The compatibility source was not autosaved.");
+  expect(source).toMatchObject({
+    byteLength: convertedBytes.byteLength,
+    name: "source-image-over-budget (visual compatibility copy).pdf",
+  });
+  const storedBytes = await keyvalValue<Uint8Array>(
+    page,
+    `patterdraw:autosave:pdf:v1:${source.id}`,
+  );
+  expect(storedBytes).toEqual(convertedBytes);
+  expect(storedBytes).not.toEqual(originalBytes);
 });
 
 test("imports, saves, restores, and exports a PDF at the 500-page ceiling", async ({ page }) => {
@@ -3690,6 +4064,294 @@ test("cancels an in-progress PDF import without committing partial pages", async
   await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
   await expect(page.getByRole("alert")).toHaveCount(0);
   await page.unrouteAll({ behavior: "wait" });
+});
+
+test("cancels a direct PDF import while browser storage estimation is stalled", async ({ page }) => {
+  test.setTimeout(60_000);
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  const before = await keyvalValue<{
+    id: string;
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder?: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  if (!before) throw new Error("The baseline board was not autosaved.");
+  const pdfKeysBefore = await autosavePdfKeys(page);
+  await installPdfStorageEstimateSequence(page, [{ neverResolve: true }]);
+
+  const document = await PDFDocument.create();
+  document.addPage([612, 792]);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "stalled-storage-estimate.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await document.save()),
+  });
+  await expect.poll(() => pdfStorageEstimateCallCount(page), {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  }).toBe(1);
+  const cancel = page.locator(".busy-overlay").getByRole("button", {
+    name: "Cancel",
+    exact: true,
+  });
+  await expect(cancel).toBeVisible();
+  await cancel.click();
+
+  await expect(page.locator(".busy-overlay")).toHaveCount(0);
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  const after = await keyvalValue<{
+    id: string;
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder?: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  expect(after?.id).toBe(before.id);
+  expect(after?.pdfDocuments).toEqual(before.pdfDocuments);
+  expect(after?.pdfPageOrder ?? []).toEqual(before.pdfPageOrder ?? []);
+  expect(await autosavePdfKeys(page)).toEqual(pdfKeysBefore);
+});
+
+test("rejects a rendered PDF candidate when reported storage cannot fit it", async ({ page }) => {
+  test.setTimeout(60_000);
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  const before = await keyvalValue<{
+    id: string;
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder?: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  if (!before) throw new Error("The baseline board was not autosaved.");
+  await installPdfStorageEstimateSequence(page, [{ availableBytes: 4_096 }]);
+
+  const document = await PDFDocument.create();
+  document.addPage([612, 792]);
+  const bytes = await document.save();
+  expect(bytes.byteLength).toBeLessThan(4_096);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "rendered-storage-over-budget.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(bytes),
+  });
+
+  await expect(page.getByRole("alert")).toContainText("additional local storage", {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
+  await expect(page.getByRole("alert")).toContainText("free browser storage");
+  expect(await pdfStorageEstimateCallCount(page)).toBeGreaterThanOrEqual(2);
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
+
+  const after = await keyvalValue<{
+    id: string;
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder?: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  expect(after?.id).toBe(before.id);
+  expect(after?.pdfDocuments).toEqual(before.pdfDocuments);
+  expect(after?.pdfPageOrder ?? []).toEqual(before.pdfPageOrder ?? []);
+});
+
+test("keeps a direct PDF import atomic when IndexedDB fills after admission", async ({ page }) => {
+  test.setTimeout(60_000);
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  const before = await keyvalValue<{
+    id: string;
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder?: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  if (!before) throw new Error("The baseline board was not autosaved.");
+  const pdfKeysBefore = await autosavePdfKeys(page);
+  await failPdfCandidateAutosaveWithQuota(page);
+
+  const document = await PDFDocument.create();
+  document.addPage([612, 792]);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "quota-race-direct.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await document.save()),
+  });
+
+  await expect(page.getByRole("alert")).toContainText(
+    "browser storage became full. Nothing was imported",
+    { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT },
+  );
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
+  const after = await keyvalValue<{
+    id: string;
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder?: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  expect(after?.id).toBe(before.id);
+  expect(after?.pdfDocuments).toEqual(before.pdfDocuments);
+  expect(after?.pdfPageOrder ?? []).toEqual(before.pdfPageOrder ?? []);
+  expect(await autosavePdfKeys(page)).toEqual(pdfKeysBefore);
+});
+
+test("keeps a direct PDF import atomic when another tab wins the autosave CAS", async ({ page }) => {
+  test.setTimeout(60_000);
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  const before = await keyvalValue<{
+    id: string;
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder?: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  const revision = await keyvalValue<{
+    schemaVersion: 1;
+    revision: string;
+    manifestHash: string;
+    writerId: string;
+    sequence: number;
+  }>(page, "patterdraw:autosave:revision:v1");
+  if (!before || !revision) throw new Error("The baseline autosave revision was unavailable.");
+  await setKeyvalValue(page, "patterdraw:autosave:revision:v1", {
+    ...revision,
+    revision: "external-tab-revision",
+    writerId: "external-tab-writer",
+    sequence: revision.sequence + 1,
+  });
+
+  const document = await PDFDocument.create();
+  document.addPage([612, 792]);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "cas-conflict-direct.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await document.save()),
+  });
+
+  const recoveryNotice = page.getByRole("alert", { name: "Autosave is paused" });
+  await expect(recoveryNotice).toContainText("Another tab saved a newer autosave", {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
+  const after = await keyvalValue<{
+    id: string;
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder?: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  expect(after?.id).toBe(before.id);
+  expect(after?.pdfDocuments).toEqual(before.pdfDocuments);
+  expect(after?.pdfPageOrder ?? []).toEqual(before.pdfPageOrder ?? []);
+});
+
+test("does not publish a PDF candidate superseded before its durable commit", async ({ page }) => {
+  test.setTimeout(90_000);
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  await installAutosaveMutationLockGate(page);
+  const first = await PDFDocument.create();
+  first.addPage([300, 400]);
+  const second = await PDFDocument.create();
+  second.addPage([500, 600]);
+  const input = page.getByLabel("Open project file");
+
+  await input.setInputFiles({
+    name: "superseded-before-commit.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await first.save()),
+  });
+  await expect.poll(() => autosaveMutationLockRequestCount(page), {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  }).toBe(1);
+  await expect(page.locator(".busy-overlay").getByRole("button", {
+    name: "Cancel",
+    exact: true,
+  })).toHaveCount(0);
+
+  // A new file-open intent aborts the first candidate while its IndexedDB
+  // transaction is still behind the mutation lock. Releasing the lock lets
+  // saveAutosave observe that cancellation before its first write, after
+  // which the newer candidate commits and publishes normally.
+  await input.setInputFiles({
+    name: "latest-after-cancel.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await second.save()),
+  });
+  await releaseAutosaveMutationLockGate(page);
+
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/, {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await expect(pages).toHaveCount(1);
+  await expect(pages).toContainText("latest-after-cancel.pdf");
+  await expect(pages).not.toContainText("superseded-before-commit.pdf");
+  await expect.poll(async () => {
+    const stored = await keyvalValue<{
+      pdfDocuments: Record<string, { name: string }>;
+      pdfPageOrder: string[];
+    }>(page, "patterdraw:autosave:project:v1");
+    return {
+      names: Object.values(stored?.pdfDocuments || {}).map((source) => source.name),
+      pages: stored?.pdfPageOrder.length,
+    };
+  }, { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT }).toEqual({
+    names: ["latest-after-cancel.pdf"],
+    pages: 1,
+  });
+});
+
+test("rejects a direct PDF candidate when the board changes behind the autosave lock", async ({ page }) => {
+  test.setTimeout(90_000);
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  const before = await keyvalValue<{
+    id: string;
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder?: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  if (!before) throw new Error("The baseline board was not autosaved.");
+  const pdfKeysBefore = await autosavePdfKeys(page);
+  await installAutosaveMutationLockGate(page);
+
+  const document = await PDFDocument.create();
+  document.addPage([612, 792]);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "stale-behind-autosave-lock.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await document.save()),
+  });
+  // The candidate has passed its early base check and async validation, then
+  // waits immediately outside the serialized IndexedDB transaction.
+  await expect.poll(() => autosaveMutationLockRequestCount(page), {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  }).toBe(1);
+  await expect(page.locator(".busy-overlay").getByRole("button", {
+    name: "Cancel",
+    exact: true,
+  })).toHaveCount(0);
+
+  const changedTitle = "Changed behind PDF commit lock";
+  const title = page.getByRole("textbox", { name: "Project title" });
+  await title.fill(changedTitle, { force: true });
+  await expect(title).toHaveValue(changedTitle);
+  await releaseAutosaveMutationLockGate(page);
+
+  await expect(page.getByRole("alert")).toContainText(
+    "board changed while the PDF pages were being prepared",
+    { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT },
+  );
+  await expect(page.locator(".busy-overlay")).toHaveCount(0);
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
+  await expect(title).toHaveValue(changedTitle);
+  await expect.poll(async () => {
+    const stored = await keyvalValue<{
+      id: string;
+      title: string;
+      pdfDocuments: Record<string, unknown>;
+      pdfPageOrder?: string[];
+    }>(page, "patterdraw:autosave:project:v1");
+    return {
+      id: stored?.id,
+      title: stored?.title,
+      documentCount: Object.keys(stored?.pdfDocuments || {}).length,
+      pages: stored?.pdfPageOrder ?? [],
+    };
+  }, { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT }).toEqual({
+    id: before.id,
+    title: changedTitle,
+    documentCount: Object.keys(before.pdfDocuments).length,
+    pages: before.pdfPageOrder ?? [],
+  });
+  expect(await autosavePdfKeys(page)).toEqual(pdfKeysBefore);
 });
 
 test("downsamples a large inline PDF image instead of importing a blank page", async ({ page }) => {
@@ -3819,6 +4481,428 @@ test("opens legacy .canvasclassroom project archives", async ({ page }) => {
   await openClassroomFixture(page, [], [], "legacy-project.canvasclassroom");
   await expect(page).toHaveTitle("PatterDraw");
   await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+});
+
+test("protects a blank board with a custom background before replacement", async ({ page }) => {
+  const appearanceSceneId = "appearance-scene";
+  const appearanceProject = {
+    schemaVersion: 1,
+    id: "appearance-project",
+    title: "Untitled PatterDraw canvas",
+    titleMode: "default",
+    createdAt: "2026-08-30T00:00:00.000Z",
+    updatedAt: "2026-08-30T00:00:00.000Z",
+    activeSceneId: appearanceSceneId,
+    scenes: {
+      [appearanceSceneId]: {
+        id: appearanceSceneId,
+        name: "Canvas",
+        elements: [],
+        appState: {
+          viewBackgroundColor: "#fff3bf",
+          gridSize: 40,
+          gridStep: 5,
+          scrollX: 120,
+          scrollY: -80,
+          zoom: { value: 1.25 },
+        },
+        files: {},
+      },
+    },
+    slideOrder: [],
+    pdfPageOrder: [],
+    pdfDocuments: {},
+  };
+  const replacementSceneId = "plain-replacement-scene";
+  const replacementProject = {
+    ...appearanceProject,
+    id: "plain-replacement-project",
+    activeSceneId: replacementSceneId,
+    scenes: {
+      [replacementSceneId]: {
+        id: replacementSceneId,
+        name: "Canvas",
+        elements: [],
+        appState: {},
+        files: {},
+      },
+    },
+  };
+  const projectFile = (name: string, project: object) => ({
+    name,
+    mimeType: "application/vnd.patterdraw+zip",
+    buffer: Buffer.from(zipSync({ "project.json": strToU8(JSON.stringify(project)) })),
+  });
+
+  await page.getByLabel("Open project file").setInputFiles(projectFile(
+    "appearance-board.patterdraw",
+    appearanceProject,
+  ));
+  await expect.poll(async () => (
+    await keyvalValue<{ id: string }>(page, "patterdraw:autosave:project:v1")
+  )?.id).toBe("appearance-project");
+
+  await page.getByLabel("Open project file").setInputFiles(projectFile(
+    "plain-board.patterdraw",
+    replacementProject,
+  ));
+  const switchDialog = page.getByRole("dialog", { name: "Open another project?", exact: true });
+  await expect(switchDialog).toBeVisible();
+  await expect(switchDialog).toContainText("plain-board.patterdraw");
+  await switchDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect.poll(async () => (
+    await keyvalValue<{ id: string }>(page, "patterdraw:autosave:project:v1")
+  )?.id).toBe("appearance-project");
+});
+
+test("protects the outgoing board before project replacement and can recover it", async ({ page }) => {
+  const title = page.getByRole("textbox", { name: "Project title" });
+  await title.fill("Outgoing teacher board");
+  await expect.poll(async () => (
+    await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
+  )?.title).toBe("Outgoing teacher board");
+
+  const sceneId = "replacement-scene";
+  const replacementProject = {
+    schemaVersion: 1,
+    id: "replacement-project",
+    title: "Incoming lesson board",
+    titleMode: "custom",
+    createdAt: "2026-08-30T00:00:00.000Z",
+    updatedAt: "2026-08-30T00:00:00.000Z",
+    activeSceneId: sceneId,
+    scenes: {
+      [sceneId]: {
+        id: sceneId,
+        name: "Board",
+        elements: [exportTestRectangle("incoming-rectangle", 120, 140, 180, 100, "a0")],
+        appState: {},
+        files: {},
+      },
+    },
+    slideOrder: [],
+    pdfPageOrder: [],
+    pdfDocuments: {},
+  };
+  const replacementBytes = Buffer.from(zipSync({
+    "project.json": strToU8(JSON.stringify(replacementProject)),
+  }));
+  const openReplacement = () => page.getByLabel("Open project file").setInputFiles({
+    name: "incoming-lesson.patterdraw",
+    mimeType: "application/vnd.patterdraw+zip",
+    buffer: replacementBytes,
+  });
+
+  await openReplacement();
+  const switchDialog = page.getByRole("dialog", { name: "Open another project?", exact: true });
+  await expect(switchDialog).toBeVisible();
+  await switchDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(switchDialog).toHaveCount(0);
+  await expect(title).toHaveValue("Outgoing teacher board");
+
+  await openReplacement();
+  await expect(switchDialog).toBeVisible();
+  await switchDialog.getByRole("button", {
+    name: "Open without downloading",
+    exact: true,
+  }).click();
+  await expect(switchDialog).toHaveCount(0, { timeout: 30_000 });
+  await expect(title).toHaveValue("Incoming lesson board");
+
+  const recoveryBanner = page.locator(".local-readiness-banner").filter({
+    hasText: "Outgoing teacher board",
+  });
+  await expect(recoveryBanner).toBeVisible();
+  page.once("dialog", (dialog) => void dialog.accept());
+  await recoveryBanner.getByRole("button", { name: "Recover previous board", exact: true }).click();
+  await expect(title).toHaveValue("Outgoing teacher board", { timeout: 30_000 });
+  await expect.poll(async () => (
+    await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
+  )?.title).toBe("Outgoing teacher board");
+
+  // Retain two versions of the same project, corrupt only the newest record,
+  // and verify the explicit recovery action falls back to the older valid
+  // version without silently deleting the damaged copy.
+  await title.fill("Outgoing teacher board revised");
+  await expect.poll(async () => (
+    await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
+  )?.title).toBe("Outgoing teacher board revised");
+  await openReplacement();
+  await expect(switchDialog).toBeVisible();
+  await switchDialog.getByRole("button", {
+    name: "Open without downloading",
+    exact: true,
+  }).click();
+  await expect(title).toHaveValue("Incoming lesson board", { timeout: 30_000 });
+
+  const damagedSnapshotId = await page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("patterdraw-autosave-history-v1", 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const snapshotId = await new Promise<string>((resolve, reject) => {
+      const transaction = database.transaction("history", "readwrite");
+      const store = transaction.objectStore("history");
+      let selectedSnapshotId = "";
+      const indexRequest = store.get("index:v1");
+      indexRequest.onerror = () => reject(indexRequest.error);
+      indexRequest.onsuccess = () => {
+        const index = indexRequest.result as {
+          entries: Array<{ snapshotId: string; title: string }>;
+        };
+        const entry = index.entries.find((candidate) => (
+          candidate.title === "Outgoing teacher board revised"
+        ));
+        if (!entry) {
+          reject(new Error("The newest same-project recovery copy was not retained."));
+          return;
+        }
+        const snapshotRequest = store.get(`snapshot:v1:${entry.snapshotId}`);
+        snapshotRequest.onerror = () => reject(snapshotRequest.error);
+        snapshotRequest.onsuccess = () => {
+          const record = snapshotRequest.result as { manifest: Uint8Array | ArrayBuffer };
+          const manifest = record.manifest instanceof Uint8Array
+            ? record.manifest.slice()
+            : new Uint8Array(record.manifest).slice();
+          manifest[0] ^= 0xff;
+          store.put({ ...record, manifest }, `snapshot:v1:${entry.snapshotId}`);
+          selectedSnapshotId = entry.snapshotId;
+        };
+      };
+      transaction.oncomplete = () => {
+        if (selectedSnapshotId) resolve(selectedSnapshotId);
+        else reject(new Error("The damaged recovery record was not committed."));
+      };
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+    return snapshotId;
+  });
+  expect(damagedSnapshotId).toBeTruthy();
+
+  const revisedRecoveryBanner = page.locator(".local-readiness-banner").filter({
+    hasText: "Outgoing teacher board revised",
+  });
+  await expect(revisedRecoveryBanner).toBeVisible();
+  const recoveryPrompts: string[] = [];
+  const acceptRecoveryPrompt = async (dialog: import("@playwright/test").Dialog) => {
+    recoveryPrompts.push(dialog.message());
+    await dialog.accept();
+  };
+  page.on("dialog", acceptRecoveryPrompt);
+  await revisedRecoveryBanner.getByRole("button", {
+    name: "Recover previous board",
+    exact: true,
+  }).click();
+  await expect(title).toHaveValue("Outgoing teacher board", { timeout: 30_000 });
+  page.off("dialog", acceptRecoveryPrompt);
+  expect(recoveryPrompts).toHaveLength(2);
+  expect(recoveryPrompts[1]).toContain("older usable copy");
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+  await settings.getByRole("button", { name: /Recovery history/ }).click();
+  const historyDialog = page.getByRole("dialog", { name: "Recovery history", exact: true });
+  await expect(historyDialog).toBeVisible();
+  await expect(historyDialog).toContainText("Outgoing teacher board");
+  await expect(historyDialog).toContainText("Incoming lesson board");
+  const damagedCopy = historyDialog.getByRole("radio", {
+    name: /Outgoing teacher board revised.*Damaged or incomplete/,
+  });
+  await expect(damagedCopy).toBeVisible();
+  await damagedCopy.check();
+  await historyDialog.getByRole("button", { name: "Delete selected…", exact: true }).click();
+  await expect(historyDialog).toContainText("Your current board");
+  await historyDialog.getByRole("button", { name: "Delete recovery copy", exact: true }).click();
+  await expect(damagedCopy).toHaveCount(0);
+  await expect(title).toHaveValue("Outgoing teacher board");
+
+  await historyDialog.getByRole("button", { name: "Delete all…", exact: true }).click();
+  await historyDialog.getByRole("button", { name: /Delete all \d+ cop(?:y|ies)/ }).click();
+  await expect(historyDialog).toContainText("No protected copies");
+  await expect(title).toHaveValue("Outgoing teacher board");
+});
+
+test("keeps the current board open when local recovery history fails after a backup download", async ({ page }) => {
+  const title = page.getByRole("textbox", { name: "Project title" });
+  await title.fill("Board that must stay open");
+  await expect.poll(async () => (
+    await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
+  )?.title).toBe("Board that must stay open");
+
+  await page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("patterdraw-autosave-history-v1", 1);
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains("history")) {
+          request.result.createObjectStore("history");
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("history", "readwrite");
+      transaction.objectStore("history").put({ schemaVersion: 1, entries: "damaged" }, "index:v1");
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+  });
+
+  const incomingSceneId = "blocked-incoming-scene";
+  const incomingProject = {
+    schemaVersion: 1,
+    id: "blocked-incoming-project",
+    title: "Incoming board must not open",
+    createdAt: "2026-08-30T00:00:00.000Z",
+    updatedAt: "2026-08-30T00:00:00.000Z",
+    activeSceneId: incomingSceneId,
+    scenes: {
+      [incomingSceneId]: {
+        id: incomingSceneId,
+        name: "Board",
+        elements: [],
+        appState: {},
+        files: {},
+      },
+    },
+    slideOrder: [],
+    pdfPageOrder: [],
+    pdfDocuments: {},
+  };
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "blocked-incoming.patterdraw",
+    mimeType: "application/vnd.patterdraw+zip",
+    buffer: Buffer.from(zipSync({
+      "project.json": strToU8(JSON.stringify(incomingProject)),
+    })),
+  });
+
+  const switchDialog = page.getByRole("dialog", { name: "Open another project?", exact: true });
+  await expect(switchDialog).toBeVisible();
+  const download = page.waitForEvent("download");
+  await switchDialog.getByRole("button", {
+    name: "Download backup & open",
+    exact: true,
+  }).click();
+  await download;
+
+  await expect(page.getByRole("alert").filter({
+    hasText: "The current board remains open",
+  })).toBeVisible();
+  await expect(switchDialog).toBeVisible();
+  await expect(title).toHaveValue("Board that must stay open");
+  await expect.poll(async () => {
+    const saved = await keyvalValue<{ id: string; title: string }>(
+      page,
+      "patterdraw:autosave:project:v1",
+    );
+    return saved ? { id: saved.id, title: saved.title } : null;
+  }).not.toMatchObject({ id: incomingProject.id });
+});
+
+test("keeps the current board open when its exact recovery copy loses the retention race", async ({ page }) => {
+  const title = page.getByRole("textbox", { name: "Project title" });
+  await title.fill("Board protected from a retention race");
+  await expect.poll(async () => (
+    await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
+  )?.title).toBe("Board protected from a retention race");
+  const currentProject = await keyvalValue<{ id: string; title: string }>(
+    page,
+    "patterdraw:autosave:project:v1",
+  );
+  expect(currentProject?.id).toBeTruthy();
+
+  // Two newer copies for this exact project fill its bounded per-project
+  // history allowance. The switch-time capture is therefore valid but not
+  // retained, which must block replacement of the only live board.
+  await page.evaluate(async ({ projectId }) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("patterdraw-autosave-history-v1", 1);
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains("history")) {
+          request.result.createObjectStore("history");
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const makeSummary = (snapshotId: string, capturedAt: string) => ({
+      schemaVersion: 1,
+      snapshotId,
+      projectId,
+      title: "Newer protected board",
+      capturedAt,
+      projectUpdatedAt: capturedAt,
+      manifestSha256: "a".repeat(64),
+      manifestBytes: 256,
+      logicalBytes: 256,
+      pdfReferences: [],
+    });
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("history", "readwrite");
+      transaction.objectStore("history").put({
+        schemaVersion: 1,
+        entries: [
+          makeSummary("future-copy-2", "2099-01-02T00:00:00.000Z"),
+          makeSummary("future-copy-1", "2099-01-01T00:00:00.000Z"),
+        ],
+      }, "index:v1");
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+  }, { projectId: currentProject!.id });
+
+  const incomingSceneId = "retention-race-incoming-scene";
+  const incomingProject = {
+    schemaVersion: 1,
+    id: "retention-race-incoming-project",
+    title: "Incoming board blocked by retention race",
+    createdAt: "2026-08-30T00:00:00.000Z",
+    updatedAt: "2026-08-30T00:00:00.000Z",
+    activeSceneId: incomingSceneId,
+    scenes: {
+      [incomingSceneId]: {
+        id: incomingSceneId,
+        name: "Board",
+        elements: [],
+        appState: {},
+        files: {},
+      },
+    },
+    slideOrder: [],
+    pdfPageOrder: [],
+    pdfDocuments: {},
+  };
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "retention-race-incoming.patterdraw",
+    mimeType: "application/vnd.patterdraw+zip",
+    buffer: Buffer.from(zipSync({
+      "project.json": strToU8(JSON.stringify(incomingProject)),
+    })),
+  });
+
+  const switchDialog = page.getByRole("dialog", { name: "Open another project?", exact: true });
+  await expect(switchDialog).toBeVisible();
+  await switchDialog.getByRole("button", {
+    name: "Open without downloading",
+    exact: true,
+  }).click();
+
+  await expect(page.getByRole("alert").filter({
+    hasText: "this exact board was not retained",
+  })).toBeVisible();
+  await expect(switchDialog).toBeVisible();
+  await expect(title).toHaveValue("Board protected from a retention race");
+  await expect.poll(async () => (
+    await keyvalValue<{ id: string }>(page, "patterdraw:autosave:project:v1")
+  )?.id).toBe(currentProject!.id);
 });
 
 test("hydrates changed content when a replacement reuses project and scene IDs", async ({ page }) => {
@@ -3965,13 +5049,14 @@ test("retries the latest dirty title during a real page reload", async ({ page }
     page,
     "patterdraw:autosave:project:v1",
   ))?.title).not.toBe("Real page teardown autosave");
+  // Restore the synthetic storage failure before navigation begins. Doing it
+  // from another beforeunload listener makes the test depend on special-event
+  // listener ordering instead of exercising PatterDraw's page-exit retry.
   await page.evaluate(() => {
-    window.addEventListener("beforeunload", () => {
-      const state = (window as Window & {
-        __reloadAutosaveFailure?: { failWrites: boolean };
-      }).__reloadAutosaveFailure;
-      if (state) state.failWrites = false;
-    });
+    const state = (window as Window & {
+      __reloadAutosaveFailure?: { failWrites: boolean };
+    }).__reloadAutosaveFailure;
+    if (state) state.failWrites = false;
   });
 
   page.once("dialog", (dialog) => void dialog.accept());
@@ -4054,60 +5139,26 @@ test("does not replace an unreadable autosave with a blank project", async ({ pa
 
 test("coalesces edits made during a slow autosave into one latest follow-up write", async ({ page }) => {
   await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
-  await page.evaluate(() => {
-    const state = window as Window & {
-      __slowAutosaveTest?: {
-        release: () => void;
-        requests: number;
-      };
-    };
-    let release: () => void = () => undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    state.__slowAutosaveTest = { release, requests: 0 };
-    Object.defineProperty(navigator, "locks", {
-      configurable: true,
-      value: {
-        request: async (_name: string, operation: () => Promise<unknown>) => {
-          const testState = state.__slowAutosaveTest;
-          if (!testState) return operation();
-          testState.requests += 1;
-          if (testState.requests === 1) await gate;
-          return operation();
-        },
-      },
-    });
-  });
+  await installAutosaveMutationLockGate(page);
 
   const title = page.getByRole("textbox", { name: "Project title" });
   await title.fill("Slow save started");
-  await expect.poll(() => page.evaluate(() => (
-    window as Window & { __slowAutosaveTest?: { requests: number } }
-  ).__slowAutosaveTest?.requests || 0)).toBe(1);
+  await expect.poll(() => autosaveMutationLockRequestCount(page)).toBe(1);
 
   await title.fill("Superseded edit one");
   await title.fill("Superseded edit two");
   await title.fill("Newest coalesced edit");
   await page.waitForTimeout(900);
-  expect(await page.evaluate(() => (
-    window as Window & { __slowAutosaveTest?: { requests: number } }
-  ).__slowAutosaveTest?.requests || 0)).toBe(1);
+  expect(await autosaveMutationLockRequestCount(page)).toBe(1);
 
-  await page.evaluate(() => (
-    window as Window & { __slowAutosaveTest?: { release: () => void } }
-  ).__slowAutosaveTest?.release());
+  await releaseAutosaveMutationLockGate(page);
   await expect.poll(async () => (
     await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
   )?.title).toBe("Newest coalesced edit");
-  await expect.poll(() => page.evaluate(() => (
-    window as Window & { __slowAutosaveTest?: { requests: number } }
-  ).__slowAutosaveTest?.requests || 0)).toBe(2);
+  await expect.poll(() => autosaveMutationLockRequestCount(page)).toBe(2);
   await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
   await page.waitForTimeout(900);
-  expect(await page.evaluate(() => (
-    window as Window & { __slowAutosaveTest?: { requests: number } }
-  ).__slowAutosaveTest?.requests || 0)).toBe(2);
+  expect(await autosaveMutationLockRequestCount(page)).toBe(2);
 });
 
 test("pauses a stale tab instead of overwriting a newer cross-tab autosave", async ({ page }) => {
@@ -4118,32 +5169,11 @@ test("pauses a stale tab instead of overwriting a newer cross-tab autosave", asy
     await expect(secondPage.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
     await expect(secondPage.getByText("Saved locally", { exact: true })).toBeVisible();
 
-    await page.evaluate(() => {
-      const state = window as Window & {
-        __crossTabAutosaveTest?: { release: () => void; requests: number };
-      };
-      let release: () => void = () => undefined;
-      const gate = new Promise<void>((resolve) => { release = resolve; });
-      state.__crossTabAutosaveTest = { release, requests: 0 };
-      Object.defineProperty(navigator, "locks", {
-        configurable: true,
-        value: {
-          request: async (_name: string, operation: () => Promise<unknown>) => {
-            const testState = state.__crossTabAutosaveTest;
-            if (!testState) return operation();
-            testState.requests += 1;
-            if (testState.requests === 1) await gate;
-            return operation();
-          },
-        },
-      });
-    });
+    await installAutosaveMutationLockGate(page);
 
     const staleTabTitle = page.getByRole("textbox", { name: "Project title" });
     await staleTabTitle.fill("Unsaved work in stale tab");
-    await expect.poll(() => page.evaluate(() => (
-      window as Window & { __crossTabAutosaveTest?: { requests: number } }
-    ).__crossTabAutosaveTest?.requests || 0)).toBe(1);
+    await expect.poll(() => autosaveMutationLockRequestCount(page)).toBe(1);
 
     await secondPage.getByRole("textbox", { name: "Project title" })
       .fill("Newer work from second tab");
@@ -4151,9 +5181,7 @@ test("pauses a stale tab instead of overwriting a newer cross-tab autosave", asy
       await keyvalValue<{ title: string }>(secondPage, "patterdraw:autosave:project:v1")
     )?.title).toBe("Newer work from second tab");
 
-    await page.evaluate(() => (
-      window as Window & { __crossTabAutosaveTest?: { release: () => void } }
-    ).__crossTabAutosaveTest?.release());
+    await releaseAutosaveMutationLockGate(page);
 
     const recoveryNotice = page.getByRole("alert").filter({ hasText: "Autosave is paused" });
     await expect(recoveryNotice).toContainText("Another tab saved a newer autosave");
@@ -4187,48 +5215,22 @@ test("pauses a stale tab instead of overwriting a newer cross-tab autosave", asy
 
 test("queues an urgent page-exit snapshot behind an in-flight save without a timer", async ({ page }) => {
   await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  await installAutosaveMutationLockGate(page);
+
+  const title = page.getByRole("textbox", { name: "Project title" });
+  await title.fill("Exit save still running");
+  await expect.poll(() => autosaveMutationLockRequestCount(page)).toBe(1);
+  await title.fill("Newest page-exit snapshot");
+
   await page.evaluate(() => {
-    const state = window as Window & {
-      __exitAutosaveTest?: {
+    const state = (window as AutosaveMutationLockGateWindow & {
+      __autosaveMutationLockGate?: {
         release: () => void;
         requests: number;
         restoreTimers?: () => void;
         zeroDelayTimers?: number;
       };
-    };
-    let release: () => void = () => undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    state.__exitAutosaveTest = { release, requests: 0 };
-    Object.defineProperty(navigator, "locks", {
-      configurable: true,
-      value: {
-        request: async (_name: string, operation: () => Promise<unknown>) => {
-          const testState = state.__exitAutosaveTest;
-          if (!testState) return operation();
-          testState.requests += 1;
-          if (testState.requests === 1) await gate;
-          return operation();
-        },
-      },
-    });
-  });
-
-  const title = page.getByRole("textbox", { name: "Project title" });
-  await title.fill("Exit save still running");
-  await expect.poll(() => page.evaluate(() => (
-    window as Window & { __exitAutosaveTest?: { requests: number } }
-  ).__exitAutosaveTest?.requests || 0)).toBe(1);
-  await title.fill("Newest page-exit snapshot");
-
-  await page.evaluate(() => {
-    const state = (window as Window & {
-      __exitAutosaveTest?: {
-        restoreTimers?: () => void;
-        zeroDelayTimers?: number;
-      };
-    }).__exitAutosaveTest;
+    }).__autosaveMutationLockGate;
     if (!state) throw new Error("Exit autosave test state is missing.");
     const originalSetTimeout = window.setTimeout;
     state.zeroDelayTimers = 0;
@@ -4244,23 +5246,21 @@ test("queues an urgent page-exit snapshot behind an in-flight save without a tim
     window.dispatchEvent(new Event("pagehide"));
     window.dispatchEvent(new Event("pagehide"));
   });
-  await page.evaluate(() => (
-    window as Window & { __exitAutosaveTest?: { release: () => void } }
-  ).__exitAutosaveTest?.release());
+  await releaseAutosaveMutationLockGate(page);
 
   await expect.poll(async () => (
     await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
   )?.title).toBe("Newest page-exit snapshot");
-  await expect.poll(() => page.evaluate(() => (
-    window as Window & { __exitAutosaveTest?: { requests: number } }
-  ).__exitAutosaveTest?.requests || 0)).toBe(2);
+  await expect.poll(() => autosaveMutationLockRequestCount(page)).toBe(2);
   const zeroDelayTimers = await page.evaluate(() => {
-    const state = (window as Window & {
-      __exitAutosaveTest?: {
+    const state = (window as AutosaveMutationLockGateWindow & {
+      __autosaveMutationLockGate?: {
+        release: () => void;
+        requests: number;
         restoreTimers?: () => void;
         zeroDelayTimers?: number;
       };
-    }).__exitAutosaveTest;
+    }).__autosaveMutationLockGate;
     state?.restoreTimers?.();
     return state?.zeroDelayTimers || 0;
   });
@@ -4272,69 +5272,41 @@ test("queues an urgent page-exit snapshot behind an in-flight save without a tim
   await expect.poll(async () => (
     await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
   )?.title).toBe("Post-exit edit");
-  await expect.poll(() => page.evaluate(() => (
-    window as Window & { __exitAutosaveTest?: { requests: number } }
-  ).__exitAutosaveTest?.requests || 0)).toBe(3);
+  await expect.poll(() => autosaveMutationLockRequestCount(page)).toBe(3);
 });
 
 test("keeps a newly opened project ahead of an older slow autosave", async ({ page }) => {
   await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
-  await page.evaluate(() => {
-    const state = window as Window & {
-      __openAutosaveRace?: {
-        release: () => void;
-        requests: number;
-      };
-    };
-    let release: () => void = () => undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    state.__openAutosaveRace = { release, requests: 0 };
-    Object.defineProperty(navigator, "locks", {
-      configurable: true,
-      value: {
-        request: async (_name: string, operation: () => Promise<unknown>) => {
-          const testState = state.__openAutosaveRace;
-          if (!testState) return operation();
-          testState.requests += 1;
-          if (testState.requests === 1) await gate;
-          return operation();
-        },
-      },
-    });
-  });
+  await installAutosaveMutationLockGate(page);
 
   await page.getByRole("textbox", { name: "Project title" })
     .fill("Old project save still running");
-  await expect.poll(() => page.evaluate(() => (
-    window as Window & { __openAutosaveRace?: { requests: number } }
-  ).__openAutosaveRace?.requests || 0)).toBe(1);
+  await expect.poll(() => autosaveMutationLockRequestCount(page)).toBe(1);
   await openClassroomFixture(
     page,
     [],
     [],
     "replacement-after-slow-save.patterdraw",
     async () => {
-      await expect(page.locator(".busy-overlay")).toContainText(
-        "Saving replacement-after-slow-save.patterdraw locally",
-      );
+      const switchDialog = page.getByRole("dialog", {
+        name: "Open another project?",
+        exact: true,
+      });
+      await expect(switchDialog).toBeVisible();
+      await switchDialog.getByRole("button", {
+        name: "Open without downloading",
+        exact: true,
+      }).click();
+      await expect(page.getByText("Saving locally", { exact: true })).toBeVisible();
       await page.keyboard.press("ControlOrMeta+f");
-      await expect(page.locator(".busy-overlay")).toBeVisible();
       await expect(page.getByRole("searchbox", {
         name: "Find text across project",
         exact: true,
       })).toHaveCount(0);
-      await page.evaluate(() => (
-        window as Window & {
-          __openAutosaveRace?: { release: () => void };
-        }
-      ).__openAutosaveRace?.release());
+      await releaseAutosaveMutationLockGate(page);
     },
   );
-  await expect.poll(() => page.evaluate(() => (
-    window as Window & { __openAutosaveRace?: { requests: number } }
-  ).__openAutosaveRace?.requests || 0)).toBe(2);
+  await expect.poll(() => autosaveMutationLockRequestCount(page)).toBe(2);
 
   await page.reload();
   await expect(page.getByRole("textbox", { name: "Project title" }))
@@ -4386,6 +5358,15 @@ test("retries a failed replacement autosave without restoring the old project", 
       files: {},
     })),
   });
+  const switchDialog = page.getByRole("dialog", {
+    name: "Open another project?",
+    exact: true,
+  });
+  await expect(switchDialog).toBeVisible();
+  await switchDialog.getByRole("button", {
+    name: "Open without downloading",
+    exact: true,
+  }).click();
 
   await expect(page.getByRole("textbox", { name: "Project title" }))
     .toHaveValue("Replacement retry");
@@ -5624,6 +6605,9 @@ test("hides and restores the mobile Shapes bar in native Zen mode", async ({ pag
   const editor = page.locator(".editor-host .excalidraw.excalidraw-container");
   const mobileToolbar = page.locator(".editor-host .excalidraw .App-top-bar");
   await expect(editor).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0, {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
   await expect(editor).toHaveClass(/excalidraw--mobile/);
   await expect(mobileToolbar).toBeVisible();
   await expect(page.getByRole("region", { name: "Shapes", exact: true })).toBeVisible();
@@ -6900,6 +7884,7 @@ test("preserves custom slide names through reorder, PDF and PowerPoint export, a
     mimeType: "application/vnd.patterdraw+zip",
     buffer: savedBytes,
   });
+  await confirmProjectOpenWithoutDownloading(page);
   await page.getByRole("button", { name: "Slides", exact: true }).click();
   await expect(page.locator(".slide-thumbnail .slide-caption"))
     .toHaveText(["Slide 10", "Slide 2"]);
@@ -7025,6 +8010,134 @@ test("keeps presentation ink visible beyond its frame when the stroke starts ins
     () => renderedRedPixelsNear(page, 0.75, 0.5),
     { timeout: 5_000 },
   ).toBeGreaterThan(3);
+});
+
+test("persists presentation ink erasure without changing slides or unrelated board content", async ({ page }) => {
+  test.setTimeout(60_000);
+  await openClassroomFixture(page, [
+    classroomTestFrame("presentation-eraser-frame-a", "Eraser slide A", 0, 0, 960, 540, "a0", true),
+    exportTestRectangle("presentation-unrelated-marker", 90, 90, 120, 80, "a1"),
+    classroomTestFrame("presentation-eraser-frame-b", "Eraser slide B", 1_200, 0, 960, 540, "a2", true),
+    exportTestRectangle("presentation-off-slide-marker", 240, 700, 150, 90, "a3"),
+  ], [
+    { id: "presentation-eraser-slide-a", frameId: "presentation-eraser-frame-a", title: "Eraser slide A" },
+    { id: "presentation-eraser-slide-b", frameId: "presentation-eraser-frame-b", title: "Eraser slide B" },
+  ], "presentation-eraser-persistence.patterdraw");
+
+  const expectedMarkerStates = {
+    "presentation-off-slide-marker": {
+      height: 90,
+      isDeleted: false,
+      width: 150,
+      x: 240,
+      y: 700,
+    },
+    "presentation-unrelated-marker": {
+      height: 80,
+      isDeleted: false,
+      width: 120,
+      x: 90,
+      y: 90,
+    },
+  };
+  const expectedFrameIds = ["presentation-eraser-frame-a", "presentation-eraser-frame-b"];
+
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(2);
+  await page.locator(".slide-thumbnail").first().click();
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 2");
+
+  const editor = await page.locator(".editor-host").boundingBox();
+  if (!editor) throw new Error("Presentation editor has no visible bounds.");
+  const strokeX = editor.x + editor.width * 0.58;
+  const strokeStartY = editor.y + editor.height * 0.4;
+  const strokeEndY = editor.y + editor.height * 0.62;
+  await page.getByRole("button", { name: "Ink", exact: true }).click();
+  await page.mouse.move(strokeX, strokeStartY);
+  await page.mouse.down();
+  await page.mouse.move(strokeX, strokeEndY, { steps: 12 });
+  await page.mouse.up();
+
+  await expect.poll(async () => {
+    const state = await autosavedPresentationEraserState(page);
+    return state ? {
+      frames: state.liveFrameIds,
+      inkCount: state.liveInkIds.length,
+      markers: state.markerStates,
+      slideCount: state.slideCount,
+    } : null;
+  }, { timeout: 8_000 }).toEqual({
+    frames: expectedFrameIds,
+    inkCount: 1,
+    markers: expectedMarkerStates,
+    slideCount: 2,
+  });
+  const drawnInkId = (await autosavedPresentationEraserState(page))?.liveInkIds[0];
+  if (!drawnInkId) throw new Error("Presentation ink was not autosaved before erasure.");
+
+  const eraser = page.getByRole("button", { name: "Eraser", exact: true });
+  await eraser.click();
+  await expect(eraser).toHaveAttribute("aria-pressed", "true");
+  await page.mouse.move(strokeX, strokeStartY);
+  await page.mouse.down();
+  await page.mouse.move(strokeX, strokeEndY, { steps: 12 });
+  await page.mouse.up();
+
+  await expect.poll(async () => {
+    const state = await autosavedPresentationEraserState(page);
+    return state ? {
+      erasedInkNoLongerLive: !state.liveInkIds.includes(drawnInkId),
+      frames: state.liveFrameIds,
+      liveInk: state.liveInkIds,
+      markers: state.markerStates,
+      slideCount: state.slideCount,
+    } : null;
+  }, { timeout: 8_000 }).toEqual({
+    erasedInkNoLongerLive: true,
+    frames: expectedFrameIds,
+    liveInk: [],
+    markers: expectedMarkerStates,
+    slideCount: 2,
+  });
+
+  await page.getByRole("button", { name: "Next slide", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("2 / 2");
+  await page.getByRole("button", { name: "Previous slide", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 2");
+  await expect.poll(async () => (
+    await autosavedPresentationEraserState(page)
+  )?.liveInkIds, { timeout: 8_000 }).toEqual([]);
+
+  await page.getByRole("button", { name: "Exit", exact: true }).click();
+  await expect(page.locator(".presentation-controls")).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect(page.locator(".slide-thumbnail")).toHaveCount(2);
+  await expect.poll(async () => {
+    const state = await autosavedPresentationEraserState(page);
+    return state ? {
+      erasedInkStillAbsent: !state.liveInkIds.includes(drawnInkId),
+      frames: state.liveFrameIds,
+      liveInk: state.liveInkIds,
+      markers: state.markerStates,
+      slideCount: state.slideCount,
+    } : null;
+  }).toEqual({
+    erasedInkStillAbsent: true,
+    frames: expectedFrameIds,
+    liveInk: [],
+    markers: expectedMarkerStates,
+    slideCount: 2,
+  });
+
+  await page.locator(".slide-thumbnail").first().click();
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 2");
+  await page.getByRole("button", { name: "Next slide", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("2 / 2");
+  await page.getByRole("button", { name: "Exit", exact: true }).click();
 });
 
 test("previews existing content geometrically enclosed by a frame", async ({ page }) => {
@@ -7484,8 +8597,27 @@ test("commits pending edits before presentation switches between project scenes"
   };
 
   await drawStroke(0.4);
+  await deferAnimationFrames(page);
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator(".presentation-count")).toHaveText("2 / 2");
+  await page.getByRole("button", { name: "Previous slide", exact: true }).click();
+  await expect(page.locator(".presentation-count")).toHaveText("1 / 2");
+  await expect(page.getByTestId("scene-hydration-input-guard")).toBeVisible();
+  await releaseDeferredAnimationFrames(page);
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => {
+    const elements = (window as unknown as {
+      h?: { app?: { scene?: { getNonDeletedElements?: () => Array<{ id: string }> } } };
+    }).h?.app?.scene?.getNonDeletedElements?.() || [];
+    return {
+      frameA: elements.some((element) => element.id === "frame-a"),
+      frameB: elements.some((element) => element.id === "frame-b"),
+    };
+  })).toEqual({ frameA: true, frameB: false });
+
   await page.keyboard.down("ArrowRight");
   await expect(page.locator(".presentation-count")).toHaveText("2 / 2");
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
   await drawStroke(0.6);
   await page.keyboard.up("ArrowRight");
 
@@ -7697,6 +8829,7 @@ test("saves and resumes unusual PDF geometry with the original source intact", a
     mimeType: "application/vnd.patterdraw+zip",
     buffer: savedBytes,
   });
+  await confirmProjectOpenWithoutDownloading(page);
   await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
   await page.getByRole("button", { name: "PDF", exact: true }).click();
   await expect.poll(workspaceSnapshot).toEqual({
@@ -7754,7 +8887,7 @@ test("docks the drawing toolbar and resizes or hides the PDF page rail", async (
   expect(boardHost).not.toBeNull();
   expect((boardToolbar?.y || 0) - (boardHost?.y || 0)).toBeLessThan(100);
 
-  await openTestPdf(page);
+  await openTestPdf(page, 2);
 
   await expect.poll(() => pdfPageHorizontalCenterError(page)).toBeLessThan(0.02);
   const nativeFooterControls = page.locator(".editor-host .layer-ui__wrapper__footer-left");
@@ -7830,6 +8963,11 @@ test("docks the drawing toolbar and resizes or hides the PDF page rail", async (
   await expect.poll(async () => (await rail.boundingBox())?.width || 0).toBeGreaterThan(300);
 
   const resizedWidth = (await rail.boundingBox())?.width || 0;
+  const pageItems = rail.locator(".pdf-page-item");
+  await pageItems.nth(1).locator(".pdf-page-open").click();
+  await expect(page.locator(".page-status")).toContainText("Page 2 of 2");
+  await expect(pageItems.nth(1).locator(".pdf-page-open")).toHaveAttribute("aria-current", "page");
+  await expect(pageItems.nth(0).locator(".pdf-page-open")).not.toHaveAttribute("aria-current", "page");
   await page.getByRole("button", { name: "Hide PDF pages", exact: true }).click();
   await expect(rail).toHaveCount(0);
   await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-rail-hidden/);
@@ -7844,7 +8982,10 @@ test("docks the drawing toolbar and resizes or hides the PDF page rail", async (
   expect((showPagesBox?.x || 0) + (showPagesBox?.width || 0)).toBeLessThan(previousPageBox?.x || 0);
   await showPages.click();
   await expect(rail).toBeVisible();
-  await expect(rail.locator('.pdf-page-open[aria-current="page"]')).toBeFocused();
+  const focusedActivePage = rail.locator('.pdf-page-open[aria-current="page"]');
+  await expect(focusedActivePage).toHaveAttribute("aria-label", /^Open output page 2:/);
+  await expect(focusedActivePage).toBeFocused();
+  await expect(rail.locator(".pdf-page-item").nth(0).locator(".pdf-page-open")).not.toBeFocused();
   expect((await rail.boundingBox())?.width || 0).toBeCloseTo(resizedWidth, 0);
 });
 
@@ -8099,6 +9240,10 @@ test("fills a closed region with a persistent, undoable local vector", async ({ 
   // Excalidraw's development build emits this React diagnostic during a
   // synthetic CDP pinch; reject every other error and keep the rest of this
   // flow's console assertion strict.
+  const syntheticPinchConsoleErrors = consoleErrors.filter((error) => error.startsWith(
+    syntheticPinchConsoleErrorPrefix,
+  ));
+  expect(syntheticPinchConsoleErrors).toHaveLength(1);
   expect(consoleErrors.filter((error) => !error.startsWith(
     syntheticPinchConsoleErrorPrefix,
   ))).toEqual([]);
@@ -8794,6 +9939,7 @@ test("configures, inserts, and persists the static advanced math-tool release", 
     mimeType: "application/vnd.patterdraw+zip",
     buffer: savedProject,
   });
+  await confirmProjectOpenWithoutDownloading(page);
   for (const kind of ["set-square", "geometry-stencil", "cartesian-plane", "number-line", "unit-circle", "function-plot", "grid"] as const) {
     await expect.poll(() => autosavedMathToolSnapshot(page, kind)).not.toBeNull();
   }
@@ -8924,6 +10070,7 @@ test("batch-inserts independent fraction, algebra, integer, and probability mani
     mimeType: "application/vnd.patterdraw+zip",
     buffer: savedProject,
   });
+  await confirmProjectOpenWithoutDownloading(page);
   await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "fraction-piece"))?.count || 0).toBe(10);
   await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "algebra-tile"))?.count || 0).toBe(6);
   await expect.poll(async () => (await autosavedMathToolSetSnapshot(page, "integer-chip"))?.count || 0).toBe(7);
@@ -9224,21 +10371,29 @@ test("constructs compass and angle annotations with touch input on mobile", asyn
     state: "visible",
     timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
   });
+  const readinessBanner = page.locator(".local-readiness-banner");
+  await expect(readinessBanner).toBeVisible({ timeout: 30_000 });
   const editorBounds = await page.locator(".editor-host").boundingBox();
   if (!editorBounds) throw new Error("Editor host has no visible mobile bounds.");
 
   const openInstruments = async () => {
     await page.locator(".App-toolbar__extra-tools-trigger").tap();
+    await expect(page.locator(".dropdown-menu--mobile")).toBeVisible();
+    await expect(readinessBanner).toBeHidden();
     await page.getByTestId("toolbar-math-tools").tap();
+    await expect(readinessBanner).toBeHidden();
     await enableExperimentalMathTools(page);
   };
 
   await openInstruments();
   await page.getByTestId("math-tool-compass").tap();
+  await expect(page.getByTestId("math-interaction-compass")).toBeVisible();
+  await expect(readinessBanner).toBeHidden();
   await page.touchscreen.tap(editorBounds.x + 110, editorBounds.y + 480);
   await page.touchscreen.tap(editorBounds.x + 180, editorBounds.y + 480);
   await page.getByTestId("math-interaction-compass").getByRole("button", { name: "Insert", exact: true }).tap();
   await expect.poll(() => autosavedMathToolElementSummary(page, "compass")).toMatchObject({ nativeEllipseCount: 2 });
+  await expect(readinessBanner).toBeVisible();
 
   await openInstruments();
   await page.getByTestId("math-tool-angle-measurer").tap();
@@ -9249,6 +10404,7 @@ test("constructs compass and angle annotations with touch input on mobile", asyn
   await expect(anglePanel).toContainText("3 of 3 points selected");
   await anglePanel.getByRole("button", { name: "Insert", exact: true }).tap();
   await expect.poll(() => autosavedMathToolSnapshot(page, "angle-measurement")).toMatchObject({ metadata: { measuredDegrees: 90, unit: "degrees" } });
+  await expect(readinessBanner).toBeVisible();
   expect(externalRequests).toEqual([]);
   await context.close();
 });
@@ -9451,7 +10607,7 @@ test("waits for PDF scene hydration before opening native image export", async (
   await page.keyboard.press("Escape");
 });
 
-test("replays a user edit made during PDF scene hydration", async ({ page }) => {
+test("blocks editor gestures until PDF scene hydration is safe", async ({ page }) => {
   await page.getByLabel("Open project file").setInputFiles({
     name: "hydration-edit.pdf",
     mimeType: "application/pdf",
@@ -9463,17 +10619,28 @@ test("replays a user edit made during PDF scene hydration", async ({ page }) => 
 
   await pages.nth(1).locator(".pdf-page-open").click();
   await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  const guard = page.getByTestId("scene-hydration-input-guard");
+  await expect(guard).toBeVisible();
+  await expect(page.locator(".editor-host")).toHaveAttribute("aria-busy", "true");
+
+  // A teacher can click a tool immediately after changing pages. Even a
+  // forced synthetic click must be stopped at the editor boundary while the
+  // incoming page is not yet safe; otherwise the following stroke can land
+  // on the outgoing page and disappear.
+  await page.getByTestId("toolbar-rectangle").click({ force: true });
+  await dragOnBoard(page, { x: 260, y: 220 }, { x: 410, y: 320 });
+  await releaseDeferredAnimationFrames(page);
+  await expect(guard).toHaveCount(0);
+  await expect(page.locator(".editor-host")).not.toHaveAttribute("aria-busy", "true");
+  await expect.poll(() => page.evaluate(() => (
+    (window as unknown as {
+      h?: { app?: { scene?: { getNonDeletedElements?: () => Array<{ type?: string }> } } };
+    }).h?.app?.scene?.getNonDeletedElements?.()
+      .filter((element) => element.type === "rectangle").length || 0
+  ))).toBe(0);
+
   await page.getByTestId("toolbar-rectangle").check({ force: true });
   await dragOnBoard(page, { x: 260, y: 220 }, { x: 410, y: 320 });
-  const zoomBefore = await keyvalValue<{
-    activeSceneId: string;
-    scenes: Record<string, { appState?: { zoom?: { value?: number } } }>;
-  }>(page, "patterdraw:autosave:project:v1");
-  const baselineZoom = zoomBefore?.scenes[zoomBefore.activeSceneId]?.appState?.zoom?.value || 1;
-  await page.getByRole("button", { name: "Zoom in", exact: true }).click();
-
-  // The deferred two-RAF hydration window must not drop the rectangle.
-  await releaseDeferredAnimationFrames(page);
   await expect.poll(async () => {
     const saved = await keyvalValue<{
       activeSceneId: string;
@@ -9482,13 +10649,6 @@ test("replays a user edit made during PDF scene hydration", async ({ page }) => 
     return saved?.scenes[saved.activeSceneId]?.elements
       .filter((element) => element.type === "rectangle").length || 0;
   }, { timeout: 15_000 }).toBe(1);
-  await expect.poll(async () => {
-    const saved = await keyvalValue<{
-      activeSceneId: string;
-      scenes: Record<string, { appState?: { zoom?: { value?: number } } }>;
-    }>(page, "patterdraw:autosave:project:v1");
-    return saved?.scenes[saved.activeSceneId]?.appState?.zoom?.value || 1;
-  }, { timeout: 15_000 }).toBeGreaterThan(baselineZoom);
 });
 
 test("keeps the newest PDF open when an older import resolves later", async ({ page }) => {
@@ -9551,6 +10711,36 @@ test("keeps the latest PDF scene during rapid page switches", async ({ page }) =
     .selectOption("dark");
   await page.keyboard.press("Escape");
   const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  const stored = await keyvalValue<{
+    pdfPageOrder: string[];
+    scenes: Record<string, { pdfPage?: { backgroundElementId: string } }>;
+  }>(page, "patterdraw:autosave:project:v1");
+  const firstBackgroundId = stored?.scenes[stored.pdfPageOrder[0]]?.pdfPage?.backgroundElementId;
+  const secondBackgroundId = stored?.scenes[stored.pdfPageOrder[1]]?.pdfPage?.backgroundElementId;
+  expect(firstBackgroundId).toBeTruthy();
+  expect(secondBackgroundId).toBeTruthy();
+
+  // Repeating the same destination while its two-frame hydration fence is
+  // active must force a fresh monotonic load instead of canceling the only
+  // pending load and leaving the canvas permanently blocked.
+  await deferAnimationFrames(page);
+  await pages.nth(1).click();
+  await pages.nth(1).click();
+  await expect(page.getByTestId("scene-hydration-input-guard")).toBeVisible();
+  await releaseDeferredAnimationFrames(page);
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
+  await expect.poll(() => page.evaluate(({ firstId, secondId }) => {
+    const scene = (window as unknown as {
+      h?: { app?: { scene?: { getNonDeletedElement?: (id: string) => unknown } } };
+    }).h?.app?.scene;
+    return {
+      firstPresent: Boolean(scene?.getNonDeletedElement?.(firstId)),
+      secondPresent: Boolean(scene?.getNonDeletedElement?.(secondId)),
+    };
+  }, {
+    firstId: firstBackgroundId || "",
+    secondId: secondBackgroundId || "",
+  })).toEqual({ firstPresent: false, secondPresent: true });
 
   // Exercise several latest-intent transitions while the first dark render is
   // still likely to be pending. The display-only raster must never re-enter
@@ -10257,6 +11447,319 @@ test("cancels a multi-PDF insertion without committing partial pages", async ({ 
   await expect(pages).toHaveCount(1);
 });
 
+test("cancels a multi-PDF insertion while final storage estimation is stalled", async ({ page }) => {
+  test.setTimeout(90_000);
+  await openTestPdf(page);
+  const before = await keyvalValue<{
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  if (!before) throw new Error("The baseline PDF project was not autosaved.");
+  const pdfKeysBefore = await autosavePdfKeys(page);
+  await installPdfStorageEstimateSequence(page, [
+    { availableBytes: 1024 * 1024 * 1024 },
+    { neverResolve: true },
+  ]);
+
+  const supplement = await PDFDocument.create();
+  supplement.addPage([420, 520]);
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
+  await page.getByLabel("Select PDFs to insert").setInputFiles({
+    name: "stalled-final-estimate-supplement.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await supplement.save()),
+  });
+  const dialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(dialog).toBeVisible({ timeout: 30_000 });
+  await dialog.getByRole("button", { name: "Insert 1 page", exact: true }).click();
+  await expect.poll(() => pdfStorageEstimateCallCount(page), {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  }).toBeGreaterThanOrEqual(2);
+  await dialog.getByRole("button", { name: "Cancel insertion", exact: true }).click();
+
+  await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeVisible({
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
+  await expect(pages).toHaveCount(1);
+  const after = await keyvalValue<{
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  expect(after?.pdfPageOrder).toEqual(before.pdfPageOrder);
+  expect(after?.pdfDocuments).toEqual(before.pdfDocuments);
+  expect(await autosavePdfKeys(page)).toEqual(pdfKeysBefore);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+});
+
+test("rejects a multi-PDF candidate if the board changes during rendering", async ({ page }) => {
+  test.setTimeout(90_000);
+  await openTestPdf(page);
+  await page.evaluate(() => {
+    const originalArrayBuffer = File.prototype.arrayBuffer;
+    const calls = new WeakMap<File, number>();
+    const state = window as Window & { __releaseChangedBoardPdfRead?: () => void };
+    File.prototype.arrayBuffer = function arrayBufferWithChangedBoardGate() {
+      if (this.name !== "changed-board-supplement.pdf") {
+        return originalArrayBuffer.call(this);
+      }
+      const call = (calls.get(this) || 0) + 1;
+      calls.set(this, call);
+      if (call !== 2) return originalArrayBuffer.call(this);
+      return new Promise<ArrayBuffer>((resolve, reject) => {
+        state.__releaseChangedBoardPdfRead = () => {
+          originalArrayBuffer.call(this).then(resolve, reject);
+        };
+      });
+    };
+  });
+
+  const supplement = await PDFDocument.create();
+  supplement.addPage([420, 520]);
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
+  await page.getByLabel("Select PDFs to insert").setInputFiles({
+    name: "changed-board-supplement.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await supplement.save()),
+  });
+  const dialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(dialog).toBeVisible({ timeout: 30_000 });
+  await dialog.getByRole("button", { name: "Insert 1 page", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => Boolean(
+    (window as Window & { __releaseChangedBoardPdfRead?: () => void })
+      .__releaseChangedBoardPdfRead,
+  )), { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT }).toBe(true);
+
+  const changedTitle = "Changed while PDF rendered";
+  await page.getByRole("textbox", { name: "Project title" }).fill(changedTitle, { force: true });
+  await expect(page.getByRole("textbox", { name: "Project title" })).toHaveValue(changedTitle);
+  await page.evaluate(() => {
+    const state = window as Window & { __releaseChangedBoardPdfRead?: () => void };
+    state.__releaseChangedBoardPdfRead?.();
+  });
+
+  await expect(page.getByRole("alert")).toContainText(
+    "board changed while the PDF pages were being prepared",
+    { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT },
+  );
+  await expect(dialog).toBeVisible();
+  await expect(pages).toHaveCount(1);
+  await expect(page.getByRole("textbox", { name: "Project title" })).toHaveValue(changedTitle);
+  await expect.poll(async () => {
+    const stored = await keyvalValue<{
+      title: string;
+      pdfDocuments: Record<string, unknown>;
+      pdfPageOrder: string[];
+    }>(page, "patterdraw:autosave:project:v1");
+    return {
+      title: stored?.title,
+      documentCount: Object.keys(stored?.pdfDocuments || {}).length,
+      pageCount: stored?.pdfPageOrder.length,
+    };
+  }, { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT }).toEqual({
+    title: changedTitle,
+    documentCount: 1,
+    pageCount: 1,
+  });
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+});
+
+test("rejects a rendered multi-PDF batch atomically when storage reports quota exhaustion", async ({ page }) => {
+  test.setTimeout(90_000);
+  await openTestPdf(page);
+  const before = await keyvalValue<{
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  if (!before) throw new Error("The baseline PDF project was not autosaved.");
+  await installPdfStorageEstimateSequence(page, [
+    { availableBytes: 4_096 },
+    { quotaExceeded: true },
+  ]);
+
+  const supplement = await PDFDocument.create();
+  supplement.addPage([420, 520]);
+  const supplementBytes = await supplement.save();
+  expect(supplementBytes.byteLength).toBeLessThan(4_096);
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
+  await page.getByLabel("Select PDFs to insert").setInputFiles({
+    name: "quota-exhausted-supplement.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(supplementBytes),
+  });
+  const dialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(dialog).toBeVisible({ timeout: 30_000 });
+  await dialog.getByRole("button", { name: "Insert 1 page", exact: true }).click();
+
+  await expect(page.getByRole("alert")).toContainText("additional local storage", {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
+  await expect(page.getByRole("alert")).toContainText("free browser storage");
+  expect(await pdfStorageEstimateCallCount(page)).toBeGreaterThanOrEqual(2);
+  await expect(dialog).toBeVisible();
+  await expect(pages).toHaveCount(1);
+  const after = await keyvalValue<{
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  expect(after?.pdfPageOrder).toEqual(before.pdfPageOrder);
+  expect(after?.pdfDocuments).toEqual(before.pdfDocuments);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+});
+
+test("keeps a multi-PDF batch atomic when IndexedDB fills after admission", async ({ page }) => {
+  test.setTimeout(90_000);
+  await openTestPdf(page);
+  const before = await keyvalValue<{
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  if (!before) throw new Error("The baseline PDF project was not autosaved.");
+  const pdfKeysBefore = await autosavePdfKeys(page);
+  await failPdfCandidateAutosaveWithQuota(page);
+
+  const supplement = await PDFDocument.create();
+  supplement.addPage([420, 520]);
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
+  await page.getByLabel("Select PDFs to insert").setInputFiles({
+    name: "quota-race-supplement.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await supplement.save()),
+  });
+  const dialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(dialog).toBeVisible({ timeout: 30_000 });
+  await dialog.getByRole("button", { name: "Insert 1 page", exact: true }).click();
+
+  await expect(page.getByRole("alert")).toContainText(
+    "browser storage became full. Nothing was imported",
+    { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT },
+  );
+  await expect(dialog).toBeVisible();
+  await expect(pages).toHaveCount(1);
+  const after = await keyvalValue<{
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  expect(after?.pdfPageOrder).toEqual(before.pdfPageOrder);
+  expect(after?.pdfDocuments).toEqual(before.pdfDocuments);
+  expect(await autosavePdfKeys(page)).toEqual(pdfKeysBefore);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+});
+
+test("closes batch cancellation at the durable PDF commit boundary", async ({ page }) => {
+  test.setTimeout(90_000);
+  await openTestPdf(page);
+  await installAutosaveMutationLockGate(page);
+  const supplement = await PDFDocument.create();
+  supplement.addPage([420, 520]);
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
+  await page.getByLabel("Select PDFs to insert").setInputFiles({
+    name: "commit-boundary-supplement.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await supplement.save()),
+  });
+  const dialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(dialog).toBeVisible({ timeout: 30_000 });
+  await dialog.getByRole("button", { name: "Insert 1 page", exact: true }).click();
+  await expect.poll(() => autosaveMutationLockRequestCount(page), {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  }).toBe(1);
+
+  await expect(dialog).toContainText("Cancellation is unavailable after this point");
+  await expect(dialog.getByRole("button", { name: "Cancel insertion", exact: true })).toBeDisabled();
+  await releaseAutosaveMutationLockGate(page);
+  await expect(dialog).toHaveCount(0, { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect(pages).toHaveCount(2);
+  await expect(pages.nth(1)).toContainText("commit-boundary-supplement.pdf");
+});
+
+test("recovers one failed source in a multi-PDF batch without a partial commit", async ({ page }) => {
+  test.setTimeout(90_000);
+  await openTestPdf(page);
+  const safeSupplement = await PDFDocument.create();
+  safeSupplement.addPage([420, 520]);
+  const safeBytes = await safeSupplement.save();
+  const rejectedBytes = await largeEmbeddedImagePdfBytes(true, 5_657, 5_657);
+  const converted = await PDFDocument.create();
+  converted.addPage([500, 600]);
+  const convertedBytes = await converted.save();
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
+  await page.getByLabel("Select PDFs to insert").setInputFiles([
+    {
+      name: "safe-first.pdf",
+      mimeType: "application/pdf",
+      buffer: Buffer.from(safeBytes),
+    },
+    {
+      name: "unsafe-second.pdf",
+      mimeType: "application/pdf",
+      buffer: Buffer.from(rejectedBytes),
+    },
+  ]);
+  const insertDialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(insertDialog).toBeVisible({ timeout: 30_000 });
+  await insertDialog.getByRole("button", { name: "Insert 2 pages", exact: true }).click();
+
+  const recovery = page.getByRole("dialog", { name: "Use a converted PDF copy?", exact: true });
+  await expect(recovery).toBeVisible({ timeout: 30_000 });
+  await expect(recovery).toContainText("unsafe-second.pdf");
+  await expect(insertDialog).toHaveCount(0);
+  await expect(pages).toHaveCount(1);
+
+  const wrongConverted = await PDFDocument.create();
+  wrongConverted.addPage([500, 600]);
+  wrongConverted.addPage([500, 600]);
+  await recovery.getByLabel("Choose converted PDF copy").setInputFiles({
+    name: "unsafe-second-wrong-pages.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await wrongConverted.save()),
+  });
+  await expect(recovery).toBeVisible();
+  await expect(page.locator(".error-toast")).toContainText(
+    "The compatibility copy has 2 pages, but the original has 1",
+  );
+  await expect(pages).toHaveCount(1);
+
+  await recovery.getByLabel("Choose converted PDF copy").setInputFiles({
+    name: "unsafe-second-flattened.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(convertedBytes),
+  });
+  await expect(recovery).toHaveCount(0, { timeout: 60_000 });
+  await expect(pages).toHaveCount(3, { timeout: 60_000 });
+  await expect(pages.nth(1)).toContainText("safe-first.pdf");
+  await expect(pages.nth(2)).toContainText(
+    "unsafe-second (visual compatibility copy).pdf",
+  );
+  await expect.poll(async () => {
+    const saved = await keyvalValue<{
+      pdfDocuments: Record<string, { id: string; name: string; byteLength: number }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    return Object.values(saved?.pdfDocuments || {})
+      .map((source) => ({ name: source.name, byteLength: source.byteLength }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }, { timeout: 30_000 }).toEqual([
+    { name: "safe-first.pdf", byteLength: safeBytes.byteLength },
+    { name: "toolbar-position.pdf", byteLength: expect.any(Number) },
+    {
+      name: "unsafe-second (visual compatibility copy).pdf",
+      byteLength: convertedBytes.byteLength,
+    },
+  ]);
+});
+
 test("keeps the project unchanged when a selected PDF changes after inspection", async ({ page }) => {
   test.setTimeout(60_000);
   await openTestPdf(page);
@@ -10490,6 +11993,7 @@ test("inserts ordered pages from multiple PDFs atomically and deduplicates ident
     mimeType: "application/vnd.patterdraw+zip",
     buffer: archiveBytes,
   });
+  await confirmProjectOpenWithoutDownloading(page);
   await expect(page.getByRole("button", { name: "Board", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "PDF", exact: true }).click();
   await expect(pages).toHaveCount(6, { timeout: 20_000 });
@@ -10619,6 +12123,7 @@ test("clears one inserted PDF source while preserving a duplicate source and res
     mimeType: "application/vnd.patterdraw+zip",
     buffer: archiveBytes,
   });
+  await confirmProjectOpenWithoutDownloading(page);
   await page.getByRole("button", { name: "PDF", exact: true }).click();
   await expect(pages).toHaveCount(4, { timeout: 20_000 });
   await expect.poll(() => autosavedPdfAnnotationCounts(page), { timeout: 20_000 })
@@ -10715,6 +12220,7 @@ test("clears one page and then all PDF annotations with empty scopes and expiry 
     mimeType: "application/vnd.patterdraw+zip",
     buffer: archiveBytes,
   });
+  await confirmProjectOpenWithoutDownloading(page);
   await page.getByRole("button", { name: "PDF", exact: true }).click();
   await expect(pages).toHaveCount(2, { timeout: 20_000 });
   await expect(pages.locator(".pdf-annotation-count")).toHaveCount(0);
@@ -10947,6 +12453,7 @@ test("adds a blank PDF page, reopens the project on Board, and exports it", asyn
     mimeType: "application/vnd.patterdraw+zip",
     buffer: savedBytes,
   });
+  await confirmProjectOpenWithoutDownloading(page);
   await expect(page.getByRole("button", { name: "Board", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
   await expect(page.locator(".page-status")).toContainText("Board");
@@ -10970,6 +12477,238 @@ test("adds a blank PDF page, reopens the project on Board, and exports it", asyn
   for await (const chunk of exportedPdf) pdfChunks.push(Buffer.from(chunk));
   const exported = await PDFDocument.load(Buffer.concat(pdfChunks));
   expect(exported.getPageCount()).toBe(2);
+});
+
+test("keeps a blank PDF page addition atomic when IndexedDB fills after admission", async ({ page }) => {
+  test.setTimeout(90_000);
+  await openTestPdf(page);
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await drawPdfRectangleAnnotation(page, { x: 310, y: 230 }, { x: 390, y: 290 });
+  await expect(pages.first().locator(".pdf-annotation-count")).toHaveText("1");
+  await expect.poll(() => autosavedPdfAnnotationCounts(page), { timeout: 20_000 }).toEqual([1]);
+
+  const before = await keyvalValue<{
+    activeSceneId: string;
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder: string[];
+    scenes: Record<string, {
+      elements: Array<Record<string, unknown> & { id?: string; isDeleted?: boolean }>;
+      pdfPage?: { backgroundElementId: string };
+    }>;
+  }>(page, "patterdraw:autosave:project:v1");
+  if (!before) throw new Error("The annotated PDF baseline was not autosaved.");
+  const beforeScene = before.scenes[before.activeSceneId];
+  if (!beforeScene?.pdfPage) throw new Error("The annotated PDF baseline scene is missing.");
+  const beforeAnnotations = beforeScene.elements.filter((element) => (
+    element.isDeleted !== true && element.id !== beforeScene.pdfPage?.backgroundElementId
+  ));
+  expect(beforeAnnotations).toHaveLength(1);
+  const beforeRevision = await keyvalValue<unknown>(
+    page,
+    "patterdraw:autosave:revision:v1",
+  );
+  const pdfKeysBefore = await autosavePdfKeys(page);
+  await failNextBlankPdfFinalCommitWithQuota(page);
+
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Blank page/ }).click();
+
+  await expect(page.getByRole("alert")).toContainText(
+    "browser storage became full. Nothing was imported",
+    { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT },
+  );
+  await expect(page.locator(".busy-overlay")).toHaveCount(0);
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/);
+  await expect(pages).toHaveCount(1);
+  await expect(pages.first()).toHaveClass(/is-selected/);
+  await expect(pages.first().locator(".pdf-annotation-count")).toHaveText("1");
+
+  const afterFailure = await keyvalValue<{
+    activeSceneId: string;
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder: string[];
+    scenes: typeof before.scenes;
+  }>(page, "patterdraw:autosave:project:v1");
+  expect(afterFailure?.activeSceneId).toBe(before.activeSceneId);
+  expect(afterFailure?.pdfPageOrder).toEqual(before.pdfPageOrder);
+  expect(afterFailure?.pdfDocuments).toEqual(before.pdfDocuments);
+  const afterFailureScene = afterFailure?.scenes[before.activeSceneId];
+  expect(afterFailureScene?.elements.filter((element) => (
+    element.isDeleted !== true
+    && element.id !== afterFailureScene.pdfPage?.backgroundElementId
+  ))).toEqual(beforeAnnotations);
+  expect(await autosavePdfKeys(page)).toEqual(pdfKeysBefore);
+  expect(await keyvalValue(page, "patterdraw:autosave:revision:v1")).toEqual(beforeRevision);
+  const failureState = await blankPdfFinalCommitFailureState(page);
+  expect(failureState?.failed).toBe(true);
+  expect(failureState?.keys).toHaveLength(3);
+  expect(failureState?.keys[0]).toBe("patterdraw:autosave:project:v1");
+  expect(failureState?.keys[1]).toMatch(/^patterdraw:autosave:pdf:v1:/);
+  expect(failureState?.keys[2]).toBe("patterdraw:autosave:revision:v1");
+
+  // Remove the deterministic quota seam and make one real retry. The durable
+  // save must complete before the second page/source becomes visible.
+  await restoreBlankPdfFinalCommitFailure(page);
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Blank page/ }).click();
+  await expect(pages).toHaveCount(2, { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect(pages.filter({ hasText: "Blank page" })).toHaveCount(1);
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0, {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
+  const savedRetry = await expect.poll(async () => {
+    const stored = await keyvalValue<{
+      activeSceneId: string;
+      pdfDocuments: Record<string, unknown>;
+      pdfPageOrder: string[];
+      scenes: typeof before.scenes;
+    }>(page, "patterdraw:autosave:project:v1");
+    return stored && Object.keys(stored.pdfDocuments).length === 2
+      && stored.pdfPageOrder.length === 2
+      ? stored
+      : null;
+  }, { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT }).not.toBeNull();
+  void savedRetry;
+  const persistedRetry = await keyvalValue<{
+    activeSceneId: string;
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder: string[];
+    scenes: typeof before.scenes;
+  }>(page, "patterdraw:autosave:project:v1");
+  if (!persistedRetry) throw new Error("The retried blank page was not autosaved.");
+  expect(Object.keys(persistedRetry.pdfDocuments)).toHaveLength(2);
+  expect(persistedRetry.pdfPageOrder).toHaveLength(2);
+  expect(persistedRetry.activeSceneId).toBe(persistedRetry.pdfPageOrder[1]);
+  expect(persistedRetry.scenes[before.activeSceneId]?.elements.filter((element) => (
+    element.isDeleted !== true
+    && element.id !== persistedRetry.scenes[before.activeSceneId]?.pdfPage?.backgroundElementId
+  ))).toEqual(beforeAnnotations);
+  expect(await autosavePdfKeys(page)).toHaveLength(pdfKeysBefore.length + 1);
+  expect(await keyvalValue(page, "patterdraw:autosave:revision:v1")).not.toEqual(beforeRevision);
+
+  // Reload through the persisted autosave rather than trusting the still-live
+  // React tree. Only the one successful retry may survive, while the source
+  // page's exact annotation remains unchanged.
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0, {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/);
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(2);
+  await expect(page.locator("#pdf-page-rail .pdf-page-item").filter({ hasText: "Blank page" }))
+    .toHaveCount(1);
+  await expect(page.locator("#pdf-page-rail .pdf-page-item").first().locator(".pdf-annotation-count"))
+    .toHaveText("1");
+  await expect(page.locator("#pdf-page-rail .pdf-page-item").nth(1).locator(".pdf-annotation-count"))
+    .toHaveCount(0);
+  await expect.poll(() => autosavedPdfAnnotationCounts(page), { timeout: 20_000 }).toEqual([1, 0]);
+
+  const afterReload = await keyvalValue<{
+    activeSceneId: string;
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder: string[];
+    scenes: typeof before.scenes;
+  }>(page, "patterdraw:autosave:project:v1");
+  expect(afterReload?.pdfPageOrder).toEqual(persistedRetry.pdfPageOrder);
+  expect(afterReload?.pdfDocuments).toEqual(persistedRetry.pdfDocuments);
+  expect(afterReload?.scenes[before.activeSceneId]?.elements.filter((element) => (
+    element.isDeleted !== true
+    && element.id !== afterReload.scenes[before.activeSceneId]?.pdfPage?.backgroundElementId
+  ))).toEqual(beforeAnnotations);
+  expect(await autosavePdfKeys(page)).toHaveLength(pdfKeysBefore.length + 1);
+});
+
+test("rejects a blank PDF page before publication when storage reports exhaustion", async ({ page }) => {
+  test.setTimeout(60_000);
+  await openTestPdf(page);
+  const before = await keyvalValue<{
+    activeSceneId: string;
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  if (!before) throw new Error("The baseline PDF project was not autosaved.");
+  const pdfKeysBefore = await autosavePdfKeys(page);
+  await installPdfStorageEstimateSequence(page, [{ quotaExceeded: true }]);
+
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Blank page/ }).click();
+
+  await expect(page.getByRole("alert")).toContainText("additional local storage", {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
+  await expect(page.getByRole("alert")).toContainText("free browser storage");
+  expect(await pdfStorageEstimateCallCount(page)).toBeGreaterThanOrEqual(1);
+  await expect(page.locator(".busy-overlay")).toHaveCount(0);
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1);
+  await expect(page.locator("#pdf-page-rail .pdf-page-item").first()).toHaveClass(/is-selected/);
+
+  const after = await keyvalValue<{
+    activeSceneId: string;
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  expect(after?.activeSceneId).toBe(before.activeSceneId);
+  expect(after?.pdfPageOrder).toEqual(before.pdfPageOrder);
+  expect(after?.pdfDocuments).toEqual(before.pdfDocuments);
+  expect(await autosavePdfKeys(page)).toEqual(pdfKeysBefore);
+});
+
+test("rejects a stale blank PDF page candidate at the durable commit boundary", async ({ page }) => {
+  test.setTimeout(90_000);
+  await openTestPdf(page);
+  const before = await keyvalValue<{
+    pdfDocuments: Record<string, unknown>;
+    pdfPageOrder: string[];
+  }>(page, "patterdraw:autosave:project:v1");
+  if (!before) throw new Error("The baseline PDF project was not autosaved.");
+  const pdfKeysBefore = await autosavePdfKeys(page);
+  await installAutosaveMutationLockGate(page);
+
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Blank page/ }).click();
+  await expect.poll(() => autosaveMutationLockRequestCount(page), {
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  }).toBe(1);
+  await expect(page.locator(".busy-overlay").getByRole("button", {
+    name: "Cancel",
+    exact: true,
+  })).toHaveCount(0);
+
+  const changedTitle = "Changed behind blank-page commit lock";
+  const title = page.getByRole("textbox", { name: "Project title" });
+  await title.fill(changedTitle, { force: true });
+  await expect(title).toHaveValue(changedTitle);
+  await releaseAutosaveMutationLockGate(page);
+
+  await expect(page.getByRole("alert")).toContainText(
+    "board changed while the PDF pages were being prepared",
+    { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT },
+  );
+  await expect(page.locator(".busy-overlay")).toHaveCount(0);
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1);
+  await expect(title).toHaveValue(changedTitle);
+  await expect.poll(async () => {
+    const stored = await keyvalValue<{
+      title: string;
+      pdfDocuments: Record<string, unknown>;
+      pdfPageOrder: string[];
+    }>(page, "patterdraw:autosave:project:v1");
+    return {
+      title: stored?.title,
+      documentCount: Object.keys(stored?.pdfDocuments || {}).length,
+      pages: stored?.pdfPageOrder || [],
+    };
+  }, { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT }).toEqual({
+    title: changedTitle,
+    documentCount: Object.keys(before.pdfDocuments).length,
+    pages: before.pdfPageOrder,
+  });
+  expect(await autosavePdfKeys(page)).toEqual(pdfKeysBefore);
 });
 
 test("duplicates an annotated PDF page with independent identities and one immutable source", async ({ page }) => {
@@ -11006,6 +12745,15 @@ test("duplicates an annotated PDF page with independent identities and one immut
       };
     }>;
   };
+  await expect.poll(
+    async () => (
+      await keyvalValue<DuplicateStoredProject>(
+        page,
+        "patterdraw:autosave:project:v1",
+      )
+    )?.pdfPageOrder.length,
+    { timeout: 20_000 },
+  ).toBe(2);
   const duplicated = await keyvalValue<DuplicateStoredProject>(
     page,
     "patterdraw:autosave:project:v1",
@@ -11052,6 +12800,7 @@ test("duplicates an annotated PDF page with independent identities and one immut
     mimeType: "application/vnd.patterdraw+zip",
     buffer: archiveBytes,
   });
+  await confirmProjectOpenWithoutDownloading(page);
   await page.getByRole("button", { name: "PDF", exact: true }).click();
   await expect(pages).toHaveCount(2, { timeout: 20_000 });
   await expect.poll(() => autosavedPdfAnnotationCounts(page), { timeout: 20_000 })
@@ -11356,6 +13105,7 @@ test("rotates PDF content, annotations, and off-page writing through persistence
     mimeType: "application/vnd.patterdraw+zip",
     buffer: archiveBytes,
   });
+  await confirmProjectOpenWithoutDownloading(page);
   await page.getByRole("button", { name: "PDF", exact: true }).click();
   await expect(pages).toHaveCount(1, { timeout: 20_000 });
   await expect.poll(async () => {
@@ -11613,6 +13363,7 @@ test("deletes the selected PDF page without renumbering its source page", async 
     mimeType: "application/vnd.patterdraw+zip",
     buffer: savedBytes,
   });
+  await confirmProjectOpenWithoutDownloading(page);
   await page.getByRole("button", { name: "PDF", exact: true }).click();
   await expect(pages).toHaveCount(1, { timeout: 15_000 });
   await expect(pages.first()).toContainText("Original page 2");
@@ -11760,6 +13511,7 @@ test("adds a blank slide with a live preview without remounting or covering the 
   expect(collapsedButtonBounds?.height || 0).toBeGreaterThanOrEqual(44);
   expect(collapsedButtonBounds?.x || 0).toBeGreaterThanOrEqual(19);
   expect(480 - ((collapsedButtonBounds?.y || 0) + (collapsedButtonBounds?.height || 0))).toBeGreaterThanOrEqual(31);
+  await page.waitForTimeout(400);
   await collapsedButton.click();
   await expect(mobileControls).toBeVisible();
   await page.getByRole("button", { name: "Exit", exact: true }).click();

@@ -78,4 +78,38 @@ describe("SettingsMenu PDF preferences", () => {
     expect(onOpenShortcutHelp).toHaveBeenCalledWith(settings);
     expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
+
+  it("keeps every protected copy reachable from Settings", () => {
+    const onOpenRecoveryHistory = vi.fn();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    roots.push(root);
+    act(() => root.render(createElement(SettingsMenu, {
+      preferences: { ...DEFAULT_FEATURE_PREFERENCES },
+      pdfPreferences: { ...DEFAULT_PDF_PREFERENCES },
+      themePreference: "light",
+      onPreferenceChange: vi.fn(),
+      onPdfPreferenceChange: vi.fn(),
+      onThemePreferenceChange: vi.fn(),
+      onOpenShortcutHelp: vi.fn(),
+      onOpenRecoveryHistory,
+      recoveryHistoryCount: 4,
+      onRestorePdfDefaults: vi.fn(),
+      onRestoreDefaults: vi.fn(),
+    })));
+
+    const settings = container.querySelector<HTMLButtonElement>('button[aria-label="Settings"]');
+    act(() => settings?.click());
+    const recovery = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((candidate) => candidate.textContent?.includes("Recovery history"));
+    expect(recovery?.textContent).toContain("4");
+    expect(recovery?.querySelector(".settings-help-count")?.getAttribute("aria-label"))
+      .toBe("4 protected copies");
+
+    act(() => recovery?.click());
+    expect(onOpenRecoveryHistory).toHaveBeenCalledOnce();
+    expect(onOpenRecoveryHistory).toHaveBeenCalledWith(settings);
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+  });
 });

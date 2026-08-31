@@ -59,6 +59,28 @@ class SemanticArchiveWorker {
   }
 }
 
+class ReadyArchiveWorker {
+  static instances: ReadyArchiveWorker[] = [];
+
+  onmessage: ((event: MessageEvent<unknown>) => void) | null = null;
+  onerror: ((event: ErrorEvent) => void) | null = null;
+  onmessageerror: (() => void) | null = null;
+  postMessage = vi.fn((request: { id: number; operation: string }) => {
+    queueMicrotask(() => this.onmessage?.({
+      data: {
+        id: request.id,
+        ok: true,
+        ready: request.operation === "preflight",
+      },
+    } as MessageEvent<unknown>));
+  });
+  terminate = vi.fn();
+
+  constructor() {
+    ReadyArchiveWorker.instances.push(this);
+  }
+}
+
 describe("project archive worker cancellation", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -66,7 +88,30 @@ describe("project archive worker cancellation", () => {
     PendingArchiveWorker.instances.length = 0;
     ErrorArchiveWorker.instances.length = 0;
     SemanticArchiveWorker.instances.length = 0;
+    ReadyArchiveWorker.instances.length = 0;
     vi.unstubAllGlobals();
+  });
+
+  it("preflights the exact module worker with a bounded round trip", async () => {
+    vi.stubGlobal("Worker", ReadyArchiveWorker);
+    const { preflightProjectArchiveWorker } = await import("./project-archive-client");
+
+    await expect(preflightProjectArchiveWorker()).resolves.toEqual({ available: true });
+    expect(ReadyArchiveWorker.instances).toHaveLength(1);
+    expect(ReadyArchiveWorker.instances[0].postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: "preflight" }),
+    );
+    expect(ReadyArchiveWorker.instances[0].terminate).toHaveBeenCalledOnce();
+  });
+
+  it("reports a blocked archive worker as a nonfatal readiness result", async () => {
+    vi.stubGlobal("Worker", StartupFailureArchiveWorker);
+    const { preflightProjectArchiveWorker } = await import("./project-archive-client");
+
+    await expect(preflightProjectArchiveWorker()).resolves.toMatchObject({
+      available: false,
+      message: expect.stringMatching(/CSP/i),
+    });
   });
 
   it("fails closed when the module worker cannot start in a browser", async () => {
@@ -135,6 +180,24 @@ describe("project archive worker cancellation", () => {
     controller.abort();
 
     await expect(extraction).rejects.toMatchObject({ name: "AbortError" });
+    expect(PendingArchiveWorker.instances).toHaveLength(1);
+    expect(PendingArchiveWorker.instances[0].postMessage).toHaveBeenCalledOnce();
+    expect(PendingArchiveWorker.instances[0].terminate).toHaveBeenCalledOnce();
+  });
+
+  it("terminates a superseded zip worker and rejects with AbortError", async () => {
+    vi.stubGlobal("Worker", PendingArchiveWorker);
+    const { createProjectArchive } = await import("./project-archive-client");
+    const controller = new AbortController();
+
+    const creation = createProjectArchive(
+      { "project.json": new TextEncoder().encode("{}") },
+      1_024,
+      controller.signal,
+    );
+    controller.abort();
+
+    await expect(creation).rejects.toMatchObject({ name: "AbortError" });
     expect(PendingArchiveWorker.instances).toHaveLength(1);
     expect(PendingArchiveWorker.instances[0].postMessage).toHaveBeenCalledOnce();
     expect(PendingArchiveWorker.instances[0].terminate).toHaveBeenCalledOnce();

@@ -1,4 +1,8 @@
-import { inspectPdfEmbeddedImageLimitsInCurrentThread } from "./embedded-image-limits";
+import {
+  inspectPdfEmbeddedImageLimitsInCurrentThread,
+  pdfEmbeddedImageFailureCode,
+  type PdfEmbeddedImageFailureCode,
+} from "./embedded-image-limits";
 
 interface EmbeddedImageWorkerRequest {
   bytes: Uint8Array;
@@ -9,6 +13,7 @@ interface EmbeddedImageWorkerRequest {
 }
 
 interface EmbeddedImageWorkerResponse {
+  code?: PdfEmbeddedImageFailureCode;
   message?: string;
   name?: string;
   ok: boolean;
@@ -39,6 +44,9 @@ workerScope.onmessage = (event) => {
     () => workerScope.postMessage({ ok: true }),
     (error) => workerScope.postMessage({
       ok: false,
+      ...(pdfEmbeddedImageFailureCode(error)
+        ? { code: pdfEmbeddedImageFailureCode(error)! }
+        : {}),
       message: error instanceof Error ? error.message : String(error),
       name: error instanceof Error ? error.name : "Error",
     }),

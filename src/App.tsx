@@ -40,7 +40,16 @@ import {
   type PdfAnnotationScopeSummaries,
 } from "./components/ClearPdfAnnotationsDialog";
 import { VisualPdfFallbackDialog } from "./components/VisualPdfFallbackDialog";
-import { PresentationOverlay } from "./components/PresentationOverlay";
+import { PdfCompatibilityImportDialog } from "./components/PdfCompatibilityImportDialog";
+import { ProjectSwitchDialog } from "./components/ProjectSwitchDialog";
+import {
+  RecoveryHistoryDialog,
+  type RecoveryHistoryStatus,
+} from "./components/RecoveryHistoryDialog";
+import {
+  PresentationOverlay,
+  type PresentationTool,
+} from "./components/PresentationOverlay";
 import { KeyboardShortcutsDialog } from "./components/KeyboardShortcutsDialog";
 import { StrokeWidthExtensions } from "./components/StrokeWidthExtensions";
 import { MathToolsMenuExtension } from "./components/MathToolsMenuExtension";
@@ -100,6 +109,7 @@ import type {
 import { createBlankProject } from "./types";
 import {
   AutosaveConflictError,
+  autosaveManifestHash,
   loadAutosave,
   saveAutosave,
 } from "./lib/persistence";
@@ -115,6 +125,12 @@ import {
   saveLibraryItems,
 } from "./lib/library-persistence";
 import { decodeProjectFile, encodePreparedProjectFile } from "./lib/project-file";
+import type { AutosaveHistorySummary } from "./lib/autosave-history";
+import type { PdfImportRecovery } from "./lib/pdf/import-compatibility";
+import type { InspectedPdfFile } from "./lib/pdf/import-pdf";
+import type { ProjectArchiveWorkerReadiness } from "./lib/project-archive-client";
+import type { StorageReadiness } from "./lib/storage-readiness";
+import { projectNeedsSwitchProtection } from "./lib/project-switch-safety";
 import { bytesForBlob } from "./lib/blob-bytes";
 import { downloadBlob, safeFileStem } from "./lib/download";
 import { exportFullBoardPng } from "./lib/export-board";
@@ -157,6 +173,7 @@ import {
   getBrowserPdfRasterDeviceTier,
   type PdfRasterDeviceTier,
 } from "./lib/pdf/raster-limits";
+import { getPdfStorageAdmissionRequirement } from "./lib/pdf/storage-admission";
 import {
   darkPdfThumbnailRenderSceneIds,
   pruneDarkPdfThumbnails,
@@ -410,10 +427,34 @@ type SaveStatus = "saved" | "saving" | "error";
 type AutosaveRecoveryKind = "conflict" | "unreadable";
 type PresentationState = {
   index: number;
-  tool: "laser" | "freedraw";
+  tool: PresentationTool;
   inkColour: PresentationInkColour;
   inkWidth: PresentationInkWidth;
 };
+export type PresentationClassroomTimeSelection = SelectedClassroomTimeWidget & {
+  projectId: string;
+  sceneId: string;
+};
+
+export function classroomAlarmStartWarning(
+  preparationStatus: "blocked" | "ready" | "unavailable",
+  muted: boolean,
+  masterVolume: number,
+): string | null {
+  if (muted) {
+    return "Countdown started, but classroom alarms are muted on this device. Unmute alarms before time is up.";
+  }
+  if (!Number.isFinite(masterVolume) || masterVolume <= 0) {
+    return "Countdown started, but alarm volume is 0%. Raise the alarm volume before time is up.";
+  }
+  if (preparationStatus === "blocked") {
+    return "Countdown started, but your browser blocked alarm sound. Test the alarm before relying on it.";
+  }
+  if (preparationStatus === "unavailable") {
+    return "Countdown started, but alarm sound is unavailable in this browser.";
+  }
+  return null;
+}
 type EquationEditorState = { targetId: string | null; initialSource: string };
 type MermaidEditorState = { targetDiagramId: string | null; initialSource: string };
 type MathToolEditState = { targetId: string; initialConfiguration: MathToolConfiguration };
@@ -454,6 +495,29 @@ type PendingVisualPdfFallback = {
   capturedAt: number;
   boardTheme: "light" | "dark";
 };
+type PendingProjectSwitch = {
+  file: File;
+  processing: boolean;
+};
+type PdfCompatibilityAttempt = {
+  originalFailure: unknown;
+  originalFile: File;
+  rejectedOriginalInspection: Readonly<Pick<InspectedPdfFile, "pageCount" | "sha256">>;
+};
+type PendingPdfCompatibilityImport = {
+  failure: unknown;
+  file: File;
+  processing: boolean;
+  rejectedOriginalInspection?: Readonly<Pick<InspectedPdfFile, "pageCount" | "sha256">>;
+  recovery: PdfImportRecovery;
+} & (
+  | { context: "direct" }
+  | {
+    context: "batch";
+    sourceInstanceId: string;
+    submission: PdfInsertSubmission;
+  }
+);
 export type ClassroomTimeLibraryTransferIntent = {
   baselineItemIds: ReadonlySet<string>;
   cacheByAnchorId: ReadonlyMap<string, {
@@ -536,15 +600,27 @@ export function preserveDeletedForPendingPdfUndo(
   return { ...pending, preserveDeleted: true };
 }
 
+export type SceneHydrationSnapshot = {
+  appState: Record<string, unknown>;
+  elements: readonly ExcalidrawElement[];
+  files: BinaryFiles;
+  sceneId: string;
+};
 type SceneHydrationBaseline = {
   generation: number;
-  pending: PendingScenePersistence;
+  snapshot: SceneHydrationSnapshot;
 };
 type FileOpenOperation = {
   generation: number;
   signal: AbortSignal;
 };
 type PendingPdfInsertFile = PdfInsertFileRowMetadata & {
+  compatibilityAttempted?: boolean;
+  compatibilityOriginal?: {
+    failure: unknown;
+    file: File;
+    rejectedOriginalInspection: Readonly<Pick<InspectedPdfFile, "pageCount" | "sha256">>;
+  };
   file: File;
   sha256: string;
 };
@@ -741,7 +817,7 @@ export function presentationInkStrokeIsCurrent(
   current: {
     sceneId: string | null;
     generation: number;
-    tool: "laser" | "freedraw" | null;
+    tool: PresentationTool | null;
   },
 ): boolean {
   return current.tool === "freedraw"
@@ -757,6 +833,126 @@ export function presentationInkPointerDownIsCurrent(
   return !switching
     && Boolean(sceneId)
     && hydratedSceneId === sceneId;
+}
+
+/**
+ * Keep the classroom-time widget chosen before presentation as presentation
+ * state, rather than as an Excalidraw selection. Scene hydration necessarily
+ * clears the editor selection; a matching live selection may refresh the
+ * remembered metadata, but a missing or different selection must not replace
+ * the presentation target.
+ */
+export function updateRememberedPresentationClassroomTimeSelection(
+  remembered: PresentationClassroomTimeSelection | null,
+  liveSelection: SelectedClassroomTimeWidget | null,
+  liveContext: {
+    projectId: string | null;
+    sceneId: string | null;
+  },
+): PresentationClassroomTimeSelection | null {
+  if (
+    !remembered
+    || !liveSelection
+    || liveContext.projectId !== remembered.projectId
+    || liveContext.sceneId !== remembered.sceneId
+    || liveSelection.anchorId !== remembered.anchorId
+    || liveSelection.ownerId !== remembered.ownerId
+  ) return remembered;
+  return {
+    ...liveSelection,
+    projectId: remembered.projectId,
+    sceneId: remembered.sceneId,
+  };
+}
+
+export function classroomTimeActiveTargetAfterSelection(
+  current: ClassroomTimeOverlayTarget,
+  liveSelection: SelectedClassroomTimeWidget | null,
+  presentationActive: boolean,
+): ClassroomTimeOverlayTarget {
+  if (presentationActive) return current;
+  if (liveSelection?.metadata.kind === "pomodoro") return "pomodoro";
+  if (liveSelection?.metadata.kind === "timer") return "timer";
+  return current;
+}
+
+/**
+ * Presentation controls may use a remembered selection only after the live
+ * editor has finished hydrating the active scene and confirms the exact
+ * widget anchor and owner. This prevents a stale control from mutating a
+ * different widget while rapidly moving between slides in separate scenes.
+ */
+export function presentationClassroomTimeSelectionForLiveScene(
+  remembered: PresentationClassroomTimeSelection | null,
+  liveElements: readonly ExcalidrawElement[],
+  sceneState: {
+    activeSceneId: string | null;
+    hydratedSceneId: string | null;
+    projectId: string | null;
+    switching: boolean;
+  },
+): PresentationClassroomTimeSelection | null {
+  if (
+    !remembered
+    || sceneState.switching
+    || !sceneState.activeSceneId
+    || sceneState.projectId !== remembered.projectId
+    || sceneState.activeSceneId !== remembered.sceneId
+    || sceneState.activeSceneId !== sceneState.hydratedSceneId
+  ) return null;
+  const anchor = liveElements.find((element) => (
+    !element.isDeleted && element.id === remembered.anchorId
+  ));
+  const metadata = anchor ? classroomTimeWidgetMetadata(anchor) : null;
+  if (!metadata || metadata.ownerId !== remembered.ownerId) return null;
+  return {
+    anchorId: remembered.anchorId,
+    elementIds: liveElements.flatMap((element) => (
+      !element.isDeleted && classroomTimeWidgetOwnerId(element) === remembered.ownerId
+        ? [element.id]
+        : []
+    )),
+    metadata,
+    ownerId: remembered.ownerId,
+    projectId: remembered.projectId,
+    sceneId: remembered.sceneId,
+  };
+}
+
+/**
+ * Excalidraw's native eraser reports only the final deletion set: when a
+ * gesture touches a frame boundary, it does not distinguish children erased
+ * by the frame cascade from children hit directly by that same gesture.
+ * Conservatively reject all newly deleted members of that protected frame as
+ * one atomic gesture. Previously deleted children stay deleted, erasures
+ * outside the frame remain valid, and a separate child-only gesture remains
+ * erasable while the slide frame itself stays intact.
+ */
+export function protectPresentationSlideFrameElements(
+  elements: readonly ExcalidrawElement[],
+  protectedFrameIds: ReadonlySet<string>,
+  previousElements: readonly ExcalidrawElement[] = [],
+): readonly ExcalidrawElement[] {
+  const previousById = new Map(previousElements.map((element) => [element.id, element]));
+  const erasedProtectedFrameIds = new Set(elements.flatMap((element) => (
+    element.type === "frame"
+    && element.isDeleted
+    && protectedFrameIds.has(element.id)
+    && previousById.get(element.id)?.isDeleted !== true
+      ? [element.id]
+      : []
+  )));
+  if (!erasedProtectedFrameIds.size) return elements;
+  return elements.map((element) => (
+    element.isDeleted
+    && previousById.get(element.id)?.isDeleted !== true
+    && (
+      erasedProtectedFrameIds.has(element.id)
+      || (element.frameId !== null && erasedProtectedFrameIds.has(element.frameId))
+    )
+      ? newElementWith(element, { isDeleted: false })
+      : element
+  ));
 }
 
 export function startupLoadGenerationIsCurrent(
@@ -1094,10 +1290,18 @@ function clipboardCaptureToast(result: ClipboardWriteResult): string {
 
 function autosaveFailureMessage(error: unknown): string {
   const detail = error instanceof Error ? error.message : String(error);
-  const storageFull = error instanceof DOMException && error.name === "QuotaExceededError";
+  const storageFull = isQuotaExceededLikeError(error);
   return storageFull
     ? "Autosave failed because browser storage is full. Download a .patterdraw backup now, then remove Personal Library items or Screenshot Library captures."
     : `Autosave failed: ${detail} Download a .patterdraw backup before closing this page.`;
+}
+
+function isQuotaExceededLikeError(error: unknown): boolean {
+  return Boolean(
+    error
+    && typeof error === "object"
+    && (error as { name?: unknown }).name === "QuotaExceededError",
+  );
 }
 
 function isAbortLikeError(error: unknown): boolean {
@@ -1310,6 +1514,45 @@ function normalizedHydrationChange(
   };
 }
 
+/**
+ * Freeze the comparison side of the hydration fence. Excalidraw may retain
+ * and normalize element objects handed to updateScene(); keeping those same
+ * references in the baseline would let an in-place user move mutate both
+ * sides and be misclassified as a synthetic hydration echo.
+ */
+export function snapshotSceneHydrationChange(
+  pending: PendingScenePersistence,
+): SceneHydrationSnapshot {
+  return {
+    sceneId: pending.sceneId,
+    elements: structuredClone(pending.elements),
+    appState: serializedPersistableAppState(
+      pending.elements,
+      pending.appState,
+      pending.files,
+    ),
+    // BinaryFileData is flat and its potentially large dataURL is an
+    // immutable string. Clone each record to sever mutable object aliases
+    // without duplicating the encoded image bytes.
+    files: Object.fromEntries(
+      Object.entries(pending.files).map(([fileId, file]) => [fileId, { ...file }]),
+    ) as BinaryFiles,
+  };
+}
+
+export function hydrationChangeMatchesSnapshot(
+  pending: PendingScenePersistence,
+  snapshot: SceneHydrationSnapshot,
+): boolean {
+  return pending.sceneId === snapshot.sceneId
+    && serializedValuesEqual(pending.elements, snapshot.elements)
+    && serializedValuesEqual(pending.files, snapshot.files)
+    && serializedValuesEqual(
+      serializedPersistableAppState(pending.elements, pending.appState, pending.files),
+      snapshot.appState,
+    );
+}
+
 export function hydrationChangesMatch(
   left: PendingScenePersistence,
   right: PendingScenePersistence,
@@ -1474,7 +1717,10 @@ export function classroomTimeOperationSceneSignature(
   elements: readonly ExcalidrawElement[],
   files: BinaryFiles,
   transientFileIds: ReadonlySet<string>,
-): Pick<ClassroomTimeSchedulerPublicationFence, "elementFingerprint" | "fileFingerprint"> {
+): Pick<
+  ClassroomTimeSchedulerPublicationFence,
+  "elementContentFingerprint" | "elementFingerprint" | "fileFingerprint"
+> {
   const persistentElements = scene
     ? canonicalizePdfBackgroundForPersistence(
       scene,
@@ -1485,6 +1731,7 @@ export function classroomTimeOperationSceneSignature(
     ? persistentFilesForScene(scene, files, transientFileIds)
     : files;
   return {
+    elementContentFingerprint: classroomTimeDisplayTickContentFingerprint(persistentElements),
     elementFingerprint: classroomTimeElementFingerprint(persistentElements),
     fileFingerprint: classroomTimeFileFingerprint(persistentFiles),
   };
@@ -2605,6 +2852,7 @@ export interface ClassroomTimeSchedulerPublicationFence {
   activeSceneId: string | null;
   hydrationGeneration: number;
   operationGeneration: number;
+  elementContentFingerprint?: string | null;
   elementFingerprint: string | null;
   fileFingerprint: string | null;
 }
@@ -2634,12 +2882,20 @@ export function classroomTimeControlPublicationFenceMatches(
   current: ClassroomTimeSchedulerPublicationFence,
   interactionBlocked = false,
 ): boolean {
+  const contentMatches = expected.elementContentFingerprint !== undefined
+    && current.elementContentFingerprint !== undefined
+    ? expected.elementContentFingerprint === current.elementContentFingerprint
+    : expected.elementFingerprint === current.elementFingerprint;
   return !interactionBlocked
     && expected.project?.id === current.project?.id
     && expected.activeSceneId === current.activeSceneId
     && expected.hydrationGeneration === current.hydrationGeneration
     && expected.operationGeneration === current.operationGeneration
-    && expected.elementFingerprint === current.elementFingerprint
+    // Excalidraw and the wrapper-owned widget renderer may bump only revision
+    // bookkeeping while an alarm storage lock is pending. Direct controls read
+    // and merge into the latest live scene, so accept that display-only churn
+    // while still rejecting every persisted content change.
+    && contentMatches
     && expected.fileFingerprint === current.fileFingerprint;
 }
 
@@ -2780,6 +3036,7 @@ export default function App() {
   const [projectHydrationRevision, setProjectHydrationRevision] = useState(0);
   const [pdfBytes, setPdfBytes] = useState<Record<PdfDocumentId, Uint8Array>>({});
   const [api, setApi] = useState<ExcalidrawImperativeAPI | null>(null);
+  const [isSceneInputBlocked, setIsSceneInputBlocked] = useState(true);
   const [strokeWidth, setStrokeWidth] = useState(2);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("saving");
   const [activeSlideId, setActiveSlideId] = useState<string | null>(null);
@@ -2791,8 +3048,13 @@ export default function App() {
   const [pendingPdfInsert, setPendingPdfInsert] = useState<PendingPdfInsert | null>(null);
   const [pdfInsertProcessing, setPdfInsertProcessing] = useState(false);
   const [pdfInsertCancelling, setPdfInsertCancelling] = useState(false);
+  const [pdfInsertCommitStarted, setPdfInsertCommitStarted] = useState(false);
   const [pdfInsertProgress, setPdfInsertProgress] = useState<PdfInsertOperationProgress | null>(null);
   const pdfInsertOperationGenerationRef = useRef<number | null>(null);
+  const submitPdfInsertionRef = useRef<((
+    submission: PdfInsertSubmission,
+    pendingOverride?: PendingPdfInsert,
+  ) => Promise<void>) | null>(null);
   const [pendingPdfAnnotationClear, setPendingPdfAnnotationClear] = useState<PendingPdfAnnotationClear | null>(null);
   const [pdfUndoToast, setPdfUndoToast] = useState<PdfUndoToast | null>(null);
   const [classroomTimeConfirmationToast, setClassroomTimeConfirmationToast] = useState<ClassroomTimeConfirmationToast | null>(null);
@@ -2816,6 +3078,21 @@ export default function App() {
   ));
   const [exportOpen, setExportOpen] = useState(false);
   const [pendingVisualPdfFallback, setPendingVisualPdfFallback] = useState<PendingVisualPdfFallback | null>(null);
+  const [pendingProjectSwitch, setPendingProjectSwitch] = useState<PendingProjectSwitch | null>(null);
+  const [pendingPdfCompatibilityImport, setPendingPdfCompatibilityImport] = useState<PendingPdfCompatibilityImport | null>(null);
+  const [archiveWorkerReadiness, setArchiveWorkerReadiness] = useState<ProjectArchiveWorkerReadiness | null>(null);
+  const [storageReadiness, setStorageReadiness] = useState<StorageReadiness | null>(null);
+  const [recoverySnapshots, setRecoverySnapshots] = useState<readonly AutosaveHistorySummary[]>([]);
+  const [isRecoveryHistoryOpen, setIsRecoveryHistoryOpen] = useState(false);
+  const [recoveryHistoryStatus, setRecoveryHistoryStatus] = useState<RecoveryHistoryStatus | null>(null);
+  const [recoveryHistoryUnreadable, setRecoveryHistoryUnreadable] = useState(false);
+  const [damagedRecoverySnapshotIds, setDamagedRecoverySnapshotIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const recoveryHistoryReturnFocusRef = useRef<HTMLElement | null>(null);
+  const [dismissedRecoverySnapshotId, setDismissedRecoverySnapshotId] = useState<string | null>(null);
+  const [localReadinessDismissed, setLocalReadinessDismissed] = useState(false);
+  const [localReadinessBusy, setLocalReadinessBusy] = useState(false);
   const [isLibraryOpen, setIsLibraryOpen] = useState(false);
   const [isProjectFindOpen, setIsProjectFindOpen] = useState(false);
   const [isSizePositionOpen, setIsSizePositionOpen] = useState(false);
@@ -2883,6 +3160,9 @@ export default function App() {
   const [isMathToolsOpen, setIsMathToolsOpen] = useState(false);
   const [classroomTimeDialog, setClassroomTimeDialog] = useState<ClassroomTimeDialogState | null>(null);
   const [selectedClassroomTime, setSelectedClassroomTime] = useState<SelectedClassroomTimeWidget | null>(null);
+  const [presentationClassroomTimeSelection, setPresentationClassroomTimeSelection] = useState<
+    PresentationClassroomTimeSelection | null
+  >(null);
   const [classroomTimeActiveTarget, setClassroomTimeActiveTarget] = useState<ClassroomTimeOverlayTarget>("timer");
   const [classroomTimeNowMs, setClassroomTimeNowMs] = useState(Date.now);
   const [classroomTimeAlarmNotice, setClassroomTimeAlarmNotice] = useState<ClassroomTimeAlarmNotice | null>(null);
@@ -3101,6 +3381,122 @@ export default function App() {
   }, [finalizePendingPdfUndo]);
   const projectRef = useRef<ClassroomProject | null>(project);
   const pdfBytesRef = useRef<Record<PdfDocumentId, Uint8Array>>(pdfBytes);
+  const retryArchiveWorkerReadiness = useCallback(async () => {
+    setLocalReadinessDismissed(false);
+    setLocalReadinessBusy(true);
+    try {
+      const { preflightProjectArchiveWorker } = await import("./lib/project-archive-client");
+      setArchiveWorkerReadiness(await preflightProjectArchiveWorker());
+    } catch (error) {
+      setArchiveWorkerReadiness({
+        available: false,
+        message: error instanceof Error && error.message
+          ? error.message
+          : "The project archive worker could not be checked.",
+      });
+    } finally {
+      setLocalReadinessBusy(false);
+    }
+  }, []);
+  const requestLocalStorageProtection = useCallback(async () => {
+    setLocalReadinessDismissed(false);
+    setLocalReadinessBusy(true);
+    try {
+      const { requestDurableStorage } = await import("./lib/storage-readiness");
+      setStorageReadiness(await requestDurableStorage());
+    } catch (error) {
+      setStorageReadiness({
+        durableStorage: "unavailable",
+        quotaBytes: null,
+        usageBytes: null,
+        availableBytes: null,
+        requiredBytes: 0,
+        hasRequiredCapacity: null,
+        advisory: error instanceof Error && error.message
+          ? error.message
+          : "Durable local storage could not be requested.",
+      });
+    } finally {
+      setLocalReadinessBusy(false);
+    }
+  }, []);
+  const assessAdditionalStorage = useCallback(async (
+    requiredBytes: number,
+    signal?: AbortSignal,
+  ) => {
+    const { assessStorageReadiness } = await import("./lib/storage-readiness");
+    const readiness = await assessStorageReadiness({ requiredBytes, signal });
+    setStorageReadiness(readiness);
+    if (readiness.hasRequiredCapacity === false) {
+      const availableMiB = readiness.availableBytes === null
+        ? "unknown"
+        : `${Math.max(0, Math.floor(readiness.availableBytes / (1024 * 1024)))} MiB`;
+      const requiredMiB = Math.ceil(requiredBytes / (1024 * 1024));
+      throw new Error(
+        `This operation needs about ${requiredMiB} MiB of additional local storage, but the browser reports ${availableMiB} available. Download a backup and free browser storage before trying again.`,
+      );
+    }
+    return readiness;
+  }, []);
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    void import("./lib/project-archive-client")
+      .then(({ preflightProjectArchiveWorker }) => preflightProjectArchiveWorker(controller.signal))
+      .then((readiness) => {
+        if (active) setArchiveWorkerReadiness(readiness);
+      })
+      .catch((error) => {
+        if (!active || isAbortLikeError(error)) return;
+        setArchiveWorkerReadiness({
+          available: false,
+          message: error instanceof Error && error.message
+            ? error.message
+            : "The project archive worker could not be checked.",
+        });
+      });
+    void import("./lib/storage-readiness")
+      .then(({ assessStorageReadiness }) => assessStorageReadiness())
+      .then((readiness) => {
+        if (active) setStorageReadiness(readiness);
+      })
+      .catch((error) => {
+        if (!active) return;
+        // Storage readiness is advisory. If its optional startup chunk cannot
+        // be loaded (for example, a first offline visit with an incomplete
+        // browser cache), keep the editor usable and surface the conservative
+        // backup warning instead of leaving an unhandled rejection behind.
+        setStorageReadiness({
+          durableStorage: "unavailable",
+          quotaBytes: null,
+          usageBytes: null,
+          availableBytes: null,
+          requiredBytes: 0,
+          hasRequiredCapacity: null,
+          advisory: error instanceof Error && error.message
+            ? error.message
+            : "Durable local storage could not be checked.",
+        });
+      });
+    void import("./lib/autosave-history")
+      .then(({ listAutosaveHistorySnapshots }) => listAutosaveHistorySnapshots())
+      .then((entries) => {
+        if (active) {
+          setRecoverySnapshots(entries);
+          setRecoveryHistoryUnreadable(false);
+        }
+      })
+      .catch(() => {
+        // A damaged history store must never stop the current autosave from
+        // opening. A later explicit project switch surfaces the actionable
+        // integrity error before replacing the current board.
+        if (active) setRecoveryHistoryUnreadable(true);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
   const currentSceneRef = useRef<SerializedScene | null>(null);
   const activeSceneIdRef = useRef<string | null>(null);
   // The React project/active-scene refs can advance before Excalidraw has
@@ -3273,6 +3669,11 @@ export default function App() {
   // Treat that window as a scene switch so the blank scene cannot overwrite
   // the stored project during startup.
   const switchingSceneRef = useRef(true);
+  // React project metadata can publish before the imperative Excalidraw scene
+  // replacement settles. Block editor input for that short transition so a
+  // fast first mark cannot land on the outgoing scene and then be silently
+  // overwritten, and wrapper tools cannot reject a gesture halfway through.
+  const sceneInputBlockedRef = useRef(true);
   const sceneHydrationGenerationRef = useRef(0);
   const sceneHydrationOuterFrameRef = useRef<number | null>(null);
   const sceneHydrationInnerFrameRef = useRef<number | null>(null);
@@ -3574,6 +3975,8 @@ export default function App() {
     pendingScenePersistenceRef.current = adopted.pending;
     bufferedHydrationChangeRef.current = adopted.buffered;
     sceneHydrationBaselineRef.current = null;
+    sceneInputBlockedRef.current = true;
+    setIsSceneInputBlocked(true);
     // Do this while the outgoing dark background still references the
     // transient file, allowing Excalidraw to evict its decoded full-page image.
     retireActiveDarkPdfDisplayFile();
@@ -3921,6 +4324,140 @@ export default function App() {
     );
   }, []);
 
+  const persistPdfCandidateBeforePublication = useCallback(async (
+    candidateProject: ClassroomProject,
+    candidatePdfBytes: Record<PdfDocumentId, Uint8Array>,
+    options: {
+      forceOverwrite?: boolean;
+      isBaseCurrent?: () => boolean;
+      publish: () => void;
+      signal?: AbortSignal;
+    },
+  ) => {
+    const assertBaseCurrent = () => {
+      if (options.isBaseCurrent && !options.isBaseCurrent()) {
+        throw new Error(
+          "The board changed while the PDF pages were being prepared. Nothing was imported; try again so the new content is included.",
+        );
+      }
+    };
+    // Let an already-linearized save finish before freezing the ordinary
+    // scheduler. saveAutosave's CAS then orders this candidate after that
+    // exact revision instead of allowing an older queued snapshot to land
+    // after the PDF import.
+    try {
+      await autosaveQueueRef.current;
+    } catch (error) {
+      if (error instanceof AutosaveConflictError && !options.forceOverwrite) throw error;
+      // A prior storage failure does not make this candidate unsafe to try;
+      // its own atomic transaction below is the authoritative capacity test.
+    }
+    if (options.signal?.aborted) {
+      throw options.signal.reason instanceof Error
+        ? options.signal.reason
+        : new DOMException("The operation was aborted.", "AbortError");
+    }
+    assertBaseCurrent();
+
+    const previous = {
+      coveredSnapshot: autosaveCoveredSnapshotRef.current,
+      dirty: autosaveDirtyRef.current,
+      exitFlushQueued: autosaveExitFlushQueuedRef.current,
+      exitFlushSnapshot: autosaveExitFlushSnapshotRef.current,
+      saving: autosaveSavingRef.current,
+      suspended: autosaveSuspendedRef.current,
+      urgent: autosaveUrgentRef.current,
+    };
+    if (autosaveTimerRef.current !== null) {
+      window.clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+    autosaveSuspendedRef.current = true;
+    autosaveDirtyRef.current = false;
+    autosaveUrgentRef.current = false;
+    autosaveSavingRef.current = true;
+    const snapshot = {
+      project: candidateProject,
+      pdfBytes: candidatePdfBytes,
+    };
+    const saveStartedAt = performance.now();
+    const candidateSave = saveAutosave(candidateProject, candidatePdfBytes, {
+      prepared: true,
+      forceOverwrite: options.forceOverwrite,
+      replacePdfBlobs: options.forceOverwrite,
+      // Recheck after PDF/raster verification and Web Lock waiting, inside
+      // the IndexedDB transaction in the same turn as its first write.
+      precommitGuard: assertBaseCurrent,
+      signal: options.signal,
+    });
+    // Keep page-exit and later PDF publications ordered behind this exact
+    // transaction without exposing a rejected promise as an unhandled task.
+    const trackedSave = candidateSave.then(() => undefined, () => undefined);
+    autosaveQueueRef.current = trackedSave;
+
+    let contentSize;
+    try {
+      contentSize = await candidateSave;
+    } catch (error) {
+      const liveBaseChanged = Boolean(
+        options.isBaseCurrent && !options.isBaseCurrent(),
+      );
+      autosaveCoveredSnapshotRef.current = liveBaseChanged
+        ? null
+        : previous.coveredSnapshot;
+      autosaveDirtyRef.current = previous.dirty || liveBaseChanged;
+      autosaveExitFlushQueuedRef.current = previous.exitFlushQueued;
+      autosaveExitFlushSnapshotRef.current = previous.exitFlushSnapshot;
+      autosaveUrgentRef.current = previous.urgent || liveBaseChanged;
+      if (autosaveQueueRef.current === trackedSave) {
+        autosaveSavingRef.current = previous.saving;
+      }
+      autosaveSuspendedRef.current = previous.suspended;
+      if (!previous.suspended && (previous.dirty || liveBaseChanged)) {
+        autosaveTimerRef.current = window.setTimeout(
+          () => flushAutosave(previous.urgent || liveBaseChanged),
+          liveBaseChanged ? 0 : AUTOSAVE_BASE_INTERVAL_MS,
+        );
+      }
+      if (isQuotaExceededLikeError(error)) {
+        throw new Error(
+          "The rendered PDF could not be saved because browser storage became full. Nothing was imported. Download a backup and free browser storage before trying again.",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+
+    if (autosaveQueueRef.current === trackedSave) {
+      autosaveSavingRef.current = previous.saving;
+    }
+    autosaveSuspendedRef.current = previous.suspended;
+    autosaveLastDurationMsRef.current = Math.max(
+      0,
+      performance.now() - saveStartedAt,
+    );
+    autosaveContentBytesRef.current = contentSize.totalBytes;
+    autosaveSnapshotRef.current = snapshot;
+    autosaveCoveredSnapshotRef.current = snapshot;
+    autosaveExitFlushSnapshotRef.current = null;
+    autosaveExitFlushQueuedRef.current = false;
+    autosaveDirtyRef.current = false;
+    autosaveUrgentRef.current = false;
+    autosaveLastQueuedAtRef.current = Date.now();
+    // The immediately following React publication is already durable and
+    // must not enqueue an identical full-project write.
+    skipNextAutosaveEffectRef.current = true;
+    setSaveStatus("saved");
+    // IndexedDB commit is the irreversible boundary. Cancellation before it
+    // aborts saveAutosave and never reaches this callback. Once commit
+    // succeeds, publish synchronously in the same microtask even if a newer
+    // intent has just advanced the generation; returning without publishing
+    // would leave durable storage ahead of the live editor. A newer intent
+    // remains ordered after this revision and may replace it normally.
+    options.publish();
+    return contentSize;
+  }, [flushAutosave]);
+
   const pausePublishedClassroomAlarmIdentities = useCallback((
     identities: readonly ClassroomAlarmIdentity[],
     now = Date.now(),
@@ -3967,6 +4504,15 @@ export default function App() {
     }
     window.requestAnimationFrame(() => flushAutosave(true));
   }, [api, commitCurrentLiveScenePersistence, flushAutosave, stageProjectMutationForAutosave]);
+  // Alarm activation is also used by the one-shot startup loader. Keep its
+  // callback stable when Excalidraw publishes a new imperative API, while
+  // still routing activation failures through the newest live-editor owner.
+  // Otherwise mounting the editor can restart startup autosave loading and a
+  // late second result can replace an edit made immediately after launch.
+  const pausePublishedClassroomAlarmIdentitiesRef = useRef(
+    pausePublishedClassroomAlarmIdentities,
+  );
+  pausePublishedClassroomAlarmIdentitiesRef.current = pausePublishedClassroomAlarmIdentities;
 
   const rollbackPreparedClassroomAlarmReceipts = useCallback(async (
     receipts: readonly ClassroomAlarmTransactionReceiptV1[],
@@ -4039,14 +4585,14 @@ export default function App() {
         // The matching project is paused below even when storage itself is
         // unavailable, so a partially activated generation never looks safe.
       }
-      pausePublishedClassroomAlarmIdentities(identities);
+      pausePublishedClassroomAlarmIdentitiesRef.current(identities);
       return false;
     } finally {
       for (const receipt of receipts) {
         classroomTimeStagedTransactionIdsRef.current.delete(receipt.transactionId);
       }
     }
-  }, [pausePublishedClassroomAlarmIdentities]);
+  }, []);
 
   const trackPreparedClassroomAlarmReceipts = useCallback((
     receipts: readonly ClassroomAlarmTransactionReceiptV1[],
@@ -4188,15 +4734,92 @@ export default function App() {
 
   useEffect(() => {
     if (isMathToolsOpen || isGeoGonOpen || !focusAfterMathToolsRef.current) return;
-    const focusTarget = focusAfterMathToolsRef.current;
-    focusAfterMathToolsRef.current = null;
-    const selector = focusTarget === "editor"
-      ? ".excalidraw"
-      : ".App-toolbar__extra-tools-trigger";
-    editorHostRef.current?.querySelector<HTMLElement>(selector)?.focus();
+    let animationFrameId: number | null = null;
+    let cancelled = false;
+    let focusedTarget: HTMLElement | null = null;
+    let focusedTargetKind: "editor" | "trigger" | null = null;
+    const retryDeadline = window.performance.now() + 2_000;
+
+    const finishExpiredFocusRequest = (focusTarget: "editor" | "trigger") => {
+      // A hidden/disabled toolbar can make its trigger legitimately absent.
+      // Leave keyboard users on the current editor instead of running a
+      // permanent animation loop. If even that target is unavailable, consume
+      // only the still-pending request so a later dialog close can start fresh.
+      if (focusTarget === "trigger") {
+        const host = editorHostRef.current;
+        const editor = host?.querySelector<HTMLElement>(".excalidraw") || null;
+        if (editor?.isConnected && host?.contains(editor)) {
+          editor.focus();
+        }
+      }
+      if (focusAfterMathToolsRef.current === focusTarget) {
+        focusAfterMathToolsRef.current = null;
+      }
+    };
+
+    const restoreFocus = () => {
+      if (cancelled) return;
+      const focusTarget = focusAfterMathToolsRef.current;
+      if (!focusTarget) return;
+      if (window.performance.now() >= retryDeadline) {
+        finishExpiredFocusRequest(focusTarget);
+        return;
+      }
+      const selector = focusTarget === "editor"
+        ? ".excalidraw"
+        : ".App-toolbar__extra-tools-trigger";
+      const host = editorHostRef.current;
+      const target = host?.querySelector<HTMLElement>(selector) || null;
+
+      if (!target || !target.isConnected || !host?.contains(target)) {
+        focusedTarget = null;
+        focusedTargetKind = null;
+        animationFrameId = window.requestAnimationFrame(restoreFocus);
+        return;
+      }
+
+      if (document.activeElement !== target) target.focus();
+      const currentHost = editorHostRef.current;
+      const currentTarget = currentHost?.querySelector<HTMLElement>(selector) || null;
+      const ownsFocus = (
+        currentTarget === target
+        && target.isConnected
+        && currentHost?.contains(target)
+        && document.activeElement === target
+      );
+      if (!ownsFocus) {
+        focusedTarget = null;
+        focusedTargetKind = null;
+        animationFrameId = window.requestAnimationFrame(restoreFocus);
+        return;
+      }
+
+      // Responsive Excalidraw layouts can replace the toolbar or editor root
+      // during the paint following a dialog close. Confirm that the exact
+      // currently mounted target still owns focus on a second frame before
+      // consuming the pending restoration request.
+      if (focusedTarget !== target || focusedTargetKind !== focusTarget) {
+        focusedTarget = target;
+        focusedTargetKind = focusTarget;
+        animationFrameId = window.requestAnimationFrame(restoreFocus);
+        return;
+      }
+
+      focusAfterMathToolsRef.current = null;
+    };
+
+    animationFrameId = window.requestAnimationFrame(restoreFocus);
+    return () => {
+      cancelled = true;
+      if (animationFrameId !== null) window.cancelAnimationFrame(animationFrameId);
+    };
   }, [isGeoGonOpen, isMathToolsOpen]);
 
   useEffect(() => {
+    // A project already published by an earlier startup pass is authoritative.
+    // This is a second, identity-independent fence against effect dependency
+    // drift ever launching another autosave load over a teacher's first edit.
+    if (projectRef.current) return;
     let cancelled = false;
     const controller = new AbortController();
     startupAutosaveAbortControllerRef.current = controller;
@@ -4240,6 +4863,14 @@ export default function App() {
             project: startupProject,
             pdfBytes: loaded.pdfBytes,
           };
+          // This is the exact durable baseline represented by IndexedDB. The
+          // startup projection may contain unsaved timer/active-scene changes,
+          // so admission checks compare candidates against the loaded payload
+          // rather than mistaking those live changes for already stored data.
+          autosaveContentBytesRef.current = getProjectContentSize(
+            loaded.project,
+            loaded.pdfBytes,
+          ).totalBytes;
           autosaveExitFlushSnapshotRef.current = null;
           autosaveCoveredSnapshotRef.current = null;
           autosaveDirtyRef.current = false;
@@ -4757,15 +5388,16 @@ export default function App() {
     api.addFiles(Object.values(displayScene.files));
     api.updateFrameRendering({ enabled: slideFramesVisibleRef.current, clip: false });
     api.history.clear();
+    const hydrationBaseline = normalizedHydrationChange(
+      scene,
+      canonicalElements,
+      api.getAppState(),
+      canonicalFiles,
+      transientDarkPdfFileIdsRef.current,
+    );
     sceneHydrationBaselineRef.current = {
       generation: hydrationGeneration,
-      pending: normalizedHydrationChange(
-        scene,
-        canonicalElements,
-        api.getAppState(),
-        canonicalFiles,
-        transientDarkPdfFileIdsRef.current,
-      ),
+      snapshot: snapshotSceneHydrationChange(hydrationBaseline),
     };
     sceneHydrationOuterFrameRef.current = window.requestAnimationFrame(() => {
       sceneHydrationOuterFrameRef.current = null;
@@ -4783,6 +5415,8 @@ export default function App() {
           || projectRef.current?.activeSceneId !== sceneId
         ) return;
         switchingSceneRef.current = false;
+        sceneInputBlockedRef.current = false;
+        setIsSceneInputBlocked(false);
         sceneHydrationBaselineRef.current = null;
         // The dark-PDF effect may have rendered while the replacement scene
         // was still behind the imperative editor boundary. Re-run it only
@@ -4856,7 +5490,7 @@ export default function App() {
     runSlideRotationAction,
   ]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!api || !project) return;
     const scene = project.scenes[project.activeSceneId];
     if (scene) loadSceneIntoEditor(scene);
@@ -4919,6 +5553,29 @@ export default function App() {
     if (nativeZenModeRef.current !== appState.zenModeEnabled) {
       nativeZenModeRef.current = appState.zenModeEnabled;
       setIsNativeZenMode(appState.zenModeEnabled);
+    }
+    if (presentationRef.current?.tool === "eraser" && api) {
+      const activeSceneId = activeSceneIdRef.current;
+      const protectedFrameIds = new Set(
+        projectRef.current?.slideOrder.flatMap((slide) => (
+          slide.sceneId === activeSceneId ? [slide.frameId] : []
+        )) ?? [],
+      );
+      const protectedElements = protectPresentationSlideFrameElements(
+        elements,
+        protectedFrameIds,
+        pendingScenePersistenceRef.current?.sceneId === activeSceneId
+          ? pendingScenePersistenceRef.current.elements as readonly ExcalidrawElement[]
+          : projectRef.current?.scenes[activeSceneId || ""]?.elements as readonly ExcalidrawElement[] | undefined,
+      );
+      if (protectedElements !== elements) {
+        api.updateScene({
+          elements: protectedElements,
+          captureUpdate: CaptureUpdateAction.NEVER,
+        });
+        api.setToast({ message: "The slide boundary is protected. That eraser gesture inside the slide was cancelled." });
+        return;
+      }
     }
     const isNativeImageExportOpen = appState.openDialog?.name === "imageExport";
     if (nativeImageExportOpenRef.current && !isNativeImageExportOpen) {
@@ -4992,11 +5649,21 @@ export default function App() {
       ) return current;
       return nextClassroomTimeSelection;
     });
-    if (nextClassroomTimeSelection?.metadata.kind === "pomodoro") {
-      setClassroomTimeActiveTarget("pomodoro");
-    } else if (nextClassroomTimeSelection?.metadata.kind === "timer") {
-      setClassroomTimeActiveTarget("timer");
-    }
+    setPresentationClassroomTimeSelection((remembered) => (
+      updateRememberedPresentationClassroomTimeSelection(
+        remembered,
+        nextClassroomTimeSelection,
+        {
+          projectId: projectRef.current?.id || null,
+          sceneId: hydratedSceneIdRef.current,
+        },
+      )
+    ));
+    setClassroomTimeActiveTarget((current) => classroomTimeActiveTargetAfterSelection(
+      current,
+      nextClassroomTimeSelection,
+      presentationRef.current !== null,
+    ));
     const containsBlockedContent = elements.some(
       (element) => isBlockedEmbeddedElementType(element.type) || !!element.link,
     );
@@ -5026,9 +5693,7 @@ export default function App() {
       );
     }
     const alarmAuthorityFenceIndex = classroomTimeAlarmAuthorityFenceRef.current.findIndex((fence) => (
-      fence.sceneId === fencedSceneId
-      && fence.elementFingerprint === elementFingerprint
-      && fence.fileFingerprint === fileFingerprint
+      classroomTimeTickFenceMatches(fence, fencedSceneId, elements, files)
     ));
     const alarmAuthorityPrepared = alarmAuthorityFenceIndex >= 0;
     if (alarmAuthorityPrepared) {
@@ -5052,7 +5717,7 @@ export default function App() {
         baseline
         && baseline.generation === sceneHydrationGenerationRef.current
         && scene
-        && scene.id === baseline.pending.sceneId
+        && scene.id === baseline.snapshot.sceneId
       ) {
         const normalized = normalizedHydrationChange(
           scene,
@@ -5061,7 +5726,7 @@ export default function App() {
           files,
           transientDarkPdfFileIdsRef.current,
         );
-        if (!hydrationChangesMatch(normalized, baseline.pending)) {
+        if (!hydrationChangeMatchesSnapshot(normalized, baseline.snapshot)) {
           // Keep only the newest callback. Synthetic hydration echoes match
           // the baseline and are ignored; a real edit is replayed after the
           // second hydration paint through queueScenePersistence().
@@ -5415,9 +6080,22 @@ export default function App() {
     setIsLibraryOpen(nextOpen);
   }, [api]);
 
-  const focusSidebarSearchInput = useCallback((selector: string) => {
+  const focusSidebarSearchInput = useCallback((
+    selector: string,
+    preserveFocusedControlWithin?: string,
+  ) => {
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
       const input = editorHostRef.current?.querySelector<HTMLInputElement>(selector);
+      const focusedElement = document.activeElement;
+      if (
+        input
+        && focusedElement instanceof HTMLElement
+        && focusedElement !== input
+        && preserveFocusedControlWithin
+        && focusedElement.closest(preserveFocusedControlWithin)
+      ) {
+        return;
+      }
       input?.focus();
       input?.select();
     }));
@@ -5432,7 +6110,10 @@ export default function App() {
       captureUpdate: CaptureUpdateAction.NEVER,
     });
     setIsProjectFindOpen(true);
-    focusSidebarSearchInput(".project-find-query");
+    // The sidebar can take two render frames to mount. Respect a user who
+    // deliberately reaches another Project Find control before that delayed
+    // autofocus runs instead of pulling focus back to the query.
+    focusSidebarSearchInput(".project-find-query", ".project-find-panel");
   }, [api, commitPendingScenePersistence, focusSidebarSearchInput]);
 
   const toggleProjectFind = useCallback(() => {
@@ -5839,7 +6520,10 @@ export default function App() {
     trackPreparedClassroomAlarmReceipts,
   ]);
 
-  const handleFile = useCallback(async (file: File) => {
+  const openFileAfterProtection = useCallback(async (
+    file: File,
+    compatibilityAttempt?: PdfCompatibilityAttempt,
+  ) => {
     const operation = beginFileOpenOperation();
     const isCurrentOperation = () => isCurrentFileOpenOperation(operation);
     busyCancelRef.current = () => {
@@ -5912,17 +6596,37 @@ export default function App() {
             Math.floor((MAX_PROJECT_BYTES - preflightSize.totalBytes - file.size) * 3 / 4),
           ),
         );
-        const { importPdf } = await import("./lib/pdf/import-pdf");
-        const imported = await importPdf(file, {
+        // Only hard-block on bytes that must exist in IndexedDB. Raster output
+        // varies sharply by PDF, so treating its maximum envelope as required
+        // would reject safe classroom PDFs long before the actual project
+        // budget is reached.
+        await assessAdditionalStorage(file.size, operation.signal);
+        if (!isCurrentOperation()) return;
+        const importOptions = {
           maxEncodedBytesPerDocument,
           maxPages,
           maxRasterPixelsForImport: remainingRaster.pixels,
-          onProgress: (progress) => {
+          onProgress: (progress: Readonly<PdfOperationProgress>) => {
             if (isCurrentOperation()) setBusyMessage(pdfOperationProgressMessage(progress));
           },
           rasterBudget,
           signal: operation.signal,
-        });
+        };
+        const imported = await (compatibilityAttempt
+          ? (await import("./lib/pdf/import-compatibility")).importPdfCompatibilityCopy(
+            compatibilityAttempt.originalFile,
+            file,
+            {
+              ...importOptions,
+              confirmation: {
+                accepted: true,
+                flatteningAcknowledged: true,
+              },
+              originalFailure: compatibilityAttempt.originalFailure,
+              rejectedOriginalInspection: compatibilityAttempt.rejectedOriginalInspection,
+            },
+          ).then((result) => result.imported)
+          : (await import("./lib/pdf/import-pdf")).importPdf(file, importOptions));
         if (!isCurrentOperation()) return;
         const scenes = Object.fromEntries(imported.scenes.map((scene) => [scene.id, scene]));
         const importedPageIds = imported.scenes.map((scene) => scene.id);
@@ -5935,6 +6639,9 @@ export default function App() {
             || projectRef.current?.activeSceneId
             || "",
         ) || createBlankProject();
+        const baseManifestHash = autosaveManifestHash(base);
+        const basePdfBytes = pdfBytesRef.current;
+        if (!baseManifestHash) throw new Error("The current board could not be fingerprinted safely.");
         assertProjectCanAcceptPdfPages(base, imported.scenes.length);
         const baseRasterUsage = base === preflightProject
           ? preflightRasterUsage
@@ -5945,7 +6652,7 @@ export default function App() {
         if (!isCurrentOperation()) return;
         addLocalProjectRasterUsage(baseRasterUsage, imported.rasterUsage, rasterBudget);
         const nextPdfBytes = {
-          ...pdfBytesRef.current,
+          ...basePdfBytes,
           [imported.source.id]: imported.bytes,
         };
         const nextProject: ClassroomProject = {
@@ -5970,46 +6677,53 @@ export default function App() {
           operation.signal,
         );
         if (!isCurrentOperation()) return;
-        if (replaceProtectedAutosave) {
-          setBusyMessage(`Saving ${file.name} locally…`);
-          const contentSize = await saveAutosave(nextProject, nextPdfBytes, {
-            forceOverwrite: true,
-            prepared: true,
-            replacePdfBlobs: true,
-            signal: operation.signal,
-          });
-          if (!isCurrentOperation()) return;
-          autosaveContentBytesRef.current = contentSize.totalBytes;
-          autosaveCoveredSnapshotRef.current = {
-            project: nextProject,
-            pdfBytes: nextPdfBytes,
-          };
-          autosaveDirtyRef.current = false;
-          autosaveLastQueuedAtRef.current = Date.now();
-          skipNextAutosaveEffectRef.current = true;
-          setErrorMessage(null);
-          setSaveStatus("saved");
-        }
-        stopPresentationRef.current?.();
-        beginSceneHydration();
-        pendingFrameIdRef.current = null;
-        pendingProjectSearchTargetRef.current = null;
-        pendingCreatedFrameIdRef.current = null;
-        pendingSlideFrameActionRef.current = null;
-        pendingSlideRotationActionRef.current = null;
-        setSlideRotationTargetId(null);
-        autosaveSuspendedRef.current = false;
-        autosaveSuspensionGenerationRef.current = null;
-        setAutosaveRecoveryKind(null);
-        setAutosaveRecoveryDetail(null);
-        pdfBytesRef.current = nextPdfBytes;
-        projectRef.current = nextProject;
-        activeSceneIdRef.current = nextProject.activeSceneId;
-        setPdfBytes(nextPdfBytes);
-        setProject(nextProject);
-        setWorkspaceMode("pdf");
-        setEquationEditor(null);
-        setMermaidEditor(null);
+        const storageAdmission = getPdfStorageAdmissionRequirement(
+          base,
+          basePdfBytes,
+          nextProject,
+          nextPdfBytes,
+          { persistedContentBytes: autosaveContentBytesRef.current },
+        );
+        await assessAdditionalStorage(storageAdmission.requiredBytes, operation.signal);
+        if (!isCurrentOperation()) return;
+        // Rendering and validation remain cancellable. The atomic IndexedDB
+        // transaction below is the explicit commit boundary: once it begins,
+        // the UI no longer offers a cancellation it could not honestly
+        // guarantee after transaction completion.
+        busyCancelRef.current = null;
+        setBusyCanCancel(false);
+        setBusyMessage(`Saving ${file.name} locally…`);
+        await persistPdfCandidateBeforePublication(nextProject, nextPdfBytes, {
+          forceOverwrite: replaceProtectedAutosave,
+          isBaseCurrent: () => (
+            pdfBytesRef.current === basePdfBytes
+            && autosaveManifestHash(projectRef.current ?? undefined) === baseManifestHash
+          ),
+          publish: () => {
+            setErrorMessage(null);
+            stopPresentationRef.current?.();
+            beginSceneHydration();
+            pendingFrameIdRef.current = null;
+            pendingProjectSearchTargetRef.current = null;
+            pendingCreatedFrameIdRef.current = null;
+            pendingSlideFrameActionRef.current = null;
+            pendingSlideRotationActionRef.current = null;
+            setSlideRotationTargetId(null);
+            autosaveSuspendedRef.current = false;
+            autosaveSuspensionGenerationRef.current = null;
+            setAutosaveRecoveryKind(null);
+            setAutosaveRecoveryDetail(null);
+            pdfBytesRef.current = nextPdfBytes;
+            projectRef.current = nextProject;
+            activeSceneIdRef.current = nextProject.activeSceneId;
+            setPdfBytes(nextPdfBytes);
+            setProject(nextProject);
+            setWorkspaceMode("pdf");
+            setEquationEditor(null);
+            setMermaidEditor(null);
+          },
+          signal: operation.signal,
+        });
       } else if (
         lowerName.endsWith(".patterdraw")
         || lowerName.endsWith(".canvasclassroom")
@@ -6048,7 +6762,63 @@ export default function App() {
       }
     } catch (error) {
       if (isCurrentOperation() && !isAbortLikeError(error)) {
-        setErrorMessage(error instanceof Error ? error.message : String(error));
+        const { getPdfImportRecovery } = await import("./lib/pdf/import-compatibility");
+        if (!isCurrentOperation()) return;
+        if (compatibilityAttempt) {
+          // Keep the original one-shot recovery decision available when a
+          // teacher picks the wrong conversion (wrong page count, identical
+          // bytes, or another unsafe PDF). This offers another file choice,
+          // never a conversion-of-a-conversion safety bypass.
+          const originalRecovery = getPdfImportRecovery(compatibilityAttempt.originalFailure);
+          setErrorMessage(
+            `That converted copy could not be used: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          if (originalRecovery?.kind === "choose-converted-copy") {
+            setPendingPdfCompatibilityImport({
+              context: "direct",
+              failure: compatibilityAttempt.originalFailure,
+              file: compatibilityAttempt.originalFile,
+              processing: false,
+              recovery: originalRecovery,
+              rejectedOriginalInspection: compatibilityAttempt.rejectedOriginalInspection,
+            });
+          }
+          return;
+        }
+        const recovery = getPdfImportRecovery(error);
+        if (recovery) {
+          let rejectedOriginalInspection: PendingPdfCompatibilityImport["rejectedOriginalInspection"];
+          if (recovery.kind === "choose-converted-copy") {
+            try {
+              const { inspectPdfFile } = await import("./lib/pdf/import-pdf");
+              const inspection = await inspectPdfFile(file, { signal: operation.signal });
+              rejectedOriginalInspection = {
+                pageCount: inspection.pageCount,
+                sha256: inspection.sha256,
+              };
+            } catch (inspectionError) {
+              if (isCurrentOperation() && !isAbortLikeError(inspectionError)) {
+                setErrorMessage(inspectionError instanceof Error
+                  ? inspectionError.message
+                  : String(inspectionError));
+              }
+              return;
+            }
+          }
+          if (isCurrentOperation()) {
+            setErrorMessage(null);
+            setPendingPdfCompatibilityImport({
+              context: "direct",
+              failure: error,
+              file,
+              processing: false,
+              recovery,
+              ...(rejectedOriginalInspection ? { rejectedOriginalInspection } : {}),
+            });
+          }
+        } else {
+          setErrorMessage(error instanceof Error ? error.message : String(error));
+        }
       }
     } finally {
       if (fileOpenGenerationRef.current === operation.generation) {
@@ -6059,6 +6829,7 @@ export default function App() {
       }
     }
   }, [
+    assessAdditionalStorage,
     autosaveRecoveryDetail,
     autosaveRecoveryKind,
     beginFileOpenOperation,
@@ -6066,26 +6837,499 @@ export default function App() {
     commitLiveScenePersistence,
     isCurrentFileOpenOperation,
     openLoadedProject,
+    persistPdfCandidateBeforePublication,
   ]);
 
-  const saveProjectFile = useCallback(async () => {
+  const handleFile = useCallback(async (file: File) => {
+    const lowerName = file.name.toLowerCase();
+    const replacesProject = lowerName.endsWith(".patterdraw")
+      || lowerName.endsWith(".canvasclassroom")
+      || lowerName.endsWith(".excalidraw")
+      || file.type === "application/vnd.excalidraw+json";
+    if (replacesProject) {
+      const current = commitLiveScenePersistence(
+        hydratedSceneIdRef.current
+          || activeSceneIdRef.current
+          || projectRef.current?.activeSceneId
+          || "",
+      ) ?? projectRef.current;
+      if (current && projectNeedsSwitchProtection(current)) {
+        setPendingProjectSwitch({ file, processing: false });
+        return;
+      }
+    }
+    await openFileAfterProtection(file);
+  }, [commitLiveScenePersistence, openFileAfterProtection]);
+
+  const saveProjectFile = useCallback(async (): Promise<boolean> => {
     const currentProject = commitCurrentLiveScenePersistence();
-    if (!currentProject) return;
+    if (!currentProject) return false;
+    const operation = beginFileOpenOperation();
     const exportPdfBytes = clonePdfBytes(pdfBytesRef.current);
+    busyCancelRef.current = () => {
+      if (fileOpenGenerationRef.current !== operation.generation) return;
+      fileOpenAbortControllerRef.current?.abort();
+      busyCancelRef.current = null;
+      setBusyCanCancel(false);
+    };
+    setBusyCanCancel(true);
     setBusyMessage("Preparing project backup…");
     try {
       await afterNextPaint();
-      const bytes = await encodePreparedProjectFile(currentProject, exportPdfBytes);
+      const bytes = await encodePreparedProjectFile(
+        currentProject,
+        exportPdfBytes,
+        undefined,
+        { signal: operation.signal },
+      );
+      if (!isCurrentFileOpenOperation(operation)) return false;
       downloadBlob(
         new Blob([bytesForBlob(bytes)], { type: "application/vnd.patterdraw+zip" }),
         `${safeFileStem(currentProject.title)}.patterdraw`,
       );
+      return true;
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
+      if (!isAbortLikeError(error)) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+      return false;
     } finally {
-      setBusyMessage(null);
+      if (fileOpenGenerationRef.current === operation.generation) {
+        busyCancelRef.current = null;
+        setBusyCanCancel(false);
+        setBusyMessage(null);
+      }
     }
-  }, [commitCurrentLiveScenePersistence]);
+  }, [beginFileOpenOperation, commitCurrentLiveScenePersistence, isCurrentFileOpenOperation]);
+
+  const cancelPendingProjectSwitch = useCallback(() => {
+    if (pendingProjectSwitch?.processing) return;
+    setPendingProjectSwitch(null);
+    if (inputRef.current) inputRef.current.value = "";
+  }, [pendingProjectSwitch?.processing]);
+
+  const protectCurrentBoardAndOpen = useCallback(async (downloadBackup: boolean) => {
+    const pending = pendingProjectSwitch;
+    if (!pending || pending.processing) return;
+    const operation = beginFileOpenOperation();
+    const isCurrentOperation = () => isCurrentFileOpenOperation(operation);
+    setPendingProjectSwitch({ ...pending, processing: true });
+    busyCancelRef.current = () => {
+      if (fileOpenGenerationRef.current !== operation.generation) return;
+      fileOpenAbortControllerRef.current?.abort();
+      busyCancelRef.current = null;
+      setBusyCanCancel(false);
+      setBusyMessage(null);
+    };
+    setBusyCanCancel(true);
+    setErrorMessage(null);
+    let portableBackupRequested = false;
+    try {
+      const currentProject = commitCurrentLiveScenePersistence();
+      if (!currentProject || !projectNeedsSwitchProtection(currentProject)) {
+        setPendingProjectSwitch(null);
+        await openFileAfterProtection(pending.file);
+        return;
+      }
+      flushAutosave(true);
+      await autosaveQueueRef.current.catch(() => undefined);
+      if (!isCurrentOperation()) return;
+      const currentPdfBytes = clonePdfBytes(pdfBytesRef.current);
+      if (downloadBackup) {
+        setBusyMessage("Preparing a portable backup before opening…");
+        const bytes = await encodePreparedProjectFile(
+          currentProject,
+          currentPdfBytes,
+          undefined,
+          { signal: operation.signal },
+        );
+        if (!isCurrentOperation()) return;
+        downloadBlob(
+          new Blob([bytesForBlob(bytes)], { type: "application/vnd.patterdraw+zip" }),
+          `${safeFileStem(currentProject.title)}.patterdraw`,
+        );
+        // Browsers expose the download request, not a durable acknowledgement
+        // that the file reached disk. Local recovery must still succeed before
+        // this tab is allowed to replace the only live board.
+        portableBackupRequested = true;
+      }
+
+      setBusyMessage("Protecting the current board locally…");
+      try {
+        const {
+          listAutosaveHistorySnapshots,
+          saveAutosaveHistorySnapshot,
+        } = await import("./lib/autosave-history");
+        const saved = await saveAutosaveHistorySnapshot({
+          project: currentProject,
+          pdfBytes: currentPdfBytes,
+        }, { signal: operation.signal });
+        if (!isCurrentOperation()) return;
+        if (!saved.retained) {
+          throw new Error(
+            "A newer recovery-history update won the local storage race, so this exact board was not retained. The current board remains open. Try opening the replacement again.",
+          );
+        }
+        const retained = await listAutosaveHistorySnapshots();
+        if (!isCurrentOperation()) return;
+        setRecoverySnapshots(
+          retained.length ? retained : saved.retained ? [saved.summary] : [],
+        );
+        setRecoveryHistoryUnreadable(false);
+        setLocalReadinessDismissed(false);
+        setDismissedRecoverySnapshotId(null);
+      } catch (historyError) {
+        if (isAbortLikeError(historyError)) throw historyError;
+        const detail = historyError instanceof Error ? historyError.message : String(historyError);
+        throw new Error(portableBackupRequested
+          ? `PatterDraw requested the portable backup download, but cannot verify that it was saved. Local recovery history also failed: ${detail} The current board remains open. Check Downloads, repair local storage, and try again.`
+          : `The current board could not be protected in local recovery history: ${detail} The current board remains open. Download a portable backup and try again.`);
+      }
+      if (!isCurrentOperation()) return;
+      setPendingProjectSwitch(null);
+      await openFileAfterProtection(pending.file);
+    } catch (error) {
+      if (isCurrentOperation() && !isAbortLikeError(error)) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (fileOpenGenerationRef.current === operation.generation) {
+        busyCancelRef.current = null;
+        setBusyCanCancel(false);
+        setBusyMessage(null);
+        setPendingProjectSwitch((current) => current ? { ...current, processing: false } : null);
+      }
+    }
+  }, [
+    api,
+    beginFileOpenOperation,
+    commitCurrentLiveScenePersistence,
+    flushAutosave,
+    isCurrentFileOpenOperation,
+    openFileAfterProtection,
+    pendingProjectSwitch,
+  ]);
+
+  const cancelPdfCompatibilityImport = useCallback(() => {
+    if (pendingPdfCompatibilityImport?.processing) return;
+    setPendingPdfCompatibilityImport(null);
+    if (inputRef.current) inputRef.current.value = "";
+  }, [pendingPdfCompatibilityImport?.processing]);
+
+  const retryPdfCompatibilitySafetyCheck = useCallback(async () => {
+    const pending = pendingPdfCompatibilityImport;
+    if (!pending || pending.processing) return;
+    setPendingPdfCompatibilityImport(null);
+    if (pending.context === "batch") {
+      await submitPdfInsertionRef.current?.(pending.submission);
+      return;
+    }
+    await openFileAfterProtection(pending.file);
+  }, [openFileAfterProtection, pendingPdfCompatibilityImport]);
+
+  const importPdfCompatibilityCopy = useCallback(async (convertedFile: File) => {
+    const pending = pendingPdfCompatibilityImport;
+    if (!pending || pending.processing) return;
+    if (!pending.rejectedOriginalInspection) {
+      setErrorMessage("The rejected PDF could not be identified for compatibility-copy import.");
+      return;
+    }
+    const rejectedOriginalInspection = pending.rejectedOriginalInspection;
+    if (pending.context === "direct") {
+      setPendingPdfCompatibilityImport(null);
+      await openFileAfterProtection(convertedFile, {
+        originalFailure: pending.failure,
+        originalFile: pending.file,
+        rejectedOriginalInspection,
+      });
+      return;
+    }
+
+    const insertion = pendingPdfInsert;
+    const source = insertion?.files.find((file) => file.id === pending.sourceInstanceId);
+    const originalFile = source?.compatibilityOriginal?.file ?? source?.file;
+    if (!insertion || !source || !originalFile || originalFile !== pending.file) {
+      setPendingPdfCompatibilityImport(null);
+      setErrorMessage("The PDF insertion changed before its compatibility copy could be checked. Select the PDFs again.");
+      return;
+    }
+    const operation = beginFileOpenOperation();
+    const isCurrentOperation = () => isCurrentFileOpenOperation(operation);
+    busyCancelRef.current = () => {
+      if (fileOpenGenerationRef.current !== operation.generation) return;
+      fileOpenAbortControllerRef.current?.abort();
+      busyCancelRef.current = null;
+      setBusyCanCancel(false);
+      setBusyMessage(null);
+    };
+    setBusyCanCancel(true);
+    setBusyMessage(`Checking ${convertedFile.name}…`);
+    setPendingPdfCompatibilityImport({ ...pending, processing: true });
+    setErrorMessage(null);
+    try {
+      const { inspectPdfFile } = await import("./lib/pdf/import-pdf");
+      const original = await inspectPdfFile(originalFile, { signal: operation.signal });
+      if (!isCurrentOperation()) return;
+      if (
+        original.sha256 !== rejectedOriginalInspection.sha256
+        || original.pageCount !== rejectedOriginalInspection.pageCount
+      ) {
+        throw new Error("The original PDF changed after its rejected import attempt.");
+      }
+      const converted = await inspectPdfFile(convertedFile, { signal: operation.signal });
+      if (!isCurrentOperation()) return;
+      if (converted.sha256 === original.sha256) {
+        throw new Error("The selected compatibility copy is identical to the rejected original PDF.");
+      }
+      if (converted.pageCount !== original.pageCount) {
+        throw new Error(
+          `The compatibility copy has ${converted.pageCount} pages, but the original has ${original.pageCount}. Convert the complete PDF so page order stays exact.`,
+        );
+      }
+      const nextInsertion: PendingPdfInsert = {
+        ...insertion,
+        files: insertion.files.map((file) => file.id === source.id
+          ? {
+            ...file,
+            compatibilityAttempted: true,
+            compatibilityOriginal: source.compatibilityOriginal ?? {
+              failure: pending.failure,
+              file: originalFile,
+              rejectedOriginalInspection,
+            },
+            file: convertedFile,
+            name: `${originalFile.name.replace(/\.pdf$/i, "")} (visual compatibility copy).pdf`,
+            pageCount: converted.pageCount,
+            sha256: converted.sha256,
+          }
+          : file),
+      };
+      // Release the precheck operation before the atomic batch importer owns
+      // cancellation and progress. The batch dialog remains in place behind
+      // this one, and no project state has changed yet.
+      busyCancelRef.current = null;
+      setBusyCanCancel(false);
+      setBusyMessage(null);
+      setPendingPdfInsert(nextInsertion);
+      setPendingPdfCompatibilityImport(null);
+      await submitPdfInsertionRef.current?.(pending.submission, nextInsertion);
+    } catch (error) {
+      if (isCurrentOperation() && !isAbortLikeError(error)) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+        setPendingPdfCompatibilityImport((current) => current
+          ? { ...current, processing: false }
+          : null);
+      }
+    } finally {
+      if (fileOpenGenerationRef.current === operation.generation) {
+        busyCancelRef.current = null;
+        setBusyCanCancel(false);
+        setBusyMessage(null);
+      }
+    }
+  }, [
+    beginFileOpenOperation,
+    isCurrentFileOpenOperation,
+    openFileAfterProtection,
+    pendingPdfCompatibilityImport,
+    pendingPdfInsert,
+  ]);
+
+  const recoverPreviousBoard = useCallback(async (snapshotId: string) => {
+    const recovery = recoverySnapshots.find((entry) => entry.snapshotId === snapshotId);
+    if (!recovery || localReadinessBusy) return;
+    if (!window.confirm(
+      `Recover “${recovery.title}”? PatterDraw will protect the current board locally before replacing it.`,
+    )) return;
+    const operation = beginFileOpenOperation();
+    const isCurrentOperation = () => isCurrentFileOpenOperation(operation);
+    busyCancelRef.current = () => {
+      if (fileOpenGenerationRef.current !== operation.generation) return;
+      fileOpenAbortControllerRef.current?.abort();
+      busyCancelRef.current = null;
+      setBusyCanCancel(false);
+      setBusyMessage(null);
+    };
+    setBusyCanCancel(true);
+    setLocalReadinessBusy(true);
+    setErrorMessage(null);
+    setRecoveryHistoryStatus(null);
+    setBusyMessage(`Checking recovery copy “${recovery.title}”…`);
+    try {
+      const {
+        listAutosaveHistorySnapshots,
+        loadAutosaveHistorySnapshotWithFallback,
+        saveAutosaveHistorySnapshot,
+      } = await import("./lib/autosave-history");
+      const fallback = await loadAutosaveHistorySnapshotWithFallback(
+        recovery.snapshotId,
+        { signal: operation.signal },
+      );
+      if (!isCurrentOperation()) return;
+      if (fallback.failed.length) {
+        setDamagedRecoverySnapshotIds((current) => new Set([
+          ...current,
+          ...fallback.failed.map((failure) => failure.snapshotId),
+        ]));
+      }
+      const actualRecovery = fallback.summary;
+      if (actualRecovery.snapshotId !== recovery.snapshotId) {
+        const fallbackMessage = `“${recovery.title}” is damaged or incomplete. An older usable copy, “${actualRecovery.title}” from ${new Date(actualRecovery.capturedAt).toLocaleString()}, is available.`;
+        setRecoveryHistoryStatus({ kind: "warning", message: fallbackMessage });
+        if (!window.confirm(`${fallbackMessage} Recover the older copy instead?`)) return;
+      }
+
+      const currentProject = commitCurrentLiveScenePersistence();
+      if (currentProject && projectNeedsSwitchProtection(currentProject)) {
+        flushAutosave(true);
+        await autosaveQueueRef.current.catch(() => undefined);
+        if (!isCurrentOperation()) return;
+        setBusyMessage("Protecting the current board before recovery…");
+        const saved = await saveAutosaveHistorySnapshot({
+          project: currentProject,
+          pdfBytes: clonePdfBytes(pdfBytesRef.current),
+        }, { signal: operation.signal });
+        if (!isCurrentOperation()) return;
+        if (!saved.retained) {
+          throw new Error(
+            "A newer recovery-history update won the local storage race, so this exact board was not retained. The current board remains open. Try recovery again.",
+          );
+        }
+        const retained = await listAutosaveHistorySnapshots();
+        if (!isCurrentOperation()) return;
+        setRecoverySnapshots(
+          retained.length ? retained : saved.retained ? [saved.summary] : [],
+        );
+        setRecoveryHistoryUnreadable(false);
+        setLocalReadinessDismissed(false);
+        setDismissedRecoverySnapshotId(null);
+      }
+
+      setBusyMessage(`Recovering “${actualRecovery.title}”…`);
+      const opened = await openLoadedProject(fallback.loaded, operation, false);
+      if (opened && isCurrentOperation()) {
+        setDismissedRecoverySnapshotId(actualRecovery.snapshotId);
+        setIsRecoveryHistoryOpen(false);
+        setRecoveryHistoryStatus(null);
+      }
+    } catch (error) {
+      if (isCurrentOperation() && !isAbortLikeError(error)) {
+        const failed = error && typeof error === "object" && "failed" in error
+          ? (error as { failed?: unknown }).failed
+          : null;
+        if (Array.isArray(failed)) {
+          const failedIds = failed.flatMap((failure) => (
+            failure
+            && typeof failure === "object"
+            && "snapshotId" in failure
+            && typeof failure.snapshotId === "string"
+              ? [failure.snapshotId]
+              : []
+          ));
+          if (failedIds.length) {
+            setDamagedRecoverySnapshotIds((current) => new Set([...current, ...failedIds]));
+          }
+        }
+        const detail = error instanceof Error ? error.message : String(error);
+        setRecoveryHistoryStatus({ kind: "error", message: detail });
+        setErrorMessage(detail);
+      }
+    } finally {
+      if (fileOpenGenerationRef.current === operation.generation) {
+        busyCancelRef.current = null;
+        setBusyCanCancel(false);
+        setBusyMessage(null);
+        setLocalReadinessBusy(false);
+      }
+    }
+  }, [
+    beginFileOpenOperation,
+    commitCurrentLiveScenePersistence,
+    flushAutosave,
+    isCurrentFileOpenOperation,
+    localReadinessBusy,
+    openLoadedProject,
+    recoverySnapshots,
+  ]);
+
+  const openRecoveryHistory = useCallback((returnFocusTarget?: HTMLElement | null) => {
+    recoveryHistoryReturnFocusRef.current = returnFocusTarget
+      ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    setRecoveryHistoryStatus(null);
+    setIsRecoveryHistoryOpen(true);
+    void import("./lib/autosave-history")
+      .then(({ listAutosaveHistorySnapshots }) => listAutosaveHistorySnapshots())
+      .then((entries) => {
+        setRecoverySnapshots(entries);
+        setRecoveryHistoryUnreadable(false);
+        const retainedIds = new Set(entries.map((entry) => entry.snapshotId));
+        setDamagedRecoverySnapshotIds((current) => new Set(
+          [...current].filter((snapshotId) => retainedIds.has(snapshotId)),
+        ));
+      })
+      .catch((error) => {
+        setRecoveryHistoryUnreadable(true);
+        setRecoveryHistoryStatus({
+          kind: "error",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }, []);
+
+  const deleteRecoverySnapshot = useCallback(async (snapshotId: string) => {
+    if (localReadinessBusy) return;
+    setLocalReadinessBusy(true);
+    setRecoveryHistoryStatus(null);
+    try {
+      const { deleteAutosaveHistorySnapshots } = await import("./lib/autosave-history");
+      const result = await deleteAutosaveHistorySnapshots([snapshotId]);
+      setRecoverySnapshots(result.entries);
+      setRecoveryHistoryUnreadable(false);
+      setDamagedRecoverySnapshotIds((current) => {
+        const next = new Set(current);
+        next.delete(snapshotId);
+        return next;
+      });
+      setDismissedRecoverySnapshotId((current) => current === snapshotId ? null : current);
+      setRecoveryHistoryStatus({
+        kind: "info",
+        message: `Deleted 1 recovery copy${result.orphanedPdfSha256s.length ? " and its unused source PDF data" : ""}.`,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setRecoveryHistoryStatus({ kind: "error", message: detail });
+      setErrorMessage(detail);
+    } finally {
+      setLocalReadinessBusy(false);
+    }
+  }, [localReadinessBusy]);
+
+  const clearRecoveryHistory = useCallback(async () => {
+    if (localReadinessBusy) return;
+    const visibleCopyCount = recoverySnapshots.length;
+    setLocalReadinessBusy(true);
+    setRecoveryHistoryStatus(null);
+    try {
+      const { clearAutosaveHistorySnapshots } = await import("./lib/autosave-history");
+      const result = await clearAutosaveHistorySnapshots();
+      setRecoverySnapshots(result.entries);
+      setRecoveryHistoryUnreadable(false);
+      setDamagedRecoverySnapshotIds(new Set());
+      setDismissedRecoverySnapshotId(null);
+      setRecoveryHistoryStatus({
+        kind: "info",
+        message: recoveryHistoryUnreadable
+          ? "Cleared all local recovery data and repaired the history index. Your current board was not changed."
+          : `Deleted ${visibleCopyCount} recovery ${visibleCopyCount === 1 ? "copy" : "copies"}. Your current board was not changed.`,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setRecoveryHistoryStatus({ kind: "error", message: detail });
+      setErrorMessage(detail);
+    } finally {
+      setLocalReadinessBusy(false);
+    }
+  }, [localReadinessBusy, recoveryHistoryUnreadable, recoverySnapshots.length]);
 
   const resumeAutosaveWithCurrentBoard = useCallback(async () => {
     const currentProject = commitCurrentLiveScenePersistence();
@@ -6201,6 +7445,13 @@ export default function App() {
         ),
         onProgress: (progress: PdfOperationProgress) => {
           if (!controller.signal.aborted && pdfExportAbortControllerRef.current === controller) {
+            if (progress.phase === "saving") {
+              // pdf-lib cannot interrupt final serialization. Remove the
+              // Cancel affordance synchronously so the UI never claims that
+              // this last memory-bound step stopped while it is still running.
+              busyCancelRef.current = null;
+              setBusyCanCancel(false);
+            }
             setBusyMessage(pdfOperationProgressMessage(progress));
           }
         },
@@ -6569,11 +7820,13 @@ export default function App() {
       && classroomTimeWidgetOwnerId(element) === ownerId
       && classroomTimeWidgetMetadata(element) !== null
     ))?.id;
-    api.setActiveTool({ type: "selection" });
     classroomTimeAlarmAuthorityFenceRef.current.push({
       sceneId,
       elementFingerprint: classroomTimeElementFingerprint(reconciled.elements),
       fileFingerprint: classroomTimeFileFingerprint(api.getFiles()),
+      expectedDisplayContentFingerprint: classroomTimeDisplayTickContentFingerprint(
+        reconciled.elements,
+      ),
     });
     if (classroomTimeAlarmAuthorityFenceRef.current.length > 8) {
       classroomTimeAlarmAuthorityFenceRef.current.shift();
@@ -6778,7 +8031,7 @@ export default function App() {
           if (cancellation.status !== "persisted") {
             throw new Error("The widget could not be updated because its alarm changes could not be saved durably.");
           }
-          if (!isCurrentClassroomTimeAsyncOperation(operationFence)) {
+          if (!isCurrentClassroomTimeAsyncOperation(operationFence, true)) {
             pauseUnauthorizedLiveClassroomTimeWidgets();
             return;
           }
@@ -7003,7 +8256,9 @@ export default function App() {
     command: ClassroomTimeOverlayCommand,
     target: ClassroomTimeOverlayTarget,
   ) => {
-    const selection = selectedClassroomTime;
+    const selection = presentationRef.current
+      ? presentationClassroomTimeSelection
+      : selectedClassroomTime;
     if (!selection) return;
     setClassroomTimeActiveTarget(target);
     void (async () => {
@@ -7011,9 +8266,31 @@ export default function App() {
       let stagedReceipt: ClassroomAlarmTransactionReceiptV1 | null = null;
       let stagedIdentity: ClassroomAlarmIdentity | null = null;
       try {
-        if (command === "start") await prepareClassroomAlarmAudio();
         operationFence = beginClassroomTimeAsyncOperation();
         if (!operationFence) return;
+        const alarmEnabled = (
+          selection.metadata.kind === "timer"
+          || selection.metadata.kind === "pomodoro"
+          || selection.metadata.kind === "dashboard"
+        ) && selection.metadata.alarm.enabled;
+        if (command === "start") {
+          let preparationStatus: "blocked" | "ready" | "unavailable" = "unavailable";
+          try {
+            preparationStatus = (await prepareClassroomAlarmAudio()).status;
+          } catch {
+            // The countdown is still useful without audio. The visible warning
+            // below keeps the silent-alarm risk explicit before time is up.
+          }
+          if (alarmEnabled) {
+            const preferences = classroomTimePreferencesRef.current;
+            const warning = classroomAlarmStartWarning(
+              preparationStatus,
+              preferences.muted,
+              preferences.masterVolume,
+            );
+            if (warning) setErrorMessage(warning);
+          }
+        }
         if (!isCurrentClassroomTimeAsyncOperation(operationFence, true)) return;
         if (!api) throw new Error("The classroom time widget is unavailable.");
         const currentProject = projectRef.current;
@@ -7097,6 +8374,15 @@ export default function App() {
           }
           throw new Error("That classroom time widget is no longer available.");
         }
+        setPresentationClassroomTimeSelection((remembered) => (
+          updateRememberedPresentationClassroomTimeSelection(remembered, {
+            ...selection,
+            metadata,
+          }, {
+            projectId: projectRef.current?.id || null,
+            sceneId: hydratedSceneIdRef.current,
+          })
+        ));
         if (stagedReceipt) {
           const publishedReceipt = stagedReceipt;
           if (!await activatePublishedClassroomAlarmReceipts([publishedReceipt])) {
@@ -7126,6 +8412,7 @@ export default function App() {
     isCurrentClassroomTimeAsyncOperation,
     pausePublishedClassroomAlarmIdentities,
     pauseUnauthorizedLiveClassroomTimeWidgets,
+    presentationClassroomTimeSelection,
     rollbackPreparedClassroomAlarmReceipts,
     selectedClassroomTime,
     trackPreparedClassroomAlarmReceipts,
@@ -7211,13 +8498,17 @@ export default function App() {
         if (cancellation.status !== "persisted") {
           throw new Error("The widget could not be converted because its alarms could not be cancelled durably.");
         }
-        if (!isCurrentClassroomTimeAsyncOperation(operationFence)) {
+        if (!isCurrentClassroomTimeAsyncOperation(operationFence, true)) {
           pauseUnauthorizedLiveClassroomTimeWidgets();
           return;
         }
+        const baseProject = commitCurrentLiveScenePersistence();
+        const liveSceneId = hydratedSceneIdRef.current;
+        const scene = liveSceneId ? baseProject?.scenes[liveSceneId] : undefined;
+        if (!baseProject || liveSceneId !== sceneId || !scene) return;
         const renderContext = classroomTimeRenderContext(
           api.getSceneElements(),
-          currentProject.projectCalendar,
+          baseProject.projectCalendar,
           EMPTY_DEVICE_CLASSROOM_CALENDAR,
           now,
           editorThemeRef.current,
@@ -7228,6 +8519,19 @@ export default function App() {
           now,
           renderContext,
         );
+        const candidate = projectWithPendingScene(baseProject, {
+          sceneId,
+          elements,
+          appState: api.getAppState(),
+          files: persistentFilesForScene(
+            scene,
+            api.getFiles(),
+            transientDarkPdfFileIdsRef.current,
+          ),
+          preserveDeleted: true,
+        });
+        if (!candidate) return;
+        assertProjectFitsContentBudget(candidate, pdfBytesRef.current);
         classroomTimeAlarmAuthorityFenceRef.current.push({
           sceneId,
           elementFingerprint: classroomTimeElementFingerprint(elements),
@@ -7237,7 +8541,7 @@ export default function App() {
           classroomTimeAlarmAuthorityFenceRef.current.shift();
         }
         api.updateScene({ elements, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
-        commitLiveScenePersistence(sceneId, true);
+        stageProjectMutationForAutosave(candidate);
         flushAutosave(true);
         setSelectedClassroomTime(null);
         showClassroomTimeConfirmationToast("Widget converted to ordinary editable elements.");
@@ -7248,12 +8552,13 @@ export default function App() {
   }, [
     api,
     beginClassroomTimeAsyncOperation,
-    commitLiveScenePersistence,
+    commitCurrentLiveScenePersistence,
     flushAutosave,
     isCurrentClassroomTimeAsyncOperation,
     pauseUnauthorizedLiveClassroomTimeWidgets,
     selectedClassroomTime,
     showClassroomTimeConfirmationToast,
+    stageProjectMutationForAutosave,
   ]);
 
   const deleteSelectedClassroomTimeWidget = useCallback(() => {
@@ -7274,15 +8579,32 @@ export default function App() {
         if (cancellation.status !== "persisted") {
           throw new Error("The widget could not be deleted because its alarms could not be cancelled durably.");
         }
-        if (!isCurrentClassroomTimeAsyncOperation(operationFence)) {
+        if (!isCurrentClassroomTimeAsyncOperation(operationFence, true)) {
           pauseUnauthorizedLiveClassroomTimeWidgets();
           return;
         }
+        const baseProject = commitCurrentLiveScenePersistence();
+        const liveSceneId = hydratedSceneIdRef.current;
+        const scene = liveSceneId ? baseProject?.scenes[liveSceneId] : undefined;
+        if (!baseProject || liveSceneId !== sceneId || !scene) return;
         const elements = api.getSceneElementsIncludingDeleted().map((element) => (
           !element.isDeleted && classroomTimeWidgetOwnerId(element) === ownerId
             ? newElementWith(element, { isDeleted: true })
             : element
         ));
+        const candidate = projectWithPendingScene(baseProject, {
+          sceneId,
+          elements,
+          appState: api.getAppState(),
+          files: persistentFilesForScene(
+            scene,
+            api.getFiles(),
+            transientDarkPdfFileIdsRef.current,
+          ),
+          preserveDeleted: true,
+        });
+        if (!candidate) return;
+        assertProjectFitsContentBudget(candidate, pdfBytesRef.current);
         classroomTimeAlarmAuthorityFenceRef.current.push({
           sceneId,
           elementFingerprint: classroomTimeElementFingerprint(elements),
@@ -7292,7 +8614,7 @@ export default function App() {
           classroomTimeAlarmAuthorityFenceRef.current.shift();
         }
         api.updateScene({ elements, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
-        commitLiveScenePersistence(sceneId, true);
+        stageProjectMutationForAutosave(candidate);
         flushAutosave(true);
         setSelectedClassroomTime(null);
         showClassroomTimeConfirmationToast("Classroom time widget deleted. Use Undo to restore it.");
@@ -7303,12 +8625,13 @@ export default function App() {
   }, [
     api,
     beginClassroomTimeAsyncOperation,
-    commitLiveScenePersistence,
+    commitCurrentLiveScenePersistence,
     flushAutosave,
     isCurrentClassroomTimeAsyncOperation,
     pauseUnauthorizedLiveClassroomTimeWidgets,
     selectedClassroomTime,
     showClassroomTimeConfirmationToast,
+    stageProjectMutationForAutosave,
   ]);
 
   const reconcileClassroomTimeAlarmRegistry = useCallback(async (currentProject: ClassroomProject) => {
@@ -8513,12 +9836,19 @@ export default function App() {
   }, [api, mermaidEditor]);
 
   const openScene = useCallback((sceneId: string, frameId?: string) => {
+    const targetProject = projectRef.current;
+    if (!targetProject?.scenes[sceneId]) {
+      api?.setToast({ message: "That board page is no longer available." });
+      return;
+    }
     pendingProjectSearchTargetRef.current = null;
     commitPendingScenePersistence();
     const currentSceneId = hydratedSceneIdRef.current
       || activeSceneIdRef.current
       || projectRef.current?.activeSceneId;
     const isSceneChange = sceneId !== currentSceneId;
+    const needsHydration = switchingSceneRef.current
+      || hydratedSceneIdRef.current !== sceneId;
     if (isSceneChange) commitLiveScenePersistence(currentSceneId || "");
     if (
       isSceneChange
@@ -8531,14 +9861,19 @@ export default function App() {
     if (frameId) pendingFrameIdRef.current = frameId;
     else if (isSceneChange) pendingFrameIdRef.current = null;
     if (isSceneChange) pendingCreatedFrameIdRef.current = null;
-    if (isSceneChange) beginSceneHydration();
+    if (needsHydration) beginSceneHydration();
     setProject((current) => {
       if (!current) return current;
+      if (!current.scenes[sceneId] || current.activeSceneId === sceneId) return current;
       const next = { ...current, activeSceneId: sceneId };
       projectRef.current = next;
       activeSceneIdRef.current = sceneId;
       return next;
     });
+    // activeSceneId may already name a scene whose imperative editor load is
+    // still in flight. A monotonic revision guarantees the layout-effect
+    // loader reruns for repeated B→B clicks and batched A→B→A intent.
+    if (needsHydration) setProjectHydrationRevision((revision) => revision + 1);
     if (api && sceneId === currentSceneId && frameId) {
       focusSlide(api, frameId);
       pendingFrameIdRef.current = null;
@@ -8698,6 +10033,10 @@ export default function App() {
     const currentProject = commitPendingScenePersistence();
     if (!currentProject?.slideOrder[index]) return;
     const slide = currentProject.slideOrder[index];
+    if (!currentProject.scenes[slide.sceneId]) {
+      api?.setToast({ message: "That slide page is no longer available." });
+      return;
+    }
     const reducedMotion = prefersReducedMotion();
     pendingPresentationTransitionRef.current = {
       frameId: slide.frameId,
@@ -8714,7 +10053,10 @@ export default function App() {
     const currentSceneId = hydratedSceneIdRef.current
       || activeSceneIdRef.current
       || projectRef.current?.activeSceneId;
-    if (slide.sceneId !== currentSceneId) {
+    const isSceneChange = slide.sceneId !== currentSceneId;
+    const needsHydration = switchingSceneRef.current
+      || hydratedSceneIdRef.current !== slide.sceneId;
+    if (isSceneChange) {
       // A delayed presentation-ink promotion (or any other Excalidraw
       // onChange) can still be pending when navigation starts. Capture the
       // live outgoing scene before hydration invalidates its RAF generation.
@@ -8724,8 +10066,8 @@ export default function App() {
       if (pendingSlideFrameActionRef.current?.sceneId !== slide.sceneId) {
         pendingSlideFrameActionRef.current = null;
       }
-      beginSceneHydration();
     }
+    if (needsHydration) beginSceneHydration();
     setProject((current) => {
       if (!current || current.activeSceneId === slide.sceneId) return current;
       const next = { ...current, activeSceneId: slide.sceneId };
@@ -8733,7 +10075,8 @@ export default function App() {
       activeSceneIdRef.current = slide.sceneId;
       return next;
     });
-  }, [beginSceneHydration, commitLiveScenePersistence, commitPendingScenePersistence]);
+    if (needsHydration) setProjectHydrationRevision((revision) => revision + 1);
+  }, [api, beginSceneHydration, commitLiveScenePersistence, commitPendingScenePersistence]);
 
   const startPresentation = useCallback(async (returnFocusTarget?: HTMLElement | null) => {
     if (!project || !api || workspaceMode !== "slides") return;
@@ -8771,8 +10114,26 @@ export default function App() {
     setIsProjectFindOpen(false);
     api.updateFrameRendering({ enabled: true, outline: false, name: false, clip: true });
     api.setActiveTool({ type: "laser" });
+    const selectedPresentationCandidate = selectedClassroomTime && hydratedSceneIdRef.current
+      ? {
+          ...selectedClassroomTime,
+          projectId: project.id,
+          sceneId: hydratedSceneIdRef.current,
+        }
+      : null;
+    const rememberedClassroomTimeSelection = presentationClassroomTimeSelectionForLiveScene(
+      selectedPresentationCandidate,
+      api.getSceneElements(),
+      {
+        activeSceneId: project.activeSceneId,
+        hydratedSceneId: hydratedSceneIdRef.current,
+        projectId: project.id,
+        switching: switchingSceneRef.current,
+      },
+    );
     try {
       setPresentationIndex(index, false);
+      setPresentationClassroomTimeSelection(rememberedClassroomTimeSelection);
     } catch (error) {
       // A host with a broken reduced-motion API (or another synchronous
       // presentation setup failure) must not leave the canvas clipped and in
@@ -8791,6 +10152,7 @@ export default function App() {
       });
       api.setActiveTool({ type: "selection" });
       setAreSlideFramesVisible(slideFramesVisibleRef.current);
+      setPresentationClassroomTimeSelection(null);
       presentationReturnFocusRef.current = null;
       presentationReturnFocusWasTriggerRef.current = false;
       api.setToast({ message: "Presentation mode could not be started." });
@@ -8816,7 +10178,7 @@ export default function App() {
       }
       // Fullscreen can be browser-blocked; presentation still works in-window.
     }
-  }, [activeSlideId, api, project, setPresentationIndex, workspaceMode]);
+  }, [activeSlideId, api, project, selectedClassroomTime, setPresentationIndex, workspaceMode]);
 
   const presentationSlide = presentation && project
     ? project.slideOrder[presentation.index]
@@ -8875,6 +10237,7 @@ export default function App() {
     presentationReturnFocusWasTriggerRef.current = false;
     presentationRef.current = null;
     setPresentation(null);
+    setPresentationClassroomTimeSelection(null);
     api?.updateFrameRendering({
       enabled: slideFramesVisibleRef.current,
       outline: true,
@@ -9173,7 +10536,7 @@ export default function App() {
     if (control && !control.disabled) control.click();
   }, []);
 
-  const setPresentationTool = useCallback((tool: "laser" | "freedraw") => {
+  const setPresentationTool = useCallback((tool: PresentationTool) => {
     presentationInkGenerationRef.current += 1;
     presentationInkStartElementIdsRef.current = null;
     if (presentationInkFrameRef.current !== null) {
@@ -9189,7 +10552,7 @@ export default function App() {
         presentation?.inkWidth || DEFAULT_PRESENTATION_INK_WIDTH,
       );
     } else {
-      api.setActiveTool({ type: "laser" });
+      api.setActiveTool({ type: tool });
     }
   }, [api, presentation?.inkColour, presentation?.inkWidth]);
 
@@ -9208,7 +10571,7 @@ export default function App() {
     if (presentation.tool === "freedraw") {
       activatePresentationInk(api, presentation.inkColour, presentation.inkWidth);
     } else {
-      api.setActiveTool({ type: "laser" });
+      api.setActiveTool({ type: presentation.tool });
     }
   }, [api, presentation?.inkColour, presentation?.inkWidth, presentation?.tool, project?.activeSceneId, zoom]);
 
@@ -11115,6 +12478,11 @@ export default function App() {
       const source = { ...imported.source, name: "Blank page" };
       const current = commitLiveScenePersistence(sourceSceneId);
       if (!current || !isCurrentOperation()) return;
+      const baseManifestHash = autosaveManifestHash(current);
+      const basePdfBytes = pdfBytesRef.current;
+      if (!baseManifestHash) {
+        throw new Error("The current board could not be fingerprinted safely.");
+      }
       assertProjectCanAcceptPdfPages(current, 1);
       const currentRasterUsage = current === sourceProject
         ? sourceRasterUsage
@@ -11127,7 +12495,7 @@ export default function App() {
       const order = reconcilePdfPageOrder(current);
       const currentIndex = order.indexOf(insertAfterId);
       const insertAt = currentIndex < 0 ? order.length : currentIndex + 1;
-      const nextPdfBytes = { ...pdfBytesRef.current, [source.id]: imported.bytes };
+      const nextPdfBytes = { ...basePdfBytes, [source.id]: imported.bytes };
       const nextProject: ClassroomProject = {
         ...current,
         updatedAt: nowIso(),
@@ -11150,15 +12518,44 @@ export default function App() {
         operation.signal,
       );
       if (!isCurrentOperation()) return;
-      beginSceneHydration();
-      pendingFrameIdRef.current = null;
-      pendingCreatedFrameIdRef.current = null;
-      pendingSlideFrameActionRef.current = null;
-      pdfBytesRef.current = nextPdfBytes;
-      projectRef.current = nextProject;
-      activeSceneIdRef.current = nextProject.activeSceneId;
-      setPdfBytes(nextPdfBytes);
-      setProject(nextProject);
+      const storageAdmission = getPdfStorageAdmissionRequirement(
+        current,
+        basePdfBytes,
+        nextProject,
+        nextPdfBytes,
+        { persistedContentBytes: autosaveContentBytesRef.current },
+      );
+      await assessAdditionalStorage(storageAdmission.requiredBytes, operation.signal);
+      if (!isCurrentOperation()) return;
+      // Creating the source PDF and raster preview remains cancellable. The
+      // atomic IndexedDB save below is the durable commit boundary, so do not
+      // offer cancellation once it begins.
+      busyCancelRef.current = null;
+      setBusyCanCancel(false);
+      setBusyMessage("Saving the blank PDF page locally…");
+      await persistPdfCandidateBeforePublication(nextProject, nextPdfBytes, {
+        isBaseCurrent: () => (
+          pdfBytesRef.current === basePdfBytes
+          && autosaveManifestHash(projectRef.current ?? undefined) === baseManifestHash
+        ),
+        publish: () => {
+          setErrorMessage(null);
+          beginSceneHydration();
+          pendingFrameIdRef.current = null;
+          pendingProjectSearchTargetRef.current = null;
+          pendingCreatedFrameIdRef.current = null;
+          pendingSlideFrameActionRef.current = null;
+          pendingSlideRotationActionRef.current = null;
+          setSlideRotationTargetId(null);
+          pdfBytesRef.current = nextPdfBytes;
+          projectRef.current = nextProject;
+          activeSceneIdRef.current = nextProject.activeSceneId;
+          setPdfBytes(nextPdfBytes);
+          setProject(nextProject);
+          setWorkspaceMode("pdf");
+        },
+        signal: operation.signal,
+      });
     } catch (error) {
       if (isCurrentOperation() && !isAbortLikeError(error)) {
         setErrorMessage(error instanceof Error ? error.message : String(error));
@@ -11171,11 +12568,13 @@ export default function App() {
       }
     }
   }, [
+    assessAdditionalStorage,
     beginFileOpenOperation,
     beginSceneHydration,
     commitLiveScenePersistence,
     currentScene?.pdfPage,
     isCurrentFileOpenOperation,
+    persistPdfCandidateBeforePublication,
     project,
   ]);
 
@@ -11317,14 +12716,16 @@ export default function App() {
     setPendingPdfInsert(null);
     setPdfInsertProgress(null);
     setPdfInsertCancelling(false);
+    setPdfInsertCommitStarted(false);
   }, [pdfInsertProcessing]);
 
   const cancelPdfInsertion = useCallback(() => {
+    if (pdfInsertCommitStarted) return;
     const generation = pdfInsertOperationGenerationRef.current;
     if (generation === null || fileOpenGenerationRef.current !== generation) return;
     setPdfInsertCancelling(true);
     fileOpenAbortControllerRef.current?.abort();
-  }, []);
+  }, [pdfInsertCommitStarted]);
 
   useEffect(() => {
     if (!pendingPdfInsert) return;
@@ -11341,11 +12742,15 @@ export default function App() {
     setPendingPdfInsert(null);
     setPdfInsertProcessing(false);
     setPdfInsertCancelling(false);
+    setPdfInsertCommitStarted(false);
     setPdfInsertProgress(null);
   }, [pendingPdfInsert, project?.activeSceneId, project?.id, projectHydrationRevision]);
 
-  const submitPdfInsertion = useCallback(async (submission: PdfInsertSubmission) => {
-    const pending = pendingPdfInsert;
+  const submitPdfInsertion = useCallback(async (
+    submission: PdfInsertSubmission,
+    pendingOverride?: PendingPdfInsert,
+  ) => {
+    const pending = pendingOverride ?? pendingPdfInsert;
     if (!pending || pdfInsertProcessing) return;
     const operation = beginFileOpenOperation();
     pdfInsertOperationGenerationRef.current = operation.generation;
@@ -11357,11 +12762,15 @@ export default function App() {
     );
     setPdfInsertProcessing(true);
     setPdfInsertCancelling(false);
+    setPdfInsertCommitStarted(false);
     setPdfInsertProgress(null);
     setErrorMessage(null);
     try {
       const sourceProject = commitLiveScenePersistence(pending.selectedPageId);
       if (!sourceProject || !isCurrentOperation()) return;
+      const sourceManifestHash = autosaveManifestHash(sourceProject);
+      const sourcePdfBytes = pdfBytesRef.current;
+      if (!sourceManifestHash) throw new Error("The current board could not be fingerprinted safely.");
       const filesById = new Map(pending.files.map((file) => [file.id, file]));
       const selections = submission.selections.map((selection) => {
         const source = filesById.get(selection.id);
@@ -11370,14 +12779,32 @@ export default function App() {
           file: source.file,
           pageCount: source.pageCount,
           sha256: source.sha256,
+          sourceName: source.name,
           sourceInstanceId: source.id,
           sourcePageIndices: selection.pageIndices,
         };
       });
+      const existingSourceHashes = new Set(
+        Object.values(sourceProject.pdfDocuments)
+          .map((source) => source.sha256)
+          .filter((sha256): sha256 is string => Boolean(sha256)),
+      );
+      const countedSourceHashes = new Set(existingSourceHashes);
+      let requiredSourceBytes = 0;
+      for (const selection of selections) {
+        if (countedSourceHashes.has(selection.sha256)) continue;
+        countedSourceHashes.add(selection.sha256);
+        requiredSourceBytes += selection.file.size;
+        if (!Number.isSafeInteger(requiredSourceBytes)) {
+          throw new Error("The selected PDF files are too large to insert safely.");
+        }
+      }
+      await assessAdditionalStorage(requiredSourceBytes, operation.signal);
+      if (!isCurrentOperation()) return;
       const { importPdfBatchAtomically } = await import("./lib/pdf/batch-import");
       const imported = await importPdfBatchAtomically(
         sourceProject,
-        pdfBytesRef.current,
+        sourcePdfBytes,
         selections,
         submission.placement,
         pending.selectedPageId,
@@ -11406,38 +12833,110 @@ export default function App() {
         operation.signal,
       );
       if (!isCurrentOperation()) return;
-      beginSceneHydration();
-      pendingFrameIdRef.current = null;
-      pendingProjectSearchTargetRef.current = null;
-      pendingCreatedFrameIdRef.current = null;
-      pendingSlideFrameActionRef.current = null;
-      pdfBytesRef.current = imported.pdfBytes;
-      projectRef.current = imported.project;
-      activeSceneIdRef.current = imported.project.activeSceneId;
-      setPdfBytes(imported.pdfBytes);
-      setProject(imported.project);
-      setWorkspaceMode("pdf");
-      setPendingPdfInsert(null);
-      setPdfInsertProgress(null);
+      const storageAdmission = getPdfStorageAdmissionRequirement(
+        sourceProject,
+        sourcePdfBytes,
+        imported.project,
+        imported.pdfBytes,
+        { persistedContentBytes: autosaveContentBytesRef.current },
+      );
+      await assessAdditionalStorage(storageAdmission.requiredBytes, operation.signal);
+      if (!isCurrentOperation()) return;
+      // Match direct import's irreversible boundary. The dialog disables its
+      // cancellation action before the atomic autosave starts.
+      setPdfInsertProgress({
+        phase: "Saving locally",
+        documentPosition: selections.length,
+        documentTotal: selections.length,
+        pagePosition: imported.insertedSceneIds.length,
+        pageTotal: imported.insertedSceneIds.length,
+        message: "Finalizing the complete batch. Cancellation is unavailable after this point.",
+      });
+      setPdfInsertCommitStarted(true);
+      await persistPdfCandidateBeforePublication(imported.project, imported.pdfBytes, {
+        isBaseCurrent: () => (
+          pdfBytesRef.current === sourcePdfBytes
+          && autosaveManifestHash(projectRef.current ?? undefined) === sourceManifestHash
+        ),
+        publish: () => {
+          beginSceneHydration();
+          pendingFrameIdRef.current = null;
+          pendingProjectSearchTargetRef.current = null;
+          pendingCreatedFrameIdRef.current = null;
+          pendingSlideFrameActionRef.current = null;
+          pdfBytesRef.current = imported.pdfBytes;
+          projectRef.current = imported.project;
+          activeSceneIdRef.current = imported.project.activeSceneId;
+          setPdfBytes(imported.pdfBytes);
+          setProject(imported.project);
+          setWorkspaceMode("pdf");
+          setPendingPdfInsert(null);
+          setPdfInsertProgress(null);
+        },
+        signal: operation.signal,
+      });
     } catch (error) {
       if (isCurrentOperation() && !isAbortLikeError(error)) {
-        setErrorMessage(error instanceof Error ? error.message : String(error));
+        const [{ PdfBatchImportSelectionError }, { getPdfImportRecovery }] = await Promise.all([
+          import("./lib/pdf/batch-import"),
+          import("./lib/pdf/import-compatibility"),
+        ]);
+        if (!isCurrentOperation()) return;
+        const batchFailure = error instanceof PdfBatchImportSelectionError
+          ? error
+          : null;
+        const failedSource = batchFailure
+          ? pending.files.find((file) => file.id === batchFailure.sourceInstanceId)
+          : undefined;
+        const compatibilityOriginal = failedSource?.compatibilityOriginal;
+        const recovery = compatibilityOriginal
+          ? getPdfImportRecovery(compatibilityOriginal.failure)
+          : getPdfImportRecovery(batchFailure?.cause ?? error);
+        if (batchFailure && failedSource && recovery) {
+          setErrorMessage(compatibilityOriginal
+            ? `That converted copy could not be used: ${batchFailure.message}`
+            : null);
+          setPendingPdfCompatibilityImport({
+            context: "batch",
+            failure: compatibilityOriginal?.failure ?? batchFailure.cause,
+            file: compatibilityOriginal?.file ?? failedSource.file,
+            processing: false,
+            recovery,
+            sourceInstanceId: failedSource.id,
+            submission,
+            ...(recovery.kind === "choose-converted-copy"
+              ? {
+                rejectedOriginalInspection: compatibilityOriginal?.rejectedOriginalInspection
+                  ?? {
+                    pageCount: failedSource.pageCount,
+                    sha256: failedSource.sha256,
+                  },
+              }
+              : {}),
+          });
+        } else {
+          setErrorMessage(error instanceof Error ? error.message : String(error));
+        }
       }
     } finally {
       if (pdfInsertOperationGenerationRef.current === operation.generation) {
         pdfInsertOperationGenerationRef.current = null;
         setPdfInsertProcessing(false);
         setPdfInsertCancelling(false);
+        setPdfInsertCommitStarted(false);
       }
     }
   }, [
     beginFileOpenOperation,
     beginSceneHydration,
     commitLiveScenePersistence,
+    assessAdditionalStorage,
     isCurrentFileOpenOperation,
     pdfInsertProcessing,
     pendingPdfInsert,
+    persistPdfCandidateBeforePublication,
   ]);
+  submitPdfInsertionRef.current = submitPdfInsertion;
 
   useEffect(() => {
     const handleDocumentPasteCapture = (event: ClipboardEvent) => {
@@ -11772,6 +13271,12 @@ export default function App() {
   }, [api, showClassroomTimeConfirmationToast]);
 
   const handleEditorClickCapture = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    if (sceneInputBlockedRef.current) {
+      event.preventDefault();
+      event.stopPropagation();
+      event.nativeEvent.stopImmediatePropagation();
+      return;
+    }
     const target = event.target instanceof Element ? event.target : null;
     const libraryAddTarget = target?.closest(
       '.context-menu [data-testid="addToLibrary"], .layer-ui__library .library-unit__pulse, .layer-ui__library .library-unit__adder',
@@ -11913,6 +13418,12 @@ export default function App() {
   );
 
   const handleEditorKeyDownCapture = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (sceneInputBlockedRef.current) {
+      event.preventDefault();
+      event.stopPropagation();
+      event.nativeEvent.stopImmediatePropagation();
+      return;
+    }
     if (isEditableKeyboardTarget(event.target)) return;
     const target = event.target instanceof HTMLElement ? event.target : null;
     // Project Find owns keyboard interaction inside its query/results. Keep
@@ -11968,6 +13479,12 @@ export default function App() {
   }, [api]);
 
   const handleEditorPointerDownCapture = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (sceneInputBlockedRef.current) {
+      event.preventDefault();
+      event.stopPropagation();
+      event.nativeEvent.stopImmediatePropagation();
+      return;
+    }
     classroomTimePointerActiveRef.current = true;
     const target = event.target instanceof Element ? event.target : null;
     const sidebarTrigger = target?.closest(".default-sidebar .sidebar-tab-trigger");
@@ -12141,7 +13658,24 @@ export default function App() {
     && !busyMessage
     && !nativeImageExportOpenRef.current
   );
-  classroomTimeOverlayNeedsTicksRef.current = showClassroomTimeOverlay;
+  const livePresentationClassroomTimeSelection = presentation && api
+    ? presentationClassroomTimeSelectionForLiveScene(
+        presentationClassroomTimeSelection,
+        api.getSceneElements(),
+        {
+          activeSceneId: project?.activeSceneId || null,
+          hydratedSceneId: hydratedSceneIdRef.current,
+          projectId: project?.id || null,
+          switching: switchingSceneRef.current,
+        },
+      )
+    : null;
+  const showPresentationClassroomTimeControls = Boolean(
+    livePresentationClassroomTimeSelection
+    && !featurePreferences.obsCaptureArea
+  );
+  classroomTimeOverlayNeedsTicksRef.current = showClassroomTimeOverlay
+    || showPresentationClassroomTimeControls;
 
   if (!project || !currentScene) return <div className="loading-screen">Opening PatterDraw…</div>;
 
@@ -12182,10 +13716,32 @@ export default function App() {
     />
   );
 
+  const latestRecoverySnapshot = recoverySnapshots[0] ?? null;
+  const visibleRecoverySnapshot = latestRecoverySnapshot
+    && latestRecoverySnapshot.snapshotId !== dismissedRecoverySnapshotId
+    ? latestRecoverySnapshot
+    : null;
+  const archiveReadinessWarning = archiveWorkerReadiness?.available === false
+    ? archiveWorkerReadiness
+    : null;
+  const storageReadinessWarning = storageReadiness
+    && storageReadiness.durableStorage !== "persisted"
+    && storageReadiness.durableStorage !== "granted"
+    ? storageReadiness
+    : null;
+  const showLocalReadinessBanner = Boolean(
+    !presentation
+    && !autosaveRecoveryDetail
+    && (
+      visibleRecoverySnapshot
+      || (!localReadinessDismissed && (archiveReadinessWarning || storageReadinessWarning))
+    ),
+  );
+
   return (
     <div
       ref={shellRef}
-      className={`app-shell ${workspaceModeClassName(workspaceMode)} ${workspaceMode === "slides" && !isSlideRailVisible ? "is-slide-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfRailVisible ? "is-pdf-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfToolbarVisible ? "is-pdf-toolbar-hidden" : ""} ${!isNavigationVisible ? "is-nav-hidden" : ""} ${!isFooterVisible ? "is-footer-hidden" : ""} ${!featurePreferences.projectFind ? "is-project-find-disabled" : ""} ${!featurePreferences.library ? "is-library-disabled" : ""} ${featurePreferences.iconOnlyControls ? "is-icon-only-controls" : ""} ${featurePreferences.bottomInterface ? "is-bottom-interface" : ""} ${featurePreferences.obsCaptureArea ? "is-obs-capture-enabled" : ""} ${featurePreferences.obsCaptureArea && featurePreferences.obsShowCursor ? "is-obs-cursor-visible" : ""} ${isCleanFullscreen ? "is-clean-fullscreen" : ""} ${presentation && presentationSlide && workspaceMode === "slides" ? "is-presenting" : ""}`}
+      className={`app-shell ${workspaceModeClassName(workspaceMode)} ${workspaceMode === "slides" && !isSlideRailVisible ? "is-slide-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfRailVisible ? "is-pdf-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfToolbarVisible ? "is-pdf-toolbar-hidden" : ""} ${!isNavigationVisible ? "is-nav-hidden" : ""} ${!isFooterVisible ? "is-footer-hidden" : ""} ${!featurePreferences.projectFind ? "is-project-find-disabled" : ""} ${!featurePreferences.library ? "is-library-disabled" : ""} ${isProjectFindOpen ? "is-project-find-open" : ""} ${isLibraryOpen ? "is-library-open" : ""} ${featurePreferences.iconOnlyControls ? "is-icon-only-controls" : ""} ${featurePreferences.bottomInterface ? "is-bottom-interface" : ""} ${featurePreferences.obsCaptureArea ? "is-obs-capture-enabled" : ""} ${featurePreferences.obsCaptureArea && featurePreferences.obsShowCursor ? "is-obs-cursor-visible" : ""} ${isCleanFullscreen ? "is-clean-fullscreen" : ""} ${presentation && presentationSlide && workspaceMode === "slides" ? "is-presenting" : ""}`}
       data-theme={editorTheme}
       style={{ "--pdf-rail-width": `${pdfRailWidth}px` } as CSSProperties}
     >
@@ -12210,6 +13766,8 @@ export default function App() {
           onPdfPreferenceChange={setPdfPreference}
           onThemePreferenceChange={setThemePreference}
           onOpenShortcutHelp={openShortcutHelp}
+          onOpenRecoveryHistory={openRecoveryHistory}
+          recoveryHistoryCount={recoverySnapshots.length}
           onRestoreFeaturePreferences={restoreFeaturePreferences}
           onRestorePdfPreferences={restorePdfPreferences}
           onOpen={() => inputRef.current?.click()}
@@ -12262,6 +13820,87 @@ export default function App() {
               onClick={() => void resumeAutosaveWithCurrentBoard()}
             >
               Use this board and resume autosave
+            </button>
+          </div>
+        </section>
+      )}
+      {showLocalReadinessBanner && (
+        <section
+          className="autosave-recovery-banner local-readiness-banner"
+          role={archiveReadinessWarning ? "alert" : "status"}
+          aria-labelledby="local-readiness-title"
+        >
+          <div className="autosave-recovery-copy">
+            <strong id="local-readiness-title">Protect your classroom work</strong>
+            {archiveReadinessWarning && !localReadinessDismissed ? (
+              <span>
+                Portable project backup is not ready: {archiveReadinessWarning.message}
+              </span>
+            ) : null}
+            {storageReadinessWarning && !localReadinessDismissed ? (
+              <span>
+                {storageReadinessWarning.durableStorage === "denied"
+                  ? "This browser may remove local autosaves under storage pressure. You can ask it to protect PatterDraw data, and downloaded .patterdraw backups remain the safest copy."
+                  : "This browser cannot guarantee durable local autosaves. Download .patterdraw backups often."}
+              </span>
+            ) : null}
+            {visibleRecoverySnapshot ? (
+              <span>
+                A protected previous board is available: <strong>{visibleRecoverySnapshot.title}</strong>, saved {new Date(visibleRecoverySnapshot.capturedAt).toLocaleString()}.
+              </span>
+            ) : null}
+          </div>
+          <div className="autosave-recovery-actions">
+            {archiveReadinessWarning && !localReadinessDismissed ? (
+              <button
+                type="button"
+                disabled={localReadinessBusy}
+                onClick={() => void retryArchiveWorkerReadiness()}
+              >
+                Retry backup check
+              </button>
+            ) : null}
+            {storageReadinessWarning
+              && !localReadinessDismissed
+              && storageReadinessWarning.durableStorage !== "unsupported" ? (
+                <button
+                  type="button"
+                  disabled={localReadinessBusy}
+                  onClick={() => void requestLocalStorageProtection()}
+                >
+                  Protect local work
+                </button>
+              ) : null}
+            {visibleRecoverySnapshot ? (
+              <button
+                type="button"
+                disabled={localReadinessBusy}
+                onClick={(event) => openRecoveryHistory(event.currentTarget)}
+              >
+                Recovery history ({recoverySnapshots.length})
+              </button>
+            ) : null}
+            {visibleRecoverySnapshot ? (
+              <button
+                className="is-primary"
+                type="button"
+                disabled={localReadinessBusy}
+                onClick={() => void recoverPreviousBoard(visibleRecoverySnapshot.snapshotId)}
+              >
+                Recover previous board
+              </button>
+            ) : null}
+            <button
+              type="button"
+              disabled={localReadinessBusy}
+              onClick={() => {
+                setLocalReadinessDismissed(true);
+                if (visibleRecoverySnapshot) {
+                  setDismissedRecoverySnapshotId(visibleRecoverySnapshot.snapshotId);
+                }
+              }}
+            >
+              Dismiss
             </button>
           </div>
         </section>
@@ -12392,6 +14031,7 @@ export default function App() {
         <div
           ref={editorHostRef}
           className={`editor-host ${isNativeZenMode ? "is-native-zen-mode" : ""} ${isScreenshotCaptureActive ? "is-screenshot-capture-active" : ""} ${isSlideFrameDrawingActive ? "is-slide-frame-drawing-active" : ""}`}
+          aria-busy={isSceneInputBlocked || undefined}
           onClickCapture={handleEditorClickCapture}
           onKeyDownCapture={handleEditorKeyDownCapture}
           onPointerDownCapture={handleEditorPointerDownCapture}
@@ -12420,6 +14060,17 @@ export default function App() {
           >
             {featurePreferences.library || featurePreferences.projectFind ? defaultSidebar : null}
           </Excalidraw>
+          {isSceneInputBlocked ? (
+            <div
+              className="scene-hydration-input-guard"
+              data-testid="scene-hydration-input-guard"
+              role="status"
+              aria-label="Opening canvas"
+              aria-live="polite"
+            >
+              <span>Opening canvas…</span>
+            </div>
+          ) : null}
           {featurePreferences.obsCaptureArea && !presentation ? (
             <ObsCaptureGuide
               layout={workspaceMode === "pdf"
@@ -12546,8 +14197,15 @@ export default function App() {
           tool={presentation.tool}
           inkColour={presentation.inkColour}
           inkWidth={presentation.inkWidth}
+          classroomTime={showPresentationClassroomTimeControls && livePresentationClassroomTimeSelection ? {
+            metadata: livePresentationClassroomTimeSelection.metadata,
+            nowMs: classroomTimeNowMs,
+            activeTarget: classroomTimeActiveTarget,
+          } : null}
           onIndexChange={setPresentationIndex}
           onToolChange={setPresentationTool}
+          onClassroomTimeCommand={controlSelectedClassroomTimeWidget}
+          onClassroomTimeTargetChange={setClassroomTimeActiveTarget}
           onInkColourChange={setPresentationInkColour}
           onInkWidthChange={setPresentationInkWidth}
           onExit={stopPresentation}
@@ -12558,6 +14216,20 @@ export default function App() {
         <KeyboardShortcutsDialog
           onClose={() => setIsShortcutHelpOpen(false)}
           returnFocusRef={shortcutHelpReturnFocusRef}
+        />
+      ) : null}
+      {isRecoveryHistoryOpen ? (
+        <RecoveryHistoryDialog
+          busy={localReadinessBusy}
+          damagedSnapshotIds={damagedRecoverySnapshotIds}
+          entries={recoverySnapshots}
+          onClearAll={() => void clearRecoveryHistory()}
+          onClose={() => setIsRecoveryHistoryOpen(false)}
+          onDelete={(snapshotId) => void deleteRecoverySnapshot(snapshotId)}
+          onRecover={(snapshotId) => void recoverPreviousBoard(snapshotId)}
+          returnFocusRef={recoveryHistoryReturnFocusRef}
+          status={recoveryHistoryStatus}
+          unreadableHistory={recoveryHistoryUnreadable}
         />
       ) : null}
       <input
@@ -12593,7 +14265,7 @@ export default function App() {
           if (file) void importDroppedLibrary(file);
         }}
       />
-      {pendingPdfInsert ? (
+      {pendingPdfInsert && pendingPdfCompatibilityImport?.context !== "batch" ? (
         <PdfInsertDialog
           files={pendingPdfInsert.files}
           remainingPageCapacity={project ? remainingProjectPdfPageCapacity(project) : 0}
@@ -12601,9 +14273,32 @@ export default function App() {
           cancelling={pdfInsertCancelling}
           progress={pdfInsertProgress}
           onCancel={closePdfInsertDialog}
-          onCancelProcessing={cancelPdfInsertion}
+          onCancelProcessing={pdfInsertCommitStarted ? undefined : cancelPdfInsertion}
           onSubmit={(submission) => void submitPdfInsertion(submission)}
           returnFocusRef={pdfInsertTriggerRef}
+        />
+      ) : null}
+      {pendingProjectSwitch ? (
+        <ProjectSwitchDialog
+          currentProjectTitle={project.title}
+          nextFileName={pendingProjectSwitch.file.name}
+          processing={pendingProjectSwitch.processing}
+          onCancel={cancelPendingProjectSwitch}
+          onOpenWithoutBackup={() => void protectCurrentBoardAndOpen(false)}
+          onBackupAndOpen={() => void protectCurrentBoardAndOpen(true)}
+        />
+      ) : null}
+      {pendingPdfCompatibilityImport ? (
+        <PdfCompatibilityImportDialog
+          fileNames={[pendingPdfCompatibilityImport.file.name]}
+          processing={pendingPdfCompatibilityImport.processing}
+          recovery={pendingPdfCompatibilityImport.recovery}
+          onCancel={cancelPdfCompatibilityImport}
+          onRetrySafetyCheck={() => void retryPdfCompatibilitySafetyCheck()}
+          onSelectConvertedCopy={(file) => void importPdfCompatibilityCopy(file)}
+          returnFocusRef={pendingPdfCompatibilityImport.context === "batch"
+            ? pdfInsertTriggerRef
+            : undefined}
         />
       ) : null}
       {pendingPdfAnnotationClear ? (
@@ -12754,12 +14449,10 @@ export default function App() {
               <span>{classroomTimeAlarmNotice.message}</span>
               {classroomTimeAlarmNotice.blocked
                 && !classroomTimeAlarmNotice.deliveryPending
-                && !presentation
                 && !featurePreferences.obsCaptureArea ? (
                 <button type="button" onClick={enableClassroomAlarmSound}>Enable sound</button>
               ) : null}
               {classroomTimeAlarmNoticeCanDismiss(classroomTimeAlarmNotice)
-                && !presentation
                 && !featurePreferences.obsCaptureArea ? (
                 <button type="button" onClick={dismissClassroomAlarmNotice}>Dismiss</button>
               ) : null}

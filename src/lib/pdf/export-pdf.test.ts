@@ -1286,6 +1286,27 @@ describe("PDF export bounds", () => {
     expect(returnedBlob).toBeUndefined();
   });
 
+  it("honors cancellation at the saving boundary before final serialization starts", async () => {
+    const source = await PDFDocument.create();
+    source.addPage([600, 800]);
+    const sourceBytes = await source.save();
+    const project = blankPdfProjectForIntegrity(sourceBytes.byteLength);
+    const controller = new AbortController();
+    const saveSpy = vi.spyOn(PDFDocument.prototype, "save");
+
+    try {
+      await expect(exportAnnotatedPdf(project, { pdf: sourceBytes }, "expand", {
+        signal: controller.signal,
+        onProgress: (update) => {
+          if (update.phase === "saving") controller.abort();
+        },
+      })).rejects.toMatchObject({ name: "AbortError" });
+      expect(saveSpy).not.toHaveBeenCalled();
+    } finally {
+      saveSpy.mockRestore();
+    }
+  });
+
   it("surfaces encrypted source loading as an actionable typed failure", async () => {
     const sourceBytes = new Uint8Array([1, 2, 3, 4]);
     const project = blankPdfProjectForIntegrity(sourceBytes.byteLength);

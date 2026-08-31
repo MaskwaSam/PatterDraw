@@ -1,9 +1,16 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { fileURLToPath, URL } from "node:url";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Plugin } from "vite";
+import {
+  collectOfflineAppShellPaths,
+  collectOfflineContinuityPathsFromFiles,
+  createOfflineServiceWorkerAssetFromFiles,
+} from "./build/offline-service-worker.mjs";
 
 const excalidrawFontRoot = fileURLToPath(new URL(
   "./node_modules/@excalidraw/excalidraw/dist/prod/fonts/",
@@ -15,6 +22,9 @@ const pdfjsStandardFontRoot = fileURLToPath(new URL(
 ));
 const mathJaxRoot = fileURLToPath(new URL("./node_modules/mathjax/", import.meta.url));
 const mathJaxSreRoot = fileURLToPath(new URL("./node_modules/mathjax/sre/", import.meta.url));
+const mathJaxSpeechWorkerSha256 = createHash("sha256")
+  .update(readFileSync(path.join(mathJaxSreRoot, "speech-worker.js")))
+  .digest("hex");
 const mathJaxFontRoot = fileURLToPath(new URL(
   "./node_modules/@mathjax/mathjax-newcm-font/",
   import.meta.url,
@@ -254,10 +264,120 @@ function releaseLicenseBundle(): Plugin {
   };
 }
 
+function offlineAppShellBundle(): Plugin {
+  const pendingOutputs = new Map<string, string[]>();
+  const writtenOutputs = new Set<string>();
+  let projectRoot = process.cwd();
+  let defaultOutputDirectory = path.resolve(projectRoot, "dist");
+
+  const outputDirectory = (options: { dir?: string; file?: string }): string => {
+    if (options.file) {
+      throw new Error("offline-app-shell: a directory output is required");
+    }
+    return options.dir
+      ? path.resolve(projectRoot, options.dir)
+      : defaultOutputDirectory;
+  };
+
+  const writeOutputAtomically = async (target: string, source: string | Uint8Array): Promise<void> => {
+    const temporary = path.join(
+      path.dirname(target),
+      `.${path.basename(target)}.${process.pid}.${randomUUID()}.tmp`,
+    );
+    try {
+      await writeFile(temporary, source, { flag: "wx" });
+      await rename(temporary, target);
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => undefined);
+      throw error;
+    }
+  };
+
+  return {
+    name: "offline-app-shell-bundle",
+    apply: "build",
+    enforce: "post",
+    configResolved(config) {
+      projectRoot = config.root;
+      defaultOutputDirectory = path.resolve(config.root, config.build.outDir);
+      if (config.build.write === false) {
+        throw new Error("offline-app-shell: build.write=false cannot produce a finalized service worker");
+      }
+    },
+    buildStart() {
+      pendingOutputs.clear();
+      writtenOutputs.clear();
+    },
+    generateBundle: {
+      order: "post",
+      handler(options, bundle) {
+        const directory = outputDirectory(options);
+        const paths = collectOfflineAppShellPaths(bundle);
+        const previous = pendingOutputs.get(directory);
+        if (previous && JSON.stringify(previous) !== JSON.stringify(paths)) {
+          throw new Error(`offline-app-shell: conflicting startup closures for ${directory}`);
+        }
+        pendingOutputs.set(directory, paths);
+        this.emitFile({
+          type: "asset",
+          fileName: "service-worker.js",
+          // `closeBundle` replaces this non-installing sentinel atomically after
+          // every output hook has finished mutating the emitted files.
+          source: '"use strict"; throw new Error("PatterDraw service worker was not finalized.");\n',
+        });
+      },
+    },
+    writeBundle(options) {
+      writtenOutputs.add(outputDirectory(options));
+    },
+    closeBundle: {
+      order: "post",
+      async handler() {
+        for (const [directory, paths] of pendingOutputs) {
+          if (!writtenOutputs.has(directory)) {
+            throw new Error(`offline-app-shell: output was not written: ${directory}`);
+          }
+          const generated = await createOfflineServiceWorkerAssetFromFiles({
+            continuityPaths: await collectOfflineContinuityPathsFromFiles({
+              outputDirectory: directory,
+              shellPaths: paths,
+            }),
+            outputDirectory: directory,
+            paths,
+          });
+          if (!generated.continuityPack || !generated.continuityPackSource) {
+            throw new Error("offline-app-shell: the finalized continuity pack is missing");
+          }
+          await writeOutputAtomically(
+            path.join(directory, generated.continuityPack.path.slice(2)),
+            generated.continuityPackSource,
+          );
+          // Publish the worker last. A build directory can therefore never
+          // expose worker metadata that points at a pack which is not present.
+          await writeOutputAtomically(path.join(directory, "service-worker.js"), generated.code);
+          this.info(
+            `PatterDraw offline app shell ${generated.version}: ${generated.entries.length} startup files / ${generated.totalBytes} bytes; ${generated.continuityEntries.length} continuity files / ${generated.continuityBytes} unpacked bytes; ${generated.continuityPack.bytes} pack bytes; ${generated.totalBytes + generated.continuityBytes} verified-cache bytes`,
+          );
+        }
+        pendingOutputs.clear();
+        writtenOutputs.clear();
+      },
+    },
+  };
+}
+
 export default defineConfig({
   base: "./",
-  plugins: [react(), localExcalidrawFonts(), localPdfjsAssets(), localMathJaxAssets(), releaseLicenseBundle()],
+  plugins: [
+    react(),
+    localExcalidrawFonts(),
+    localPdfjsAssets(),
+    localMathJaxAssets(),
+    releaseLicenseBundle(),
+    offlineAppShellBundle(),
+  ],
   define: {
+    __PATTERDRAW_MATHJAX_SPEECH_WORKER_SHA256__: JSON.stringify(mathJaxSpeechWorkerSha256),
     "process.env.IS_PREACT": JSON.stringify("false"),
   },
   resolve: {

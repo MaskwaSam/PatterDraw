@@ -14,8 +14,11 @@ import {
 } from "../lib/classroom-time/types";
 import {
   ClassroomTimeDialog,
+  classroomTimeContrastRatio,
+  classroomTimeReadabilityWarning,
   durationFromParts,
   durationParts,
+  readableClassroomTimeAppearance,
   type ClassroomCalendarEventCreateResult,
 } from "./ClassroomTimeDialog";
 
@@ -169,6 +172,26 @@ describe("ClassroomTimeDialog duration helpers", () => {
   });
 });
 
+describe("ClassroomTimeDialog readability helpers", () => {
+  it("measures contrast and produces a high-contrast preset without changing theme intent", () => {
+    expect(classroomTimeContrastRatio("#ffffff", "#ffffff")).toBe(1);
+    expect(classroomTimeContrastRatio("#111827", "#ffffff")).toBeGreaterThan(4.5);
+    expect(classroomTimeReadabilityWarning({
+      theme: "light",
+      foregroundColor: "#ffffff",
+      backgroundColor: "#ffffff",
+      accentColor: "#ffffff",
+      borderColor: "#ffffff",
+    }, 0.4)).toContain("Low opacity");
+
+    const preset = readableClassroomTimeAppearance({
+      ...DEFAULT_CLASSROOM_TIME_APPEARANCE,
+      theme: "dark",
+    }, "dark");
+    expect(preset).toMatchObject({ theme: "dark", opacity: 1, foregroundColor: "#ffffff", backgroundColor: "#000000" });
+  });
+});
+
 describe("ClassroomTimeDialog", () => {
   it("describes project-saved and device-local data without implying the whole widget is device-only", () => {
     const { container } = mount(calendarMetadata());
@@ -218,6 +241,49 @@ describe("ClassroomTimeDialog", () => {
     expect(submitted.timer).toMatchObject({ durationMs: 7 * 60_000, progressStyle: "none" });
     expect(submitted.runtime).toMatchObject({ status: "idle", remainingMs: 7 * 60_000 });
     expect(submitted.alarm).toMatchObject({ tone: "bright-marimba", repeat: true });
+  });
+
+  it("explains every silent Test alarm state instead of offering a muted test", () => {
+    const zeroVolume = mount(timerMetadata(), { alarmVolume: 0 });
+    act(() => button(zeroVolume.container, "Alarm").click());
+    const zeroButton = button(zeroVolume.container, "Test alarm");
+    expect(zeroButton.disabled).toBe(true);
+    expect(zeroButton.getAttribute("aria-describedby")).toBe("classroom-time-alarm-test-help");
+    expect(zeroVolume.container.textContent).toContain("Raise alarm volume above 0%");
+    act(() => zeroButton.click());
+    expect(zeroVolume.callbacks.onTestAlarm).not.toHaveBeenCalled();
+
+    const muted = mount(timerMetadata(), { alarmMuted: true });
+    act(() => button(muted.container, "Alarm").click());
+    expect(button(muted.container, "Test alarm").disabled).toBe(true);
+    expect(muted.container.textContent).toContain("alarms are muted on this device");
+  });
+
+  it("warns about unreadable custom colours and repairs them with one explicit action", () => {
+    const metadata = clockMetadata();
+    metadata.appearance = {
+      ...metadata.appearance,
+      foregroundColor: "#ffffff",
+      backgroundColor: "#ffffff",
+      accentColor: "#ffffff",
+      opacity: 0.3,
+    };
+    const { callbacks, container } = mount(metadata);
+
+    const warning = container.querySelector<HTMLElement>('[role="alert"]');
+    expect(warning?.textContent).toContain("Text contrast is 1.0:1");
+    expect(warning?.textContent).toContain("Low opacity");
+    act(() => button(container, "Use readable colours").click());
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+
+    act(() => button(container, "Add Clock").click());
+    const submitted = callbacks.onSubmit.mock.calls[0][0] as ClassroomTimeWidgetMetadataV1;
+    expect(submitted.appearance).toMatchObject({
+      foregroundColor: "#111827",
+      backgroundColor: "#ffffff",
+      accentColor: "#1d4ed8",
+      opacity: 1,
+    });
   });
 
   it("keeps legacy clocks digital while supporting format, visibility, and timezone controls", () => {

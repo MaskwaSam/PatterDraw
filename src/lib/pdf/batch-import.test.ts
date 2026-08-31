@@ -7,7 +7,10 @@ import {
 } from "../../types";
 import type { ImportedPdf, ImportPdfOptions } from "./import-pdf";
 import type { PdfImportSelection } from "./import-selection";
-import { importPdfBatchAtomically } from "./batch-import";
+import {
+  importPdfBatchAtomically,
+  PdfBatchImportSelectionError,
+} from "./batch-import";
 
 const SHA_A = "a".repeat(64);
 const SHA_B = "b".repeat(64);
@@ -175,7 +178,7 @@ describe("atomic multi-PDF insertion", () => {
       return firstResult(file, options);
     });
 
-    await expect(importPdfBatchAtomically(
+    const failure = importPdfBatchAtomically(
       project,
       pdfBytes,
       [
@@ -185,11 +188,35 @@ describe("atomic multi-PDF insertion", () => {
       "after",
       "main-page",
       { importOne },
-    )).rejects.toThrow("second PDF is malformed");
+    );
+    await expect(failure).rejects.toThrow("second PDF is malformed");
+    await expect(failure).rejects.toMatchObject({
+      name: "PdfBatchImportSelectionError",
+      selectionIndex: 1,
+      sourceInstanceId: "broken",
+      fileName: "broken.pdf",
+      cause: expect.any(Error),
+    });
 
     expect(project).toEqual(projectBefore);
     expect(pdfBytes).toEqual({ "main-document": bytesBefore });
     expect(project.pdfPageOrder).toEqual(["main-page"]);
+  });
+
+  it("preserves AbortError instead of classifying cancellation as a source failure", async () => {
+    const { project, pdfBytes } = baseProject();
+    const abort = new DOMException("cancelled", "AbortError");
+    const file = new File([new Uint8Array(5)], "cancelled.pdf", { type: "application/pdf" });
+
+    await expect(importPdfBatchAtomically(
+      project,
+      pdfBytes,
+      [selection("cancelled", file, SHA_B, 1, [0])],
+      "after",
+      "main-page",
+      { importOne: vi.fn(async () => { throw abort; }) },
+    )).rejects.toBe(abort);
+    expect(abort).not.toBeInstanceOf(PdfBatchImportSelectionError);
   });
 
   it("discards staged pages when cancellation arrives after a document render", async () => {
