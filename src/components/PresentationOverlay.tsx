@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
-import type { ClassroomSlide } from "../types";
 import { isEditableKeyboardTarget } from "../lib/keyboard-targets";
 import { materializeClassroomTimeWidgetSnapshot } from "../lib/classroom-time/runtime";
 import type { ClassroomTimeWidgetMetadataV1 } from "../lib/classroom-time/types";
@@ -42,7 +41,8 @@ export interface PresentationClassroomTimeControls {
 }
 
 interface PresentationOverlayProps {
-  slides: readonly ClassroomSlide[];
+  itemCount: number;
+  itemLabel: "Page" | "Slide";
   index: number;
   tool: PresentationTool;
   inkColour: PresentationInkColour;
@@ -63,7 +63,8 @@ interface PresentationOverlayProps {
 }
 
 export function PresentationOverlay({
-  slides,
+  itemCount,
+  itemLabel,
   index,
   tool,
   inkColour,
@@ -203,7 +204,7 @@ export function PresentationOverlay({
       }
       if (["ArrowRight", "ArrowDown", "PageDown", " "].includes(event.key)) {
         event.preventDefault();
-        onIndexChange(Math.min(slides.length - 1, index + 1));
+        onIndexChange(Math.min(itemCount - 1, index + 1));
       } else if (["ArrowLeft", "ArrowUp", "PageUp"].includes(event.key)) {
         event.preventDefault();
         onIndexChange(Math.max(0, index - 1));
@@ -212,12 +213,12 @@ export function PresentationOverlay({
         onIndexChange(0);
       } else if (event.key === "End") {
         event.preventDefault();
-        onIndexChange(slides.length - 1);
+        onIndexChange(itemCount - 1);
       }
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [index, onExit, onIndexChange, onToolChange, shortcutsPaused, slides.length, toggleControls]);
+  }, [index, itemCount, onExit, onIndexChange, onToolChange, shortcutsPaused, toggleControls]);
 
   useEffect(() => {
     if (collapsed) {
@@ -228,21 +229,21 @@ export function PresentationOverlay({
     wasCollapsedRef.current = collapsed;
   }, [collapsed]);
 
-  const slideStatus = (
+  const itemStatus = (
     <span
       className="visually-hidden"
       role="status"
       aria-live="polite"
       aria-atomic="true"
     >
-      Slide {index + 1} of {slides.length}
+      {itemLabel} {index + 1} of {itemCount}
     </span>
   );
 
   if (collapsed) {
     return (
       <>
-        {slideStatus}
+        {itemStatus}
         <div
           className="presentation-controls-collapsed"
           role="toolbar"
@@ -259,7 +260,7 @@ export function PresentationOverlay({
             title="Show presentation controls (C)"
           >
             <ShowPanelIcon />
-            <span aria-hidden="true">{index + 1} / {slides.length}</span>
+            <span aria-hidden="true">{index + 1} / {itemCount}</span>
           </button>
         </div>
       </>
@@ -268,12 +269,12 @@ export function PresentationOverlay({
 
   return (
     <>
-      {slideStatus}
+      {itemStatus}
       <div className="presentation-controls" role="toolbar" aria-label="Presentation controls">
         <div className="presentation-main-controls">
-          <button type="button" onClick={() => onIndexChange(Math.max(0, index - 1))} disabled={index === 0} aria-label="Previous slide"><PreviousIcon /></button>
-          <span className="presentation-count" aria-hidden="true">{index + 1} / {slides.length}</span>
-          <button type="button" onClick={() => onIndexChange(Math.min(slides.length - 1, index + 1))} disabled={index >= slides.length - 1} aria-label="Next slide"><NextIcon /></button>
+          <button type="button" onClick={() => onIndexChange(Math.max(0, index - 1))} disabled={index === 0} aria-label={`Previous ${itemLabel.toLowerCase()}`}><PreviousIcon /></button>
+          <span className="presentation-count" aria-hidden="true">{index + 1} / {itemCount}</span>
+          <button type="button" onClick={() => onIndexChange(Math.min(itemCount - 1, index + 1))} disabled={index >= itemCount - 1} aria-label={`Next ${itemLabel.toLowerCase()}`}><NextIcon /></button>
           <span className="presentation-separator" />
           <button type="button" className={tool === "laser" ? "is-active" : ""} onClick={() => onToolChange("laser")} aria-label="Laser" aria-keyshortcuts="K" aria-pressed={tool === "laser"} title="Laser (K)"><LaserIcon /><span className="icon-label">Laser</span></button>
           <button type="button" className={tool === "freedraw" ? "is-active" : ""} onClick={() => onToolChange("freedraw")} aria-label="Ink" aria-keyshortcuts="P 7" aria-pressed={tool === "freedraw"} title="Ink (P or 7)"><InkIcon /><span className="icon-label">Ink</span></button>

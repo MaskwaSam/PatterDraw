@@ -20,9 +20,12 @@ import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import {
   PDF_PAGE_DELETE_UNDO_MS,
   deletePdfPageReversibly,
+  deletePdfPagesReversibly,
   duplicatePdfPage,
   pdfAdditionPreservesPageDeleteUndo,
+  pdfAdditionPreservesPdfPageBatchDeleteUndo,
   undoPdfPageDelete,
+  undoPdfPageBatchDelete,
 } from "./page-actions";
 
 function file(id: string, payload = id): Record<string, unknown> {
@@ -785,5 +788,293 @@ describe("reversible PDF page deletion", () => {
     );
     expect(editedUndo.project.scenes[replacementId]).toBe(editedReplacement);
     expect(editedUndo.project.scenes.target).toEqual(target);
+  });
+});
+
+describe("reversible batch PDF page deletion", () => {
+  it("validates a unique current selection and deletes scenes, slides, and only unreferenced sources atomically", () => {
+    const retained = page("retained", { documentId: "shared", pageIndex: 0 });
+    const shared = page("shared-selected", { documentId: "shared", pageIndex: 1 });
+    const sharedTwo = page("shared-selected-two", { documentId: "shared", pageIndex: 2 });
+    const removedOne = page("removed-one", { documentId: "removed-one-source", pageIndex: 0 });
+    const removedTwo = page("removed-two", { documentId: "removed-two-source", pageIndex: 7 });
+    const { project, pdfBytes } = fixture([
+      retained, shared, sharedTwo, removedOne, removedTwo,
+    ]);
+    project.activeSceneId = "removed-one";
+    project.slideOrder = [
+      { id: "retained-slide", sceneId: "retained", frameId: "retained-frame", title: "Retained" },
+      { id: "shared-slide", sceneId: "shared-selected", frameId: "shared-frame", title: "Shared" },
+      { id: "shared-two-slide", sceneId: "shared-selected-two", frameId: "shared-two-frame", title: "Shared 2" },
+      { id: "one-slide", sceneId: "removed-one", frameId: "one-frame", title: "One" },
+      { id: "two-slide", sceneId: "removed-two", frameId: "two-frame", title: "Two" },
+    ];
+    const beforeProject = structuredClone(project);
+    const beforeBytes = Object.fromEntries(
+      Object.entries(pdfBytes).map(([documentId, bytes]) => [documentId, [...bytes]]),
+    );
+
+    expect(() => deletePdfPagesReversibly(project, pdfBytes, []))
+      .toThrow(/at least one/i);
+    expect(() => deletePdfPagesReversibly(project, pdfBytes, ["shared-selected", "shared-selected"]))
+      .toThrow(/unique/i);
+    expect(() => deletePdfPagesReversibly(project, pdfBytes, ["missing"]))
+      .toThrow(/current PDF page/i);
+    const boardId = Object.values(project.scenes).find((scene) => !scene.pdfPage)!.id;
+    expect(() => deletePdfPagesReversibly(project, pdfBytes, [boardId]))
+      .toThrow(/current PDF page/i);
+
+    const result = deletePdfPagesReversibly(
+      project,
+      pdfBytes,
+      ["removed-two", "shared-selected", "removed-one", "shared-selected-two"],
+      { now: 10_000, updatedAt: "2026-08-20T03:00:00.000Z" },
+    );
+
+    expect(project).toEqual(beforeProject);
+    expect(Object.fromEntries(
+      Object.entries(pdfBytes).map(([documentId, bytes]) => [documentId, [...bytes]]),
+    )).toEqual(beforeBytes);
+    expect(result.deletedSceneIds).toEqual([
+      "shared-selected", "shared-selected-two", "removed-one", "removed-two",
+    ]);
+    expect(result.deletedPageNumbers).toEqual([2, 3, 4, 5]);
+    expect(result.project.pdfPageOrder).toEqual(["retained"]);
+    expect(result.project.scenes).not.toHaveProperty("shared-selected");
+    expect(result.project.scenes).not.toHaveProperty("shared-selected-two");
+    expect(result.project.scenes).not.toHaveProperty("removed-one");
+    expect(result.project.scenes).not.toHaveProperty("removed-two");
+    expect(result.project.activeSceneId).toBe("retained");
+    expect(result.project.slideOrder.map((slide) => slide.id)).toEqual(["retained-slide"]);
+    expect(Object.keys(result.project.pdfDocuments)).toEqual(["shared"]);
+    expect(Object.keys(result.pdfBytes)).toEqual(["shared"]);
+    expect(result.project.pdfDocuments.shared).toBe(project.pdfDocuments.shared);
+    expect(result.pdfBytes.shared).toBe(pdfBytes.shared);
+    expect(result.transaction.sources).toEqual([
+      expect.objectContaining({ documentId: "shared", sourceWasRemoved: false }),
+      expect.objectContaining({ documentId: "removed-one-source", sourceWasRemoved: true }),
+      expect.objectContaining({ documentId: "removed-two-source", sourceWasRemoved: true }),
+    ]);
+    expect(result.transaction.pages.map((snapshot) => snapshot.scene)).toEqual([
+      shared, sharedTwo, removedOne, removedTwo,
+    ]);
+    expect(removedTwo.pdfPage!.pageIndex).toBe(7);
+    expect(JSON.stringify(result.transaction)).not.toContain('"bytes"');
+    expect(Object.isFrozen(result.transaction)).toBe(true);
+    expect(Object.isFrozen(result.transaction.sceneIds)).toBe(true);
+  });
+
+  it("restores every selected page, slide, source, and byte set while preserving later unrelated edits", () => {
+    const a = page("a", { documentId: "shared", pageIndex: 0 });
+    const b = page("b", { documentId: "b-source", pageIndex: 1 });
+    const c = page("c", { documentId: "shared", pageIndex: 2 });
+    const d = page("d", { documentId: "d-source", pageIndex: 3 });
+    const e = page("e", { documentId: "shared", pageIndex: 4 });
+    const { project, pdfBytes } = fixture([a, b, c, d, e]);
+    project.activeSceneId = "d";
+    project.slideOrder = [a, b, c, d, e].map((scene) => ({
+      id: `${scene.id}-slide`,
+      sceneId: scene.id,
+      frameId: `${scene.id}-frame`,
+      title: scene.id.toUpperCase(),
+    }));
+    const bSource = project.pdfDocuments["b-source"];
+    const dSource = project.pdfDocuments["d-source"];
+    const bBytes = pdfBytes["b-source"];
+    const dBytes = pdfBytes["d-source"];
+    const deleted = deletePdfPagesReversibly(project, pdfBytes, ["d", "b"], { now: 20_000 });
+    const editedC: SerializedScene = {
+      ...deleted.project.scenes.c,
+      elements: [
+        ...deleted.project.scenes.c.elements,
+        element("later-ink", "rectangle", { x: 1_500 }),
+      ],
+    };
+    const later: ClassroomProject = {
+      ...deleted.project,
+      activeSceneId: "e",
+      scenes: { ...deleted.project.scenes, c: editedC },
+      pdfPageOrder: ["e", "c", "a"],
+      slideOrder: [
+        deleted.project.slideOrder[2],
+        deleted.project.slideOrder[1],
+        { id: "later-slide", sceneId: "c", frameId: "later-frame", title: "Later" },
+        deleted.project.slideOrder[0],
+      ],
+    };
+
+    const restored = undoPdfPageBatchDelete(later, deleted.pdfBytes, deleted.transaction, {
+      now: 20_001,
+      updatedAt: "2026-08-20T03:00:01.000Z",
+    });
+
+    expect(restored.restoredSceneIds).toEqual(["b", "d"]);
+    expect(restored.project.pdfPageOrder).toEqual(["e", "c", "a", "b", "d"]);
+    expect(restored.restoredPageNumbers).toEqual([4, 5]);
+    expect(restored.project.scenes.b).toBe(b);
+    expect(restored.project.scenes.d).toBe(d);
+    expect(restored.project.scenes.c).toBe(editedC);
+    expect(restored.project.scenes.c.elements).toContainEqual(
+      expect.objectContaining({ id: "later-ink" }),
+    );
+    expect(restored.project.slideOrder.map((slide) => slide.id)).toEqual([
+      "e-slide", "c-slide", "later-slide", "a-slide", "b-slide", "d-slide",
+    ]);
+    expect(restored.project.pdfDocuments["b-source"]).toBe(bSource);
+    expect(restored.project.pdfDocuments["d-source"]).toBe(dSource);
+    expect(restored.pdfBytes["b-source"]).toBe(bBytes);
+    expect(restored.pdfBytes["d-source"]).toBe(dBytes);
+    expect(restored.project.activeSceneId).toBe("d");
+    expect(restored.project.scenes.b.pdfPage!.pageIndex).toBe(1);
+    expect(restored.project.scenes.d.pdfPage!.pageIndex).toBe(3);
+  });
+
+  it("uses one removable emergency board and reserves the exact full batch restore size", () => {
+    const first = page("first", { documentId: "first-source", pageIndex: 0 });
+    const second = page("second", { documentId: "second-source", pageIndex: 5 });
+    const { project, pdfBytes } = fixture([first, second]);
+    project.scenes = { first, second };
+    project.activeSceneId = "second";
+    const restoredTotalBytes = getProjectContentSize(project, pdfBytes).totalBytes;
+    const deleted = deletePdfPagesReversibly(project, pdfBytes, ["second", "first"], {
+      now: 30_000,
+      createId: () => "emergency-board",
+    });
+
+    expect(Object.keys(deleted.project.scenes)).toEqual(["emergency-board"]);
+    expect(deleted.project.activeSceneId).toBe("emergency-board");
+    expect(deleted.project.pdfPageOrder).toEqual([]);
+    expect(deleted.project.pdfDocuments).toEqual({});
+    expect(deleted.pdfBytes).toEqual({});
+    expect(pdfAdditionPreservesPdfPageBatchDeleteUndo(
+      deleted.project,
+      deleted.pdfBytes,
+      deleted.transaction,
+      { now: 30_001, maxBytes: restoredTotalBytes },
+    )).toBe(true);
+    expect(pdfAdditionPreservesPdfPageBatchDeleteUndo(
+      deleted.project,
+      deleted.pdfBytes,
+      deleted.transaction,
+      { now: 30_001, maxBytes: restoredTotalBytes - 1 },
+    )).toBe(false);
+    expect(pdfAdditionPreservesPdfPageBatchDeleteUndo(
+      deleted.project,
+      deleted.pdfBytes,
+      deleted.transaction,
+      { now: deleted.transaction.expiresAt, maxBytes: 1 },
+    )).toBe(true);
+
+    const cleanUndo = undoPdfPageBatchDelete(
+      deleted.project,
+      deleted.pdfBytes,
+      deleted.transaction,
+      { now: 30_001 },
+    );
+    expect(Object.keys(cleanUndo.project.scenes).sort()).toEqual(["first", "second"]);
+    expect(cleanUndo.project.pdfPageOrder).toEqual(["first", "second"]);
+    expect(cleanUndo.project.activeSceneId).toBe("second");
+
+    const editedBoard: SerializedScene = {
+      ...deleted.project.scenes["emergency-board"],
+      elements: [element("later-board-work", "rectangle")],
+    };
+    const editedUndo = undoPdfPageBatchDelete(
+      {
+        ...deleted.project,
+        scenes: { "emergency-board": editedBoard },
+      },
+      deleted.pdfBytes,
+      deleted.transaction,
+      { now: 30_001 },
+    );
+    expect(editedUndo.project.scenes["emergency-board"]).toBe(editedBoard);
+    expect(editedUndo.project.scenes.first).toBe(first);
+    expect(editedUndo.project.scenes.second).toBe(second);
+  });
+
+  it("rejects expiry, collisions, and retained snapshot mutation without publishing partial state", () => {
+    const first = page("first", { documentId: "first-source" });
+    const second = page("second", { documentId: "second-source" });
+    const { project, pdfBytes } = fixture([first, second]);
+    const deleted = deletePdfPagesReversibly(project, pdfBytes, ["first", "second"], {
+      now: 40_000,
+    });
+
+    expect(() => undoPdfPageBatchDelete(
+      deleted.project,
+      deleted.pdfBytes,
+      deleted.transaction,
+      { now: deleted.transaction.expiresAt },
+    )).toThrow(/expired/i);
+    const collision: ClassroomProject = {
+      ...deleted.project,
+      scenes: { ...deleted.project.scenes, first: page("first") },
+    };
+    const collisionBefore = structuredClone(collision);
+    expect(() => undoPdfPageBatchDelete(
+      collision,
+      deleted.pdfBytes,
+      deleted.transaction,
+      { now: 40_001 },
+    )).toThrow(/scene collision/i);
+    expect(collision).toEqual(collisionBefore);
+
+    first.name = "mutated retained page";
+    const currentBefore = structuredClone(deleted.project);
+    expect(() => undoPdfPageBatchDelete(
+      deleted.project,
+      deleted.pdfBytes,
+      deleted.transaction,
+      { now: 40_001 },
+    )).toThrow(/snapshot changed/i);
+    expect(deleted.project).toEqual(currentBefore);
+
+    const byteFirst = page("byte-first", { documentId: "byte-source" });
+    const byteState = fixture([byteFirst]);
+    const byteDeleted = deletePdfPagesReversibly(
+      byteState.project,
+      byteState.pdfBytes,
+      ["byte-first"],
+      { now: 41_000 },
+    );
+    byteState.pdfBytes["byte-source"][0] = 255;
+    const byteCurrentBefore = structuredClone(byteDeleted.project);
+    expect(() => undoPdfPageBatchDelete(
+      byteDeleted.project,
+      byteDeleted.pdfBytes,
+      byteDeleted.transaction,
+      { now: 41_001 },
+    )).toThrow(/snapshot changed/i);
+    expect(byteDeleted.project).toEqual(byteCurrentBefore);
+
+    const collisionFirst = page("collision-first", { documentId: "collision-source" });
+    const collisionState = fixture([collisionFirst]);
+    const sourceDeleted = deletePdfPagesReversibly(
+      collisionState.project,
+      collisionState.pdfBytes,
+      ["collision-first"],
+      { now: 42_000 },
+    );
+    const wrongSourceProject: ClassroomProject = {
+      ...sourceDeleted.project,
+      pdfDocuments: {
+        ...sourceDeleted.project.pdfDocuments,
+        "collision-source": {
+          ...collisionState.project.pdfDocuments["collision-source"],
+          name: "different.pdf",
+        },
+      },
+    };
+    const reintroducedBytes = {
+      ...sourceDeleted.pdfBytes,
+      "collision-source": collisionState.pdfBytes["collision-source"].slice(),
+    };
+    expect(() => undoPdfPageBatchDelete(
+      wrongSourceProject,
+      reintroducedBytes,
+      sourceDeleted.transaction,
+      { now: 42_001 },
+    )).toThrow(/source collision/i);
   });
 });

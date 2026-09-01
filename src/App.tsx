@@ -203,11 +203,19 @@ import {
 import { assertPdfAdditionPreservesAnnotationUndo } from "./lib/pdf/annotation-undo-reservation";
 import {
   deletePdfPageReversibly,
+  deletePdfPagesReversibly,
   duplicatePdfPage,
   pdfAdditionPreservesPageDeleteUndo,
+  pdfAdditionPreservesPdfPageBatchDeleteUndo,
+  undoPdfPageBatchDelete,
   undoPdfPageDelete,
+  type PdfPageBatchDeleteTransaction,
   type PdfPageDeleteTransaction,
 } from "./lib/pdf/page-actions";
+import {
+  centeredPdfViewport,
+  normalizeSharedPdfZoom,
+} from "./lib/pdf/shared-viewport";
 import {
   getPdfPageDisplayGeometry,
   getPdfPageEffectiveRotation,
@@ -428,6 +436,7 @@ import "./styles.css";
 type SaveStatus = "saved" | "saving" | "error";
 type AutosaveRecoveryKind = "conflict" | "unreadable";
 type PresentationState = {
+  kind: "pdf" | "slides";
   index: number;
   tool: PresentationTool;
   inkColour: PresentationInkColour;
@@ -652,6 +661,13 @@ type PendingPdfUndo =
       transaction: PdfPageDeleteTransaction;
       cancelledAlarmIdentities: readonly ClassroomAlarmIdentity[];
       cancellationReceipt: ClassroomAlarmCancellationReceiptV1 | null;
+    }
+  | {
+      kind: "delete-pages";
+      token: number;
+      transaction: PdfPageBatchDeleteTransaction;
+      cancelledAlarmIdentities: readonly ClassroomAlarmIdentity[];
+      cancellationReceipt: ClassroomAlarmCancellationReceiptV1 | null;
     };
 type PdfUndoToast =
   | {
@@ -665,6 +681,12 @@ type PdfUndoToast =
       kind: "delete-page";
       token: number;
       deletedPageNumber: number;
+      expiresAt: number;
+    }
+  | {
+      kind: "delete-pages";
+      token: number;
+      deletedPageNumbers: readonly number[];
       expiresAt: number;
     };
 
@@ -694,12 +716,20 @@ export function assertPdfAdditionPreservesPendingUndo(
     return;
   }
   try {
-    if (!pdfAdditionPreservesPageDeleteUndo(
-      project,
-      pdfData,
-      pending.transaction,
-      { now },
-    )) throw new Error(PDF_UNDO_RESERVATION_ERROR);
+    const preservesUndo = pending.kind === "delete-pages"
+      ? pdfAdditionPreservesPdfPageBatchDeleteUndo(
+        project,
+        pdfData,
+        pending.transaction,
+        { now },
+      )
+      : pdfAdditionPreservesPageDeleteUndo(
+        project,
+        pdfData,
+        pending.transaction,
+        { now },
+      );
+    if (!preservesUndo) throw new Error(PDF_UNDO_RESERVATION_ERROR);
   } catch {
     throw new Error(PDF_UNDO_RESERVATION_ERROR);
   }
@@ -719,10 +749,15 @@ async function assertPdfAdditionPreservesPendingUndoRaster(
         now,
         updatedAt: project.updatedAt,
       }).project
-      : undoPdfPageDelete(project, pdfData, pending.transaction, {
-        now,
-        updatedAt: project.updatedAt,
-      }).project;
+      : pending.kind === "delete-pages"
+        ? undoPdfPageBatchDelete(project, pdfData, pending.transaction, {
+          now,
+          updatedAt: project.updatedAt,
+        }).project
+        : undoPdfPageDelete(project, pdfData, pending.transaction, {
+          now,
+          updatedAt: project.updatedAt,
+        }).project;
     await inspectLocalProjectRasterUsage(restoredProject, {
       rasterBudget: getBrowserPdfRasterBudget(),
       signal,
@@ -3131,6 +3166,8 @@ export default function App() {
   const nativeZenModeRef = useRef(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("board");
+  const workspaceModeRef = useRef<WorkspaceMode>(workspaceMode);
+  workspaceModeRef.current = workspaceMode;
   const [isSlideRailVisible, setIsSlideRailVisible] = useState(true);
   const [pdfRailWidth, setPdfRailWidth] = useState(PDF_RAIL_DEFAULT_WIDTH);
   const [isPdfRailVisible, setIsPdfRailVisible] = useState(true);
@@ -3312,6 +3349,7 @@ export default function App() {
     featurePreferences.snapToObjects,
   ]);
   const inputRef = useRef<HTMLInputElement>(null);
+  const pdfOpenInputRef = useRef<HTMLInputElement>(null);
   const pdfInsertInputRef = useRef<HTMLInputElement>(null);
   const pdfInsertTriggerRef = useRef<HTMLButtonElement | null>(null);
   const pdfPageActionsTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -3325,6 +3363,10 @@ export default function App() {
   const presentationTriggerRef = useRef<HTMLButtonElement>(null);
   const slideRailShowButtonRef = useRef<HTMLButtonElement>(null);
   const pdfRailShowButtonRef = useRef<HTMLButtonElement>(null);
+  const pdfSharedZoomRef = useRef<number | null>(null);
+  useEffect(() => {
+    pdfSharedZoomRef.current = null;
+  }, [project?.id]);
   const shellRef = useRef<HTMLDivElement>(null);
   const editorHostRef = useRef<HTMLDivElement>(null);
   const safeClipboardReadGuardRef = useRef(false);
@@ -5442,6 +5484,34 @@ export default function App() {
         sceneInputBlockedRef.current = false;
         setIsSceneInputBlocked(false);
         sceneHydrationBaselineRef.current = null;
+        if (workspaceModeRef.current === "pdf" && scene.pdfPage) {
+          const background = api.getSceneElements().find(
+            (element) => element.id === scene.pdfPage?.backgroundElementId,
+          );
+          if (background) {
+            const rememberedZoom = pdfSharedZoomRef.current;
+            if (rememberedZoom === null) {
+              api.scrollToContent(background, { animate: false });
+              pdfSharedZoomRef.current = normalizeSharedPdfZoom(api.getAppState().zoom.value);
+            } else {
+              const appState = api.getAppState();
+              const viewport = centeredPdfViewport(
+                background,
+                appState.width,
+                appState.height,
+                rememberedZoom,
+              );
+              api.updateScene({
+                appState: {
+                  scrollX: viewport.scrollX,
+                  scrollY: viewport.scrollY,
+                  zoom: { value: viewport.zoom as AppState["zoom"]["value"] },
+                },
+                captureUpdate: CaptureUpdateAction.NEVER,
+              });
+            }
+          }
+        }
         // The dark-PDF effect may have rendered while the replacement scene
         // was still behind the imperative editor boundary. Re-run it only
         // after both hydration paints have completed so no display-only
@@ -5758,6 +5828,13 @@ export default function App() {
         }
       }
       return;
+    }
+    if (
+      workspaceModeRef.current === "pdf"
+      && currentSceneRef.current?.pdfPage
+      && currentSceneRef.current.id === activeSceneIdRef.current
+    ) {
+      pdfSharedZoomRef.current = normalizeSharedPdfZoom(appState.zoom.value);
     }
     const preferences = featurePreferencesRef.current;
     const applyingPreferences = applyingEditorPreferencesRef.current;
@@ -10055,10 +10132,16 @@ export default function App() {
     });
   }, []);
 
+  const rememberCurrentPdfZoom = useCallback(() => {
+    if (!api || !currentSceneRef.current?.pdfPage) return;
+    pdfSharedZoomRef.current = normalizeSharedPdfZoom(api.getAppState().zoom.value);
+  }, [api]);
+
   const openPdfPageFromRail = useCallback((sceneId: string) => {
+    rememberCurrentPdfZoom();
     openScene(sceneId);
     if (window.matchMedia("(max-width: 640px)").matches) hidePdfRail();
-  }, [hidePdfRail, openScene]);
+  }, [hidePdfRail, openScene, rememberCurrentPdfZoom]);
 
   const activateProjectSearchResult = useCallback((result: ProjectSearchResult) => {
     if (!api) return;
@@ -10105,6 +10188,7 @@ export default function App() {
       durationMs: normalizeSlideMorphDurationMs(currentProject.slideMorphDurationMs),
     };
     setPresentation((current) => ({
+      kind: "slides",
       index,
       tool: current?.tool || "laser",
       inkColour: current?.inkColour || DEFAULT_PRESENTATION_INK_COLOUR,
@@ -10139,10 +10223,39 @@ export default function App() {
     if (needsHydration) setProjectHydrationRevision((revision) => revision + 1);
   }, [api, beginSceneHydration, commitLiveScenePersistence, commitPendingScenePersistence]);
 
+  const setPdfPresentationIndex = useCallback((index: number) => {
+    rememberCurrentPdfZoom();
+    const currentProject = commitPendingScenePersistence();
+    const page = currentProject ? orderedPdfScenes(currentProject)[index] : null;
+    if (!currentProject || !page?.pdfPage) {
+      api?.setToast({ message: "That PDF page is no longer available." });
+      return;
+    }
+    pendingPresentationTransitionRef.current = null;
+    setPresentation((current) => ({
+      kind: "pdf",
+      index,
+      tool: current?.tool || "laser",
+      inkColour: current?.inkColour || DEFAULT_PRESENTATION_INK_COLOUR,
+      inkWidth: current?.inkWidth || DEFAULT_PRESENTATION_INK_WIDTH,
+    }));
+    setActiveSlideId(null);
+    const currentSceneId = hydratedSceneIdRef.current
+      || activeSceneIdRef.current
+      || currentProject.activeSceneId;
+    if (page.id !== currentSceneId) openScene(page.id);
+  }, [api, commitPendingScenePersistence, openScene, rememberCurrentPdfZoom]);
+
   const startPresentation = useCallback(async (returnFocusTarget?: HTMLElement | null) => {
-    if (!project || !api || workspaceMode !== "slides") return;
-    if (!project.slideOrder.length) {
+    if (!project || !api || (workspaceMode !== "slides" && workspaceMode !== "pdf")) return;
+    const isPdfPresentation = workspaceMode === "pdf";
+    const pdfPresentationPages = isPdfPresentation ? orderedPdfScenes(project) : [];
+    if (!isPdfPresentation && !project.slideOrder.length) {
       api.setToast({ message: "Add a slide first; each frame becomes a slide." });
+      return;
+    }
+    if (isPdfPresentation && !pdfPresentationPages.length) {
+      api.setToast({ message: "Open a PDF first; each PDF page can be presented." });
       return;
     }
     if (presentationFocusRestoreFrameRef.current !== null) {
@@ -10161,7 +10274,9 @@ export default function App() {
       window.cancelAnimationFrame(presentationInkFrameRef.current);
       presentationInkFrameRef.current = null;
     }
-    const index = Math.max(0, project.slideOrder.findIndex((slide) => slide.id === activeSlideId));
+    const index = Math.max(0, isPdfPresentation
+      ? pdfPresentationPages.findIndex((page) => page.id === project.activeSceneId)
+      : project.slideOrder.findIndex((slide) => slide.id === activeSlideId));
     const previousPresentation = presentationRef.current;
     const previousOpenSidebar = api.getAppState().openSidebar;
     api.setToast(null);
@@ -10173,7 +10288,9 @@ export default function App() {
     libraryOpenRef.current = false;
     setIsLibraryOpen(false);
     setIsProjectFindOpen(false);
-    api.updateFrameRendering({ enabled: true, outline: false, name: false, clip: true });
+    api.updateFrameRendering(isPdfPresentation
+      ? { enabled: false, outline: false, name: false, clip: false }
+      : { enabled: true, outline: false, name: false, clip: true });
     api.setActiveTool({ type: "laser" });
     const selectedPresentationCandidate = selectedClassroomTime && hydratedSceneIdRef.current
       ? {
@@ -10193,7 +10310,8 @@ export default function App() {
       },
     );
     try {
-      setPresentationIndex(index, false);
+      if (isPdfPresentation) setPdfPresentationIndex(index);
+      else setPresentationIndex(index, false);
       setPresentationClassroomTimeSelection(rememberedClassroomTimeSelection);
     } catch (error) {
       // A host with a broken reduced-motion API (or another synchronous
@@ -10239,10 +10357,13 @@ export default function App() {
       }
       // Fullscreen can be browser-blocked; presentation still works in-window.
     }
-  }, [activeSlideId, api, project, selectedClassroomTime, setPresentationIndex, workspaceMode]);
+  }, [activeSlideId, api, project, selectedClassroomTime, setPdfPresentationIndex, setPresentationIndex, workspaceMode]);
 
-  const presentationSlide = presentation && project
+  const presentationSlide = presentation?.kind === "slides" && project
     ? project.slideOrder[presentation.index]
+    : null;
+  const presentationPdfScene = presentation?.kind === "pdf" && project
+    ? orderedPdfScenes(project)[presentation.index]
     : null;
 
   useEffect(() => {
@@ -10294,6 +10415,7 @@ export default function App() {
     }
     const returnFocusTarget = presentationReturnFocusRef.current;
     const returnFocusWasTrigger = presentationReturnFocusWasTriggerRef.current;
+    const stoppedPresentationKind = presentationRef.current?.kind;
     presentationReturnFocusRef.current = null;
     presentationReturnFocusWasTriggerRef.current = false;
     presentationRef.current = null;
@@ -10322,6 +10444,7 @@ export default function App() {
           ? returnFocusTarget
           : null;
         const replacementTrigger = returnFocusWasTrigger
+          && stoppedPresentationKind === workspaceModeRef.current
           ? presentationTriggerRef.current?.getClientRects().length
             ? presentationTriggerRef.current
             : shellRef.current?.querySelector<HTMLButtonElement>(".present-button") || null
@@ -10344,8 +10467,11 @@ export default function App() {
 
   useEffect(() => {
     if (!presentation) return;
-    if (workspaceMode !== "slides" || !presentationSlide) stopPresentation();
-  }, [presentation, presentationSlide, stopPresentation, workspaceMode]);
+    if (
+      (presentation.kind === "slides" && (workspaceMode !== "slides" || !presentationSlide))
+      || (presentation.kind === "pdf" && (workspaceMode !== "pdf" || !presentationPdfScene))
+    ) stopPresentation();
+  }, [presentation, presentationPdfScene, presentationSlide, stopPresentation, workspaceMode]);
 
   useEffect(() => {
     if (!presentation) return;
@@ -10580,7 +10706,11 @@ export default function App() {
         void saveProjectFile();
       } else if (openShortcut) {
         inputRef.current?.click();
-      } else if (presentationShortcut && workspaceMode === "slides" && !presentationRef.current) {
+      } else if (
+        presentationShortcut
+        && (workspaceMode === "slides" || workspaceMode === "pdf")
+        && !presentationRef.current
+      ) {
         if (isCleanFullscreenRef.current) {
           void exitCleanFullscreen().then(() => startPresentation());
         } else {
@@ -11509,11 +11639,12 @@ export default function App() {
       const nextPage = pdfScenes[nextIndex];
       if (!nextPage) return;
       event.preventDefault();
+      rememberCurrentPdfZoom();
       openScene(nextPage.id);
     };
     window.addEventListener("keydown", navigatePdfWithArrowKeys, true);
     return () => window.removeEventListener("keydown", navigatePdfWithArrowKeys, true);
-  }, [openScene, pageIndex, pdfScenes, presentation, workspaceMode]);
+  }, [openScene, pageIndex, pdfScenes, presentation, rememberCurrentPdfZoom, workspaceMode]);
 
   useEffect(() => {
     if (!api || workspaceMode !== "pdf" || !currentScene?.pdfPage) return;
@@ -11528,7 +11659,28 @@ export default function App() {
           const background = api.getSceneElements().find(
             (element) => element.id === currentScene.pdfPage?.backgroundElementId,
           );
-          if (background) api.scrollToContent(background, { animate: false });
+          if (!background) return;
+          const rememberedZoom = pdfSharedZoomRef.current;
+          if (rememberedZoom === null) {
+            api.scrollToContent(background, { animate: false });
+            pdfSharedZoomRef.current = normalizeSharedPdfZoom(api.getAppState().zoom.value);
+            return;
+          }
+          const appState = api.getAppState();
+          const viewport = centeredPdfViewport(
+            background,
+            appState.width,
+            appState.height,
+            rememberedZoom,
+          );
+          api.updateScene({
+            appState: {
+              scrollX: viewport.scrollX,
+              scrollY: viewport.scrollY,
+              zoom: { value: viewport.zoom as AppState["zoom"]["value"] },
+            },
+            captureUpdate: CaptureUpdateAction.NEVER,
+          });
         });
       });
     };
@@ -12101,16 +12253,24 @@ export default function App() {
         && Date.now() < pending.transaction.expiresAt
         && isCurrentClassroomTimeAsyncOperation(operationFence)
       );
-      if (pending.kind === "delete-page") {
-        const restored = undoPdfPageDelete(
-          currentProject,
-          pdfBytesRef.current,
-          pending.transaction,
-          { now, updatedAt: nowIso() },
-        );
+      if (pending.kind === "delete-page" || pending.kind === "delete-pages") {
+        const isBatchDelete = pending.kind === "delete-pages";
+        const restored = isBatchDelete
+          ? undoPdfPageBatchDelete(
+            currentProject,
+            pdfBytesRef.current,
+            pending.transaction,
+            { now, updatedAt: nowIso() },
+          )
+          : undoPdfPageDelete(
+            currentProject,
+            pdfBytesRef.current,
+            pending.transaction,
+            { now, updatedAt: nowIso() },
+          );
         if (getProjectContentSize(restored.project, restored.pdfBytes).totalBytes > MAX_PROJECT_BYTES) {
           setErrorMessage(
-            "The deleted page could not be restored because the project is now too large to save safely. Remove recently added content and try Undo again before it expires.",
+            `The deleted ${isBatchDelete ? "pages" : "page"} could not be restored because the project is now too large to save safely. Remove recently added content and try Undo again before it expires.`,
           );
           return;
         }
@@ -12122,7 +12282,7 @@ export default function App() {
           );
           if (alarmRestore.status !== "persisted" || !alarmRestore.receipt) {
             finalizePendingPdfUndo();
-            setErrorMessage("The deleted page could not be restored because its alarms could not be restored durably.");
+            setErrorMessage(`The deleted ${isBatchDelete ? "pages" : "page"} could not be restored because their alarms could not be restored durably.`);
             return;
           }
           stagedUndoAlarmReceipt = alarmRestore.receipt;
@@ -12163,7 +12323,7 @@ export default function App() {
           stagedUndoAlarmReceipt
           && !await activatePublishedClassroomAlarmReceipts([stagedUndoAlarmReceipt])
         ) {
-          setErrorMessage("The page was restored, but its classroom timers were paused because alarm activation failed.");
+          setErrorMessage(`The ${isBatchDelete ? "pages were" : "page was"} restored, but their classroom timers were paused because alarm activation failed.`);
         }
         stagedUndoAlarmReceipt = null;
         return;
@@ -12445,6 +12605,107 @@ export default function App() {
         setErrorMessage(error instanceof Error ? error.message : String(error));
       }
     })();
+  }, [
+    abortSceneOperations,
+    beginSceneHydration,
+    beginClassroomTimeAsyncOperation,
+    cancelFileOpenOperations,
+    commitLiveScenePersistence,
+    finalizePendingPdfUndo,
+    isCurrentClassroomTimeAsyncOperation,
+    pauseUnauthorizedLiveClassroomTimeWidgets,
+  ]);
+
+  const deletePdfPages = useCallback((sceneIds: readonly string[]): boolean => {
+    const initialProject = projectRef.current;
+    const selected = new Set(sceneIds);
+    if (
+      !initialProject
+      || selected.size === 0
+      || selected.size !== sceneIds.length
+      || sceneIds.some((sceneId) => !initialProject.scenes[sceneId]?.pdfPage)
+    ) return false;
+    const selectedInOutputOrder = reconcilePdfPageOrder(initialProject)
+      .filter((sceneId) => selected.has(sceneId));
+    if (selectedInOutputOrder.length !== selected.size) return false;
+    if (!window.confirm(
+      `Remove ${selected.size} selected PDF ${selected.size === 1 ? "page" : "pages"}? This also removes their annotations. You can undo the whole removal for ten seconds.`,
+    )) return false;
+
+    void (async () => {
+      try {
+        abortSceneOperations(true);
+        cancelFileOpenOperations(true);
+        const activeSceneId = activeSceneIdRef.current
+          || projectRef.current?.activeSceneId
+          || "";
+        const currentProject = commitLiveScenePersistence(activeSceneId, true);
+        if (!currentProject) throw new Error("The current project is unavailable.");
+        const operationFence = beginClassroomTimeAsyncOperation();
+        if (!operationFence) return;
+        const deleted = deletePdfPagesReversibly(
+          currentProject,
+          pdfBytesRef.current,
+          selectedInOutputOrder,
+          { updatedAt: nowIso() },
+        );
+        const cancelledAlarmIdentities = removedClassroomTimeAlarmIdentities(
+          currentProject,
+          deleted.project,
+        );
+        let cancellationReceipt: ClassroomAlarmCancellationReceiptV1 | null = null;
+        if (cancelledAlarmIdentities.length) {
+          const cancellation = await cancelClassroomAlarmIdentitiesWithReceipt(
+            cancelledAlarmIdentities,
+            Date.now(),
+          );
+          if (cancellation.status !== "persisted" || !cancellation.receipt) {
+            throw new Error("The pages could not be removed because their alarms could not be cancelled durably.");
+          }
+          cancellationReceipt = cancellation.receipt;
+        }
+        if (!isCurrentClassroomTimeAsyncOperation(operationFence)) {
+          if (cancelledAlarmIdentities.length) pauseUnauthorizedLiveClassroomTimeWidgets();
+          setErrorMessage("The pages changed while alarm cancellation was pending. Nothing was removed; review the pages and try again.");
+          return;
+        }
+
+        finalizePendingPdfUndo();
+        const token = ++pdfUndoTokenRef.current;
+        pendingPdfUndoRef.current = {
+          kind: "delete-pages",
+          token,
+          transaction: deleted.transaction,
+          cancelledAlarmIdentities,
+          cancellationReceipt,
+        };
+        pdfUndoTimerRef.current = window.setTimeout(() => {
+          if (pendingPdfUndoRef.current?.token === token) finalizePendingPdfUndo();
+        }, Math.max(0, deleted.transaction.expiresAt - Date.now()));
+        setPdfUndoToast({
+          kind: "delete-pages",
+          token,
+          deletedPageNumbers: deleted.deletedPageNumbers,
+          expiresAt: deleted.transaction.expiresAt,
+        });
+
+        if (deleted.project.activeSceneId !== currentProject.activeSceneId) beginSceneHydration();
+        pendingFrameIdRef.current = null;
+        pendingProjectSearchTargetRef.current = null;
+        pendingCreatedFrameIdRef.current = null;
+        pendingSlideFrameActionRef.current = null;
+        pdfBytesRef.current = deleted.pdfBytes;
+        projectRef.current = deleted.project;
+        activeSceneIdRef.current = deleted.project.activeSceneId;
+        setPdfBytes(deleted.pdfBytes);
+        setProject(deleted.project);
+        setWorkspaceMode(reconcilePdfPageOrder(deleted.project).length ? "pdf" : "board");
+        setErrorMessage(null);
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    })();
+    return true;
   }, [
     abortSceneOperations,
     beginSceneHydration,
@@ -13759,7 +14020,10 @@ export default function App() {
       pdfPageCount={pdfScenes.length}
       onOpenPdfPage={(index) => {
         const scene = pdfScenes[index];
-        if (scene) openScene(scene.id);
+        if (scene) {
+          rememberCurrentPdfZoom();
+          openScene(scene.id);
+        }
       }}
       isPdfRailVisible={isPdfRailVisible}
       onShowPdfRail={showPdfRail}
@@ -13808,7 +14072,7 @@ export default function App() {
   return (
     <div
       ref={shellRef}
-      className={`app-shell ${workspaceModeClassName(workspaceMode)} ${workspaceMode === "slides" && !isSlideRailVisible ? "is-slide-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfRailVisible ? "is-pdf-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfToolbarVisible ? "is-pdf-toolbar-hidden" : ""} ${!isNavigationVisible ? "is-nav-hidden" : ""} ${!isFooterVisible ? "is-footer-hidden" : ""} ${!featurePreferences.projectFind ? "is-project-find-disabled" : ""} ${!featurePreferences.library ? "is-library-disabled" : ""} ${isProjectFindOpen ? "is-project-find-open" : ""} ${isLibraryOpen ? "is-library-open" : ""} ${featurePreferences.iconOnlyControls ? "is-icon-only-controls" : ""} ${featurePreferences.bottomInterface ? "is-bottom-interface" : ""} ${featurePreferences.obsCaptureArea ? "is-obs-capture-enabled" : ""} ${featurePreferences.obsCaptureArea && featurePreferences.obsShowCursor ? "is-obs-cursor-visible" : ""} ${isCleanFullscreen ? "is-clean-fullscreen" : ""} ${presentation && presentationSlide && workspaceMode === "slides" ? "is-presenting" : ""}`}
+      className={`app-shell ${workspaceModeClassName(workspaceMode)} ${workspaceMode === "slides" && !isSlideRailVisible ? "is-slide-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfRailVisible ? "is-pdf-rail-hidden" : ""} ${workspaceMode === "pdf" && !isPdfToolbarVisible ? "is-pdf-toolbar-hidden" : ""} ${!isNavigationVisible ? "is-nav-hidden" : ""} ${!isFooterVisible ? "is-footer-hidden" : ""} ${!featurePreferences.projectFind ? "is-project-find-disabled" : ""} ${!featurePreferences.library ? "is-library-disabled" : ""} ${isProjectFindOpen ? "is-project-find-open" : ""} ${isLibraryOpen ? "is-library-open" : ""} ${featurePreferences.iconOnlyControls ? "is-icon-only-controls" : ""} ${featurePreferences.bottomInterface ? "is-bottom-interface" : ""} ${featurePreferences.obsCaptureArea ? "is-obs-capture-enabled" : ""} ${featurePreferences.obsCaptureArea && featurePreferences.obsShowCursor ? "is-obs-cursor-visible" : ""} ${isCleanFullscreen ? "is-clean-fullscreen" : ""} ${presentation && (presentationSlide || presentationPdfScene) ? "is-presenting" : ""}`}
       data-theme={editorTheme}
       style={{ "--pdf-rail-width": `${pdfRailWidth}px` } as CSSProperties}
     >
@@ -14023,6 +14287,7 @@ export default function App() {
           onOpenPage={openPdfPageFromRail}
           onMovePage={reorderPdfPage}
           onShiftPage={shiftPdfPagePosition}
+          onOpenPdf={() => pdfOpenInputRef.current?.click()}
           onAddBlankPage={() => void addPdfPage()}
           onInsertPdfPages={openPdfInsertFilePicker}
           addPageTriggerRef={pdfInsertTriggerRef}
@@ -14031,6 +14296,7 @@ export default function App() {
           onRotatePage={rotatePdfPageAction}
           onRequestClearAnnotations={requestPdfAnnotationClear}
           onDeletePage={deletePdfPage}
+          onDeletePages={deletePdfPages}
           width={pdfRailWidth}
           onWidthChange={setPdfRailWidth}
           onHide={hidePdfRail}
@@ -14039,8 +14305,8 @@ export default function App() {
       <main
         className="editor-region"
         data-presentation-zoom={presentation ? zoom : undefined}
-        data-slide-transition={presentation ? (project.slideMorphEnabled === true ? "morph" : "none") : undefined}
-        data-morph-duration-ms={presentation ? normalizeSlideMorphDurationMs(project.slideMorphDurationMs) : undefined}
+        data-slide-transition={presentation?.kind === "slides" ? (project.slideMorphEnabled === true ? "morph" : "none") : undefined}
+        data-morph-duration-ms={presentation?.kind === "slides" ? normalizeSlideMorphDurationMs(project.slideMorphDurationMs) : undefined}
         onPointerDownCapture={syncPresentationInkOnPointerDown}
         onPointerUp={finishPresentationInkStroke}
         onPointerCancel={finishPresentationInkStroke}
@@ -14257,9 +14523,10 @@ export default function App() {
           ? renderWorkspaceStatusControls("footer")
           : null}
       </main>
-      {presentation && presentationSlide && workspaceMode === "slides" && (
+      {presentation && (presentationSlide || presentationPdfScene) && (
         <PresentationOverlay
-          slides={project.slideOrder}
+          itemCount={presentation.kind === "pdf" ? pdfScenes.length : project.slideOrder.length}
+          itemLabel={presentation.kind === "pdf" ? "Page" : "Slide"}
           index={presentation.index}
           tool={presentation.tool}
           inkColour={presentation.inkColour}
@@ -14269,7 +14536,7 @@ export default function App() {
             nowMs: classroomTimeNowMs,
             activeTarget: classroomTimeActiveTarget,
           } : null}
-          onIndexChange={setPresentationIndex}
+          onIndexChange={presentation.kind === "pdf" ? setPdfPresentationIndex : setPresentationIndex}
           onToolChange={setPresentationTool}
           onClassroomTimeCommand={controlSelectedClassroomTimeWidget}
           onClassroomTimeTargetChange={setClassroomTimeActiveTarget}
@@ -14299,6 +14566,18 @@ export default function App() {
           unreadableHistory={recoveryHistoryUnreadable}
         />
       ) : null}
+      <input
+        ref={pdfOpenInputRef}
+        className="visually-hidden"
+        type="file"
+        aria-label="Open PDF"
+        accept=".pdf,application/pdf,application/octet-stream"
+        onChange={(event) => {
+          const file = event.currentTarget.files?.[0];
+          event.currentTarget.value = "";
+          if (file) void handleFile(file);
+        }}
+      />
       <input
         ref={inputRef}
         className="visually-hidden"
@@ -14501,6 +14780,10 @@ export default function App() {
                   <>
                     Cleared {pdfUndoToast.annotationCount} {pdfUndoToast.annotationCount === 1 ? "annotation" : "annotations"}
                     {" from "}{pdfUndoToast.affectedPageCount} {pdfUndoToast.affectedPageCount === 1 ? "page" : "pages"}
+                  </>
+                ) : pdfUndoToast.kind === "delete-pages" ? (
+                  <>
+                    Removed {pdfUndoToast.deletedPageNumbers.length} selected {pdfUndoToast.deletedPageNumbers.length === 1 ? "page" : "pages"}
                   </>
                 ) : (
                   <>Deleted output page {pdfUndoToast.deletedPageNumber}</>

@@ -24,6 +24,7 @@ interface PdfPageRailProps {
   onOpenPage: (sceneId: SceneId) => void;
   onMovePage: (movingId: SceneId, targetId: SceneId, edge: PdfPageDropEdge) => void;
   onShiftPage: (sceneId: SceneId, direction: -1 | 1) => void;
+  onOpenPdf: () => void;
   onAddBlankPage: () => void;
   onInsertPdfPages: () => void;
   addPageTriggerRef?: MutableRefObject<HTMLButtonElement | null>;
@@ -32,6 +33,7 @@ interface PdfPageRailProps {
   onRotatePage: (sceneId: SceneId, direction: "clockwise" | "counterclockwise") => void;
   onRequestClearAnnotations: (sceneId: SceneId) => void;
   onDeletePage: (sceneId: SceneId) => void;
+  onDeletePages: (sceneIds: readonly SceneId[]) => boolean;
   width: number;
   onWidthChange: (width: number) => void;
   onHide: () => void;
@@ -68,6 +70,7 @@ export function PdfPageRail({
   onOpenPage,
   onMovePage,
   onShiftPage,
+  onOpenPdf,
   onAddBlankPage,
   onInsertPdfPages,
   addPageTriggerRef,
@@ -76,6 +79,7 @@ export function PdfPageRail({
   onRotatePage,
   onRequestClearAnnotations,
   onDeletePage,
+  onDeletePages,
   width,
   onWidthChange,
   onHide,
@@ -85,6 +89,8 @@ export function PdfPageRail({
   const [announcement, setAnnouncement] = useState("");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [actionSceneId, setActionSceneId] = useState<SceneId | null>(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedPageIds, setSelectedPageIds] = useState<ReadonlySet<SceneId>>(() => new Set());
   const [actionMenuPlacement, setActionMenuPlacement] = useState<"above" | "below">("below");
   const [actionMenuMaxHeight, setActionMenuMaxHeight] = useState<number | null>(null);
   const addButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -92,6 +98,8 @@ export function PdfPageRail({
   const actionButtonRef = useRef<HTMLButtonElement | null>(null);
   const actionMenuRef = useRef<HTMLDivElement>(null);
   const actionMenuInitialFocusRef = useRef<"first" | "last">("first");
+  const selectPagesButtonRef = useRef<HTMLButtonElement | null>(null);
+  const lastSelectedPageIndexRef = useRef<number | null>(null);
   const resizeStartRef = useRef<{ pointerId: number; clientX: number; width: number } | null>(null);
 
   useEffect(() => {
@@ -187,6 +195,47 @@ export function PdfPageRail({
     setActionSceneId(null);
   }, [activeSceneId]);
 
+  useEffect(() => {
+    const available = new Set(pages.map((page) => page.id));
+    setSelectedPageIds((current) => {
+      if ([...current].every((sceneId) => available.has(sceneId))) return current;
+      return new Set([...current].filter((sceneId) => available.has(sceneId)));
+    });
+    if (!pages.length) {
+      setSelectionMode(false);
+      lastSelectedPageIndexRef.current = null;
+    }
+  }, [pages]);
+
+  function closeSelectionMode() {
+    setSelectionMode(false);
+    setSelectedPageIds(new Set());
+    lastSelectedPageIndexRef.current = null;
+  }
+
+  function togglePageSelection(sceneId: SceneId, index: number, selectRange: boolean) {
+    setSelectedPageIds((current) => {
+      const next = new Set(current);
+      if (selectRange && lastSelectedPageIndexRef.current !== null) {
+        const from = Math.min(lastSelectedPageIndexRef.current, index);
+        const to = Math.max(lastSelectedPageIndexRef.current, index);
+        const selecting = !current.has(sceneId);
+        for (let pageIndex = from; pageIndex <= to; pageIndex += 1) {
+          const rangeId = pages[pageIndex]?.id;
+          if (!rangeId) continue;
+          if (selecting) next.add(rangeId);
+          else next.delete(rangeId);
+        }
+      } else if (next.has(sceneId)) {
+        next.delete(sceneId);
+      } else {
+        next.add(sceneId);
+      }
+      return next;
+    });
+    lastSelectedPageIndexRef.current = index;
+  }
+
   function handleAddMenuKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
       if (event.key === "Tab") setAddMenuOpen(false);
@@ -242,20 +291,83 @@ export function PdfPageRail({
   }
 
   return (
-    <aside id="pdf-page-rail" className="slide-rail pdf-page-rail" aria-label="PDF pages">
+    <aside
+      id="pdf-page-rail"
+      className={`slide-rail pdf-page-rail ${selectionMode ? "is-selection-mode" : ""}`}
+      aria-label="PDF pages"
+    >
       <div className="rail-heading pdf-rail-heading">
         <div>
           <span className="rail-kicker">Document</span>
           <h2>PDF pages</h2>
         </div>
         <div className="pdf-rail-heading-actions">
+          <button
+            ref={selectPagesButtonRef}
+            className="pdf-select-pages-button"
+            type="button"
+            aria-pressed={selectionMode}
+            onClick={() => {
+              setAddMenuOpen(false);
+              setActionSceneId(null);
+              if (selectionMode) closeSelectionMode();
+              else setSelectionMode(true);
+            }}
+          >
+            {selectionMode ? "Done" : "Select"}
+          </button>
           <span className="pdf-page-total" aria-label={`${pages.length} PDF pages`}>{pages.length}</span>
           <button className="icon-button pdf-rail-hide" type="button" onClick={onHide} aria-label="Hide PDF pages" title="Hide PDF pages">
             <HidePanelIcon />
           </button>
         </div>
       </div>
-      <p className="pdf-rail-help">Drag pages to reorder them. Export follows this order.</p>
+      <p className="pdf-rail-help">
+        {selectionMode
+          ? "Choose pages to remove. Shift-click selects a range."
+          : "Drag pages to reorder them. Export follows this order."}
+      </p>
+      {selectionMode ? (
+        <div className="pdf-page-selection-toolbar" role="toolbar" aria-label="PDF page selection">
+          <span aria-live="polite">{selectedPageIds.size} selected</span>
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedPageIds(new Set(pages.map((page) => page.id)));
+              lastSelectedPageIndexRef.current = pages.length ? pages.length - 1 : null;
+            }}
+            disabled={selectedPageIds.size === pages.length}
+          >
+            Select all
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedPageIds(new Set());
+              lastSelectedPageIndexRef.current = null;
+            }}
+            disabled={selectedPageIds.size === 0}
+          >
+            Clear
+          </button>
+          <button
+            className="is-danger"
+            type="button"
+            disabled={selectedPageIds.size === 0}
+            onClick={() => {
+              const selectedInOutputOrder = pages
+                .map((page) => page.id)
+                .filter((sceneId) => selectedPageIds.has(sceneId));
+              if (onDeletePages(selectedInOutputOrder)) {
+                closeSelectionMode();
+                window.requestAnimationFrame(() => selectPagesButtonRef.current?.focus());
+              }
+            }}
+          >
+            <TrashIcon />Remove {selectedPageIds.size || ""}
+          </button>
+        </div>
+      ) : null}
       <ol className="rail-scroll pdf-page-list">
         {pages.map((scene, index) => {
           const workspace = scene.pdfPage;
@@ -287,9 +399,9 @@ export function PdfPageRail({
           return (
             <li
               key={scene.id}
-              className={`pdf-page-item${scene.id === activeSceneId ? " is-selected" : ""}${actionSceneId === scene.id ? " is-actions-open" : ""}${targetClass}`}
+              className={`pdf-page-item${scene.id === activeSceneId ? " is-selected" : ""}${selectedPageIds.has(scene.id) ? " is-batch-selected" : ""}${actionSceneId === scene.id ? " is-actions-open" : ""}${targetClass}`}
               onDragOver={(event) => {
-                if (!draggingId || draggingId === scene.id) return;
+                if (selectionMode || !draggingId || draggingId === scene.id) return;
                 event.preventDefault();
                 event.dataTransfer.dropEffect = "move";
                 setDropTarget({ id: scene.id, edge: dragEdge(event) });
@@ -308,12 +420,27 @@ export function PdfPageRail({
                 setDropTarget(null);
               }}
             >
+              {selectionMode ? (
+                <label className="pdf-page-selection-check">
+                  <input
+                    type="checkbox"
+                    checked={selectedPageIds.has(scene.id)}
+                    aria-label={`Select output page ${index + 1}: ${label}`}
+                    onChange={(event) => togglePageSelection(scene.id, index, event.nativeEvent instanceof MouseEvent && event.nativeEvent.shiftKey)}
+                  />
+                  <span aria-hidden="true" />
+                </label>
+              ) : null}
               <button
                 className="pdf-page-open"
                 type="button"
                 aria-current={scene.id === activeSceneId ? "page" : undefined}
-                aria-label={`Open output page ${index + 1}: ${label}`}
-                onClick={() => onOpenPage(scene.id)}
+                aria-label={`${selectionMode ? selectedPageIds.has(scene.id) ? "Deselect" : "Select" : "Open"} output page ${index + 1}: ${label}`}
+                aria-pressed={selectionMode ? selectedPageIds.has(scene.id) : undefined}
+                onClick={(event) => {
+                  if (selectionMode) togglePageSelection(scene.id, index, event.shiftKey);
+                  else onOpenPage(scene.id);
+                }}
               >
                 <span className="pdf-output-position">{index + 1}</span>
                 <span className="page-sheet" style={{ aspectRatio: `${display.width} / ${display.height}` }}>
@@ -334,7 +461,7 @@ export function PdfPageRail({
                   <span>{isBlankPage ? "Added page" : `Original page ${workspace.pageIndex + 1}`}</span>
                 </span>
               </button>
-              <div className="pdf-page-actions" aria-label={`Actions for output page ${index + 1}`}>
+              {!selectionMode ? <div className="pdf-page-actions" aria-label={`Actions for output page ${index + 1}`}>
                 <button
                   type="button"
                   disabled={index === 0}
@@ -485,12 +612,30 @@ export function PdfPageRail({
                     ) : null}
                   </div>
                 ) : null}
-              </div>
+              </div> : null}
             </li>
           );
         })}
       </ol>
       <div className="pdf-rail-actions">
+        <div className="pdf-file-actions" role="group" aria-label="Open or add PDF pages">
+          <button
+            className="pdf-open-file"
+            type="button"
+            title="Open a PDF and replace the current PDF pages"
+            onClick={onOpenPdf}
+          >
+            <PdfIcon /><span>Open PDF</span>
+          </button>
+          <button
+            className="pdf-insert-file"
+            type="button"
+            title="Keep the current pages and add pages from another PDF"
+            onClick={onInsertPdfPages}
+          >
+            <PlusIcon /><span>Add PDF pages</span>
+          </button>
+        </div>
         <button
           ref={(button) => {
             addButtonRef.current = button;

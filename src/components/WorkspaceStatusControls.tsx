@@ -133,8 +133,14 @@ export function WorkspaceStatusControls({
         <button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => onEditorControl(".zoom-in-button")}><PlusIcon /></button>
       </div>
       <div className="statusbar-actions">
-        {workspaceMode === "slides" ? (
-          <button className="present-button" type="button" onClick={onPresent} title="Start presentation">
+        {workspaceMode === "slides" || workspaceMode === "pdf" ? (
+          <button
+            className="present-button"
+            type="button"
+            onClick={onPresent}
+            aria-label={workspaceMode === "pdf" ? "Present PDF" : "Present"}
+            title={workspaceMode === "pdf" ? "Present PDF" : "Start presentation"}
+          >
             <PresentIcon /><span className="icon-label">Present</span>
           </button>
         ) : null}

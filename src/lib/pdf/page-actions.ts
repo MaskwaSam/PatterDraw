@@ -99,6 +99,57 @@ export interface UndoPdfPageDeleteResult extends LoadedClassroomProject {
   restoredPageNumber: number;
 }
 
+interface RemovedPdfPageSnapshot {
+  readonly sceneId: SceneId;
+  readonly documentId: PdfDocumentId;
+  readonly pageOrderIndex: number;
+  readonly previousPageId?: SceneId;
+  readonly nextPageId?: SceneId;
+  readonly scene: Readonly<SerializedScene>;
+}
+
+interface RemovedPdfSourceSnapshot {
+  readonly documentId: PdfDocumentId;
+  readonly source: Readonly<PdfDocumentSource>;
+  readonly sourceWasRemoved: boolean;
+}
+
+/**
+ * One memory-only Undo record for a batch selection. The selected PDF source
+ * bytes are retained exclusively in a private WeakMap and therefore cannot be
+ * serialized into the project by spreading this transaction.
+ */
+export interface PdfPageBatchDeleteTransaction {
+  readonly kind: "patterdraw-pdf-page-batch-delete";
+  readonly version: 1;
+  /** Selected scene IDs in their authoritative pre-delete output order. */
+  readonly sceneIds: readonly SceneId[];
+  readonly createdAt: number;
+  readonly expiresAt: number;
+  readonly projectFingerprint: string;
+  readonly activeDeletedSceneId?: SceneId;
+  readonly pages: readonly RemovedPdfPageSnapshot[];
+  readonly sources: readonly RemovedPdfSourceSnapshot[];
+  readonly removedSlides: readonly RemovedSlideSnapshot[];
+  /** A defensive blank scene created only when deletion would leave no scene. */
+  readonly replacementScene?: Readonly<SerializedScene>;
+}
+
+export interface DeletePdfPagesResult extends LoadedClassroomProject {
+  /** Deleted scene IDs in their authoritative pre-delete output order. */
+  deletedSceneIds: readonly SceneId[];
+  /** Original one-based PDF output positions matching `deletedSceneIds`. */
+  deletedPageNumbers: readonly number[];
+  transaction: PdfPageBatchDeleteTransaction;
+}
+
+export interface UndoPdfPageBatchDeleteResult extends LoadedClassroomProject {
+  /** Restored scene IDs in their authoritative pre-delete output order. */
+  restoredSceneIds: readonly SceneId[];
+  /** Current one-based PDF output positions matching `restoredSceneIds`. */
+  restoredPageNumbers: readonly number[];
+}
+
 export interface PdfPageDeleteUndoReservationOptions {
   now?: number;
   maxBytes?: number;
@@ -111,7 +162,24 @@ interface PdfPageDeleteIntegrity {
   readonly sourceFingerprint: string;
 }
 
+interface PdfPageBatchDeleteIntegrity {
+  readonly scenes: ReadonlyMap<SceneId, {
+    readonly scene: SerializedScene;
+    readonly fingerprint: string;
+  }>;
+  readonly sources: ReadonlyMap<PdfDocumentId, {
+    readonly source: PdfDocumentSource;
+    readonly bytes: Uint8Array;
+    readonly sourceFingerprint: string;
+    readonly byteFingerprint: string;
+  }>;
+}
+
 const deleteIntegrity = new WeakMap<PdfPageDeleteTransaction, PdfPageDeleteIntegrity>();
+const batchDeleteIntegrity = new WeakMap<
+  PdfPageBatchDeleteTransaction,
+  PdfPageBatchDeleteIntegrity
+>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -723,6 +791,174 @@ export function deletePdfPageReversibly(
   });
 }
 
+/**
+ * Delete a unique selection of committed PDF pages as one atomic candidate and
+ * produce one ten-second, memory-only Undo record for the entire selection.
+ */
+export function deletePdfPagesReversibly(
+  project: ClassroomProject,
+  pdfBytes: Record<PdfDocumentId, Uint8Array>,
+  selectedSceneIds: readonly SceneId[],
+  options: PdfPageActionOptions = {},
+): DeletePdfPagesResult {
+  const now = nowFor(options);
+  const updatedAt = updatedAtFor(options, now);
+  if (!Array.isArray(selectedSceneIds) || selectedSceneIds.length === 0) {
+    throw new Error("Select at least one PDF page to delete.");
+  }
+  const selected = new Set<SceneId>();
+  for (const sceneId of selectedSceneIds) {
+    if (typeof sceneId !== "string" || !sceneId) {
+      throw new Error("The selected PDF page identity is invalid.");
+    }
+    if (selected.has(sceneId)) {
+      throw new Error("The selected PDF pages must be unique.");
+    }
+    selected.add(sceneId);
+  }
+
+  const order = reconcilePdfPageOrder(project);
+  const orderedSelection = order.filter((sceneId) => selected.has(sceneId));
+  if (orderedSelection.length !== selected.size) {
+    throw new Error("Every selected page must be a current PDF page in the page order.");
+  }
+  const orderIndex = new Map(order.map((sceneId, index) => [sceneId, index]));
+  const selectedDocuments = new Map<PdfDocumentId, {
+    source: PdfDocumentSource;
+    bytes: Uint8Array;
+  }>();
+  for (const sceneId of orderedSelection) {
+    const scene = project.scenes[sceneId];
+    if (!scene?.pdfPage) {
+      throw new Error("Every selected page must be a current PDF page in the page order.");
+    }
+    const documentId = scene.pdfPage.documentId;
+    const source = project.pdfDocuments[documentId];
+    const bytes = pdfBytes[documentId];
+    if (!source || !bytes || bytes.byteLength !== source.byteLength) {
+      throw new Error(`PDF data does not match project metadata for ${source?.name ?? scene.name}.`);
+    }
+    selectedDocuments.set(documentId, { source, bytes });
+  }
+
+  const remainingOrder = order.filter((sceneId) => !selected.has(sceneId));
+  const scenes = { ...project.scenes };
+  for (const sceneId of orderedSelection) delete scenes[sceneId];
+  let generatedReplacement: SerializedScene | undefined;
+  if (!Object.keys(scenes).length) {
+    generatedReplacement = replacementScene(project, options.createId ?? createLocalId);
+    scenes[generatedReplacement.id] = generatedReplacement;
+  }
+
+  const activeDeletedSceneId = selected.has(project.activeSceneId)
+    ? project.activeSceneId
+    : undefined;
+  let activeSceneId = project.activeSceneId;
+  if (activeDeletedSceneId || !hasOwn(scenes, activeSceneId)) {
+    const deletedActiveIndex = activeDeletedSceneId
+      ? orderIndex.get(activeDeletedSceneId) ?? 0
+      : 0;
+    activeSceneId = remainingOrder[Math.min(deletedActiveIndex, remainingOrder.length - 1)]
+      || boardSceneId({ ...project, scenes, activeSceneId: generatedReplacement?.id ?? activeSceneId })
+      || generatedReplacement!.id;
+  }
+
+  const remainingDocumentIds = new Set(
+    Object.values(scenes)
+      .map((scene) => scene.pdfPage?.documentId)
+      .filter((documentId): documentId is PdfDocumentId => !!documentId),
+  );
+  const removedDocumentIds = new Set(
+    [...selectedDocuments.keys()].filter((documentId) => !remainingDocumentIds.has(documentId)),
+  );
+  const pdfDocuments = removedDocumentIds.size
+    ? { ...project.pdfDocuments }
+    : project.pdfDocuments;
+  const nextPdfBytes = removedDocumentIds.size ? { ...pdfBytes } : pdfBytes;
+  for (const documentId of removedDocumentIds) {
+    delete pdfDocuments[documentId];
+    delete nextPdfBytes[documentId];
+  }
+
+  const removedSlides = project.slideOrder
+    .map((slide, index) => ({ slide, index }))
+    .filter(({ slide }) => selected.has(slide.sceneId))
+    .map(({ slide, index }): RemovedSlideSnapshot => ({
+      index,
+      ...(index > 0 ? { previousSlideId: project.slideOrder[index - 1].id } : {}),
+      ...(index + 1 < project.slideOrder.length
+        ? { nextSlideId: project.slideOrder[index + 1].id }
+        : {}),
+      slide: snapshotValue(slide),
+    }));
+  const nextProject: ClassroomProject = {
+    ...project,
+    updatedAt,
+    activeSceneId,
+    scenes,
+    slideOrder: project.slideOrder.filter((slide) => !selected.has(slide.sceneId)),
+    pdfPageOrder: remainingOrder,
+    pdfDocuments,
+  };
+  assertProjectStructure(nextProject, { label: "Deleted PDF pages" });
+
+  const pages = Object.freeze(orderedSelection.map((sceneId) => {
+    const pageOrderIndex = orderIndex.get(sceneId)!;
+    const scene = project.scenes[sceneId];
+    return Object.freeze<RemovedPdfPageSnapshot>({
+      sceneId,
+      documentId: scene.pdfPage!.documentId,
+      pageOrderIndex,
+      ...(pageOrderIndex > 0 ? { previousPageId: order[pageOrderIndex - 1] } : {}),
+      ...(pageOrderIndex + 1 < order.length ? { nextPageId: order[pageOrderIndex + 1] } : {}),
+      scene,
+    });
+  }));
+  const sources = Object.freeze([...selectedDocuments].map(([documentId, entry]) => (
+    Object.freeze<RemovedPdfSourceSnapshot>({
+      documentId,
+      source: entry.source,
+      sourceWasRemoved: removedDocumentIds.has(documentId),
+    })
+  )));
+  const transaction = Object.freeze<PdfPageBatchDeleteTransaction>({
+    kind: "patterdraw-pdf-page-batch-delete",
+    version: 1,
+    sceneIds: Object.freeze([...orderedSelection]),
+    createdAt: now,
+    expiresAt: now + PDF_PAGE_DELETE_UNDO_MS,
+    projectFingerprint: projectFingerprint(project),
+    ...(activeDeletedSceneId ? { activeDeletedSceneId } : {}),
+    pages,
+    sources,
+    removedSlides: snapshotValue(removedSlides),
+    ...(generatedReplacement ? { replacementScene: snapshotValue(generatedReplacement) } : {}),
+  });
+  batchDeleteIntegrity.set(transaction, {
+    scenes: new Map(pages.map((page) => [page.sceneId, {
+      scene: page.scene as SerializedScene,
+      fingerprint: fingerprint(page.scene),
+    }])),
+    sources: new Map(sources.map((snapshot) => {
+      const entry = selectedDocuments.get(snapshot.documentId)!;
+      return [snapshot.documentId, {
+        source: entry.source,
+        bytes: entry.bytes,
+        sourceFingerprint: fingerprint(entry.source),
+        byteFingerprint: byteFingerprint(entry.bytes),
+      }];
+    })),
+  });
+
+  return Object.freeze({
+    project: nextProject,
+    pdfBytes: nextPdfBytes,
+    deletedSceneIds: transaction.sceneIds,
+    deletedPageNumbers: Object.freeze(pages.map((page) => page.pageOrderIndex + 1)),
+    transaction,
+  });
+}
+
 function assertValidDeleteTransaction(transaction: PdfPageDeleteTransaction): void {
   if (
     !transaction
@@ -775,6 +1011,125 @@ function assertValidDeleteTransaction(transaction: PdfPageDeleteTransaction): vo
   }
 }
 
+function assertValidBatchDeleteTransaction(
+  transaction: PdfPageBatchDeleteTransaction,
+): PdfPageBatchDeleteIntegrity {
+  if (
+    !transaction
+    || transaction.kind !== "patterdraw-pdf-page-batch-delete"
+    || transaction.version !== 1
+    || !Array.isArray(transaction.sceneIds)
+    || transaction.sceneIds.length === 0
+    || !Number.isSafeInteger(transaction.createdAt)
+    || !Number.isSafeInteger(transaction.expiresAt)
+    || transaction.expiresAt - transaction.createdAt !== PDF_PAGE_DELETE_UNDO_MS
+    || !Array.isArray(transaction.pages)
+    || transaction.pages.length !== transaction.sceneIds.length
+    || !Array.isArray(transaction.sources)
+    || transaction.sources.length === 0
+    || !Array.isArray(transaction.removedSlides)
+  ) {
+    throw new Error("The PDF page batch deletion undo transaction is invalid.");
+  }
+
+  const selected = new Set<SceneId>();
+  const sourceIds = new Set<PdfDocumentId>();
+  let previousPageOrderIndex = -1;
+  for (let index = 0; index < transaction.pages.length; index += 1) {
+    const sceneId = transaction.sceneIds[index];
+    const page = transaction.pages[index];
+    if (
+      typeof sceneId !== "string"
+      || !sceneId
+      || selected.has(sceneId)
+      || !page
+      || page.sceneId !== sceneId
+      || typeof page.documentId !== "string"
+      || !page.documentId
+      || !Number.isSafeInteger(page.pageOrderIndex)
+      || page.pageOrderIndex <= previousPageOrderIndex
+      || !isRecord(page.scene)
+      || page.scene.id !== sceneId
+      || page.scene.pdfPage?.documentId !== page.documentId
+    ) {
+      throw new Error("The PDF page batch deletion undo transaction contains invalid page data.");
+    }
+    previousPageOrderIndex = page.pageOrderIndex;
+    selected.add(sceneId);
+  }
+  for (const snapshot of transaction.sources) {
+    if (
+      !snapshot
+      || typeof snapshot.documentId !== "string"
+      || !snapshot.documentId
+      || sourceIds.has(snapshot.documentId)
+      || !isRecord(snapshot.source)
+      || snapshot.source.id !== snapshot.documentId
+      || typeof snapshot.sourceWasRemoved !== "boolean"
+    ) {
+      throw new Error("The PDF page batch deletion undo transaction contains invalid source data.");
+    }
+    sourceIds.add(snapshot.documentId);
+  }
+  if (transaction.pages.some((page) => !sourceIds.has(page.documentId))) {
+    throw new Error("The PDF page batch deletion undo transaction is missing source data.");
+  }
+  if (
+    transaction.activeDeletedSceneId !== undefined
+    && !selected.has(transaction.activeDeletedSceneId)
+  ) {
+    throw new Error("The PDF page batch deletion undo transaction has invalid active-page data.");
+  }
+  const slideIds = new Set<string>();
+  for (const snapshot of transaction.removedSlides) {
+    if (
+      !snapshot
+      || !Number.isSafeInteger(snapshot.index)
+      || snapshot.index < 0
+      || !isRecord(snapshot.slide)
+      || typeof snapshot.slide.id !== "string"
+      || !snapshot.slide.id
+      || !selected.has(snapshot.slide.sceneId)
+      || slideIds.has(snapshot.slide.id)
+    ) {
+      throw new Error("The PDF page batch deletion undo transaction contains invalid slide data.");
+    }
+    slideIds.add(snapshot.slide.id);
+  }
+
+  const integrity = batchDeleteIntegrity.get(transaction);
+  if (
+    !integrity
+    || integrity.scenes.size !== transaction.pages.length
+    || integrity.sources.size !== transaction.sources.length
+  ) {
+    throw new Error("The PDF page batch deletion undo source is unavailable.");
+  }
+  for (const page of transaction.pages) {
+    const retained = integrity.scenes.get(page.sceneId);
+    if (
+      !retained
+      || retained.scene !== page.scene
+      || fingerprint(page.scene) !== retained.fingerprint
+    ) {
+      throw new Error("The PDF page batch deletion undo snapshot changed and cannot be restored safely.");
+    }
+  }
+  for (const snapshot of transaction.sources) {
+    const retained = integrity.sources.get(snapshot.documentId);
+    if (
+      !retained
+      || retained.source !== snapshot.source
+      || retained.bytes.byteLength !== snapshot.source.byteLength
+      || fingerprint(snapshot.source) !== retained.sourceFingerprint
+      || byteFingerprint(retained.bytes) !== retained.byteFingerprint
+    ) {
+      throw new Error("The PDF page batch deletion undo snapshot changed and cannot be restored safely.");
+    }
+  }
+  return integrity;
+}
+
 function insertionIndex(
   currentIds: readonly string[],
   originalIndex: number,
@@ -810,9 +1165,43 @@ function restoreSlides(
   return result;
 }
 
+function restoreBatchSlides(
+  current: readonly ClassroomSlide[],
+  removed: readonly RemovedSlideSnapshot[],
+): ClassroomSlide[] {
+  const result = [...current];
+  let previousRestoredIndex = -1;
+  for (const snapshot of [...removed].sort((left, right) => left.index - right.index)) {
+    const ids = result.map((slide) => slide.id);
+    const anchoredIndex = insertionIndex(
+      ids,
+      snapshot.index,
+      snapshot.previousSlideId,
+      snapshot.nextSlideId,
+    );
+    const index = Math.max(anchoredIndex, previousRestoredIndex + 1);
+    result.splice(index, 0, cloneValue(snapshot.slide) as ClassroomSlide);
+    previousRestoredIndex = index;
+  }
+  return result;
+}
+
 function canRemoveGeneratedReplacement(
   project: ClassroomProject,
   transaction: PdfPageDeleteTransaction,
+): boolean {
+  const replacement = transaction.replacementScene;
+  if (!replacement) return false;
+  const current = project.scenes[replacement.id];
+  return !!current
+    && valuesEqual(current, replacement)
+    && !project.slideOrder.some((slide) => slide.sceneId === replacement.id)
+    && !(project.pdfPageOrder || []).includes(replacement.id);
+}
+
+function canRemoveGeneratedBatchReplacement(
+  project: ClassroomProject,
+  transaction: PdfPageBatchDeleteTransaction,
 ): boolean {
   const replacement = transaction.replacementScene;
   if (!replacement) return false;
@@ -924,6 +1313,117 @@ export function undoPdfPageDelete(
   });
 }
 
+/** Restore every page in a batch Undo into the current project atomically. */
+export function undoPdfPageBatchDelete(
+  project: ClassroomProject,
+  pdfBytes: Record<PdfDocumentId, Uint8Array>,
+  transaction: PdfPageBatchDeleteTransaction,
+  options: PdfPageActionOptions = {},
+): UndoPdfPageBatchDeleteResult {
+  const now = nowFor(options);
+  const updatedAt = updatedAtFor(options, now);
+  const integrity = assertValidBatchDeleteTransaction(transaction);
+  if (now >= transaction.expiresAt) {
+    throw new Error("The PDF page batch deletion undo period has expired.");
+  }
+  if (projectFingerprint(project) !== transaction.projectFingerprint) {
+    throw new Error("The PDF project changed and the deleted pages cannot be restored safely.");
+  }
+
+  const selected = new Set(transaction.sceneIds);
+  if (
+    transaction.sceneIds.some((sceneId) => hasOwn(project.scenes, sceneId))
+    || (project.pdfPageOrder || []).some((sceneId) => selected.has(sceneId))
+    || project.slideOrder.some((slide) => selected.has(slide.sceneId))
+  ) {
+    throw new Error("The PDF page batch deletion undo contains a scene collision.");
+  }
+  const currentSlideIds = new Set(project.slideOrder.map((slide) => slide.id));
+  if (transaction.removedSlides.some((snapshot) => currentSlideIds.has(snapshot.slide.id))) {
+    throw new Error("The PDF page batch deletion undo contains a slide collision.");
+  }
+
+  let pdfDocuments = project.pdfDocuments;
+  let nextPdfBytes = pdfBytes;
+  let copiedSources = false;
+  for (const snapshot of transaction.sources) {
+    const retained = integrity.sources.get(snapshot.documentId)!;
+    const currentSource = project.pdfDocuments[snapshot.documentId];
+    const currentBytes = pdfBytes[snapshot.documentId];
+    const hasSource = hasOwn(project.pdfDocuments, snapshot.documentId);
+    const hasBytes = hasOwn(pdfBytes, snapshot.documentId);
+    if (snapshot.sourceWasRemoved) {
+      if (hasSource || hasBytes) {
+        if (
+          !hasSource
+          || !hasBytes
+          || !currentSource
+          || !currentBytes
+          || !valuesEqual(currentSource, snapshot.source)
+          || !bytesEqual(currentBytes, retained.bytes)
+        ) {
+          throw new Error("The PDF page batch deletion undo contains a source collision.");
+        }
+      } else {
+        if (!copiedSources) {
+          pdfDocuments = { ...project.pdfDocuments };
+          nextPdfBytes = { ...pdfBytes };
+          copiedSources = true;
+        }
+        pdfDocuments[snapshot.documentId] = snapshot.source as PdfDocumentSource;
+        nextPdfBytes[snapshot.documentId] = retained.bytes;
+      }
+    } else if (
+      !currentSource
+      || !valuesEqual(currentSource, snapshot.source)
+      || !currentBytes
+      || (currentBytes !== retained.bytes && !bytesEqual(currentBytes, retained.bytes))
+    ) {
+      throw new Error("A PDF source changed and the deleted pages cannot be restored safely.");
+    }
+  }
+
+  const currentOrder = reconcilePdfPageOrder(project);
+  const pdfPageOrder = [...currentOrder];
+  let previousRestoredIndex = -1;
+  for (const page of transaction.pages) {
+    const anchoredIndex = insertionIndex(
+      pdfPageOrder,
+      page.pageOrderIndex,
+      page.previousPageId,
+      page.nextPageId,
+    );
+    const pageIndex = Math.max(anchoredIndex, previousRestoredIndex + 1);
+    pdfPageOrder.splice(pageIndex, 0, page.sceneId);
+    previousRestoredIndex = pageIndex;
+  }
+  const scenes = { ...project.scenes };
+  if (canRemoveGeneratedBatchReplacement(project, transaction)) {
+    delete scenes[transaction.replacementScene!.id];
+  }
+  for (const page of transaction.pages) {
+    scenes[page.sceneId] = page.scene as SerializedScene;
+  }
+  const nextProject: ClassroomProject = {
+    ...project,
+    updatedAt,
+    activeSceneId: transaction.activeDeletedSceneId ?? project.activeSceneId,
+    scenes,
+    slideOrder: restoreBatchSlides(project.slideOrder, transaction.removedSlides),
+    pdfPageOrder,
+    pdfDocuments,
+  };
+  assertProjectStructure(nextProject, { label: "Restored PDF pages" });
+  return Object.freeze({
+    project: nextProject,
+    pdfBytes: nextPdfBytes,
+    restoredSceneIds: transaction.sceneIds,
+    restoredPageNumbers: Object.freeze(
+      transaction.sceneIds.map((sceneId) => pdfPageOrder.indexOf(sceneId) + 1),
+    ),
+  });
+}
+
 /**
  * Checks an additive PDF candidate against the exact state a still-visible
  * page-delete Undo would restore. This keeps the ten-second Undo actionable
@@ -943,6 +1443,30 @@ export function pdfAdditionPreservesPageDeleteUndo(
   }
   if (now >= transaction.expiresAt) return true;
   const restored = undoPdfPageDelete(project, pdfBytes, transaction, {
+    now,
+    updatedAt: project.updatedAt,
+  });
+  return getProjectContentSize(restored.project, restored.pdfBytes).totalBytes <= maxBytes;
+}
+
+/**
+ * Checks an additive candidate against the exact state restored by a visible
+ * batch page-delete Undo, including every privately retained source byte set.
+ */
+export function pdfAdditionPreservesPdfPageBatchDeleteUndo(
+  project: ClassroomProject,
+  pdfBytes: Record<PdfDocumentId, Uint8Array>,
+  transaction: PdfPageBatchDeleteTransaction | undefined,
+  options: PdfPageDeleteUndoReservationOptions = {},
+): boolean {
+  if (!transaction) return true;
+  const now = options.now ?? Date.now();
+  const maxBytes = options.maxBytes ?? MAX_PROJECT_BYTES;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new Error("The project size limit is invalid.");
+  }
+  if (now >= transaction.expiresAt) return true;
+  const restored = undoPdfPageBatchDelete(project, pdfBytes, transaction, {
     now,
     updatedAt: project.updatedAt,
   });

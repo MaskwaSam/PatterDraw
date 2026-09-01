@@ -40,12 +40,14 @@ function mount(options: {
     onOpenPage: vi.fn(),
     onMovePage: vi.fn(),
     onShiftPage: vi.fn(),
+    onOpenPdf: vi.fn(),
     onAddBlankPage: vi.fn(),
     onInsertPdfPages: vi.fn(),
     onDuplicatePage: vi.fn(),
     onRotatePage: vi.fn(),
     onRequestClearAnnotations: vi.fn(),
     onDeletePage: vi.fn(),
+    onDeletePages: vi.fn(() => true),
     onWidthChange: vi.fn(),
     onHide: vi.fn(),
   };
@@ -122,6 +124,15 @@ afterEach(() => {
 });
 
 describe("PdfPageRail add-page menu", () => {
+  it("offers explicit replace and additive PDF shortcuts", () => {
+    const { callbacks, container } = mount();
+
+    act(() => button(container, "Open PDF").click());
+    expect(callbacks.onOpenPdf).toHaveBeenCalledOnce();
+    act(() => button(container, "Add PDF pages").click());
+    expect(callbacks.onInsertPdfPages).toHaveBeenCalledOnce();
+  });
+
   it("offers separate blank-page and multi-PDF actions", () => {
     const { callbacks, container } = mount();
     const trigger = button(container, "Add page");
@@ -235,12 +246,14 @@ describe("PdfPageRail selected-page actions", () => {
       onOpenPage: vi.fn(),
       onMovePage: vi.fn(),
       onShiftPage: vi.fn(),
+      onOpenPdf: vi.fn(),
       onAddBlankPage: vi.fn(),
       onInsertPdfPages: vi.fn(),
       onDuplicatePage: vi.fn(),
       onRotatePage: vi.fn(),
       onRequestClearAnnotations: vi.fn(),
       onDeletePage: vi.fn(),
+      onDeletePages: vi.fn(() => true),
       onWidthChange: vi.fn(),
       onHide: vi.fn(),
     };
@@ -277,6 +290,37 @@ describe("PdfPageRail selected-page actions", () => {
 
     act(() => trigger.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowUp" })));
     expect(document.activeElement?.textContent).toContain("Delete page");
+  });
+
+  it("selects multiple pages and sends one ordered batch removal", () => {
+    const { page, project } = pdfProject();
+    const secondPage: SerializedScene = {
+      ...page,
+      id: "pdf-page-2",
+      name: "periodic-table.pdf — Page 2",
+      elements: page.elements.map((element) => ({ ...element, id: `${element.id}-2` })),
+      pdfPage: {
+        ...page.pdfPage!,
+        pageIndex: 1,
+        backgroundElementId: "pdf-background-2",
+      },
+    };
+    project.scenes[secondPage.id] = secondPage;
+    project.pdfPageOrder = [page.id, secondPage.id];
+    project.pdfDocuments["pdf-document-1"].pageCount = 2;
+    const { callbacks, container } = mount({ project, pages: [page, secondPage] });
+
+    act(() => button(container, "Select").click());
+    const checks = container.querySelectorAll<HTMLInputElement>('.pdf-page-selection-check input');
+    expect(checks).toHaveLength(2);
+    act(() => checks[1].click());
+    act(() => checks[0].click());
+    expect(container.querySelector(".pdf-page-selection-toolbar")?.textContent).toContain("2 selected");
+
+    act(() => button(container, "Remove 2").click());
+    expect(callbacks.onDeletePages).toHaveBeenCalledWith([page.id, secondPage.id]);
+    expect(container.querySelector(".pdf-page-selection-toolbar")).toBeNull();
+    expect(document.activeElement).toBe(button(container, "Select"));
   });
 
   it("restores focus after duplicate and rotation actions", () => {

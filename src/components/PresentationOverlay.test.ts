@@ -1,7 +1,6 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ClassroomSlide } from "../types";
 import {
   DEFAULT_CLASSROOM_ALARM_SETTINGS,
   DEFAULT_CLASSROOM_CALENDAR_SETTINGS,
@@ -15,12 +14,6 @@ import {
 import { PresentationOverlay } from "./PresentationOverlay";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-
-const SLIDES: readonly ClassroomSlide[] = [
-  { id: "one", sceneId: "scene", frameId: "frame-one", title: "Welcome" },
-  { id: "two", sceneId: "scene", frameId: "frame-two", title: "Practice" },
-  { id: "three", sceneId: "scene", frameId: "frame-three", title: "Review" },
-];
 
 const roots: Root[] = [];
 
@@ -79,7 +72,8 @@ function mount(overrides: Partial<Parameters<typeof PresentationOverlay>[0]> = {
     onExit: vi.fn(),
   };
   const props: Parameters<typeof PresentationOverlay>[0] = {
-    slides: SLIDES,
+    itemCount: 3,
+    itemLabel: "Slide",
     index: 1,
     tool: "laser",
     inkColour: "#1b1b1f",
@@ -142,6 +136,15 @@ describe("PresentationOverlay controls", () => {
     expect(status?.textContent?.trim()).toBe("Slide 2 of 3");
     expect(status?.getAttribute("aria-live")).toBe("polite");
     expect(status?.getAttribute("aria-atomic")).toBe("true");
+  });
+
+  it("uses PDF page language when presenting PDF pages", () => {
+    const { container } = mount({ itemLabel: "Page" });
+
+    expect(container.querySelector<HTMLElement>('[role="status"]')?.textContent?.trim())
+      .toBe("Page 2 of 3");
+    expect(button(container, "Previous page")).toBeTruthy();
+    expect(button(container, "Next page")).toBeTruthy();
   });
 
   it("collapses and expands by click while transferring focus to the available toggle", () => {

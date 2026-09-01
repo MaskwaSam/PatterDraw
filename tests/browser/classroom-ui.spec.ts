@@ -13578,6 +13578,237 @@ test("deletes the selected PDF page without renumbering its source page", async 
   await expect(page.locator("#pdf-page-rail")).toHaveCount(0);
 });
 
+test("selects and removes PDF pages as one undoable batch", async ({ page }) => {
+  test.setTimeout(60_000);
+  await openTestPdf(page, 4);
+  const rail = page.locator("#pdf-page-rail");
+  const pages = rail.locator(".pdf-page-item");
+  await expect(pages).toHaveCount(4, { timeout: 20_000 });
+  await expect(rail.getByRole("button", { name: "Open PDF", exact: true })).toBeVisible();
+  await expect(rail.getByRole("button", { name: "Add PDF pages", exact: true })).toBeVisible();
+
+  await rail.getByRole("button", { name: "Select", exact: true }).click();
+  await rail.getByRole("checkbox", { name: /Select output page 2:/ }).check();
+  await rail.getByRole("checkbox", { name: /Select output page 4:/ }).check();
+  await expect(rail.getByRole("toolbar", { name: "PDF page selection", exact: true }))
+    .toContainText("2 selected");
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("Remove 2 selected PDF pages?");
+    await dialog.accept();
+  });
+  await rail.getByRole("button", { name: "Remove 2", exact: true }).click();
+
+  await expect(pages).toHaveCount(2);
+  await expect(pages.nth(0)).toContainText("Original page 1");
+  await expect(pages.nth(1)).toContainText("Original page 3");
+  const undoToast = page.locator(".app-toast--pdf-undo");
+  await expect(undoToast).toContainText("Removed 2 selected pages");
+  await undoToast.getByRole("button", { name: "Undo", exact: true }).click();
+
+  await expect(pages).toHaveCount(4);
+  await expect(pages.nth(0)).toContainText("Original page 1");
+  await expect(pages.nth(1)).toContainText("Original page 2");
+  await expect(pages.nth(2)).toContainText("Original page 3");
+  await expect(pages.nth(3)).toContainText("Original page 4");
+  await expect(undoToast).toHaveCount(0);
+});
+
+test("removes an orphaned PDF source durably after a batch delete and restores it with Undo", async ({ page }) => {
+  test.setTimeout(120_000);
+  const mainBytes = await labelledPdfBytes(["BATCH_MAIN_1", "BATCH_MAIN_2"]);
+  const supplementBytes = await labelledPdfBytes(["BATCH_SUPPLEMENT_1", "BATCH_SUPPLEMENT_2"]);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "batch-main.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(mainBytes),
+  });
+
+  const rail = page.locator("#pdf-page-rail");
+  const pages = rail.locator(".pdf-page-item");
+  await expect(pages).toHaveCount(2, { timeout: 20_000 });
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click();
+  await page.getByLabel("Select PDFs to insert").setInputFiles({
+    name: "batch-supplement.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(supplementBytes),
+  });
+  const insertDialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(insertDialog).toBeVisible({ timeout: 20_000 });
+  await insertDialog.getByRole("button", { name: "Insert 2 pages", exact: true }).click();
+  await expect(insertDialog).toHaveCount(0, { timeout: 30_000 });
+  await expect(pages).toHaveCount(4, { timeout: 30_000 });
+
+  type BatchDeleteStoredProject = {
+    activeSceneId: string;
+    pdfDocuments: Record<string, { name: string }>;
+    pdfPageOrder: string[];
+    scenes: Record<string, {
+      pdfPage?: { documentId: string; pageIndex: number; sourceName?: string };
+    }>;
+  };
+  await expect.poll(async () => {
+    const saved = await keyvalValue<BatchDeleteStoredProject>(
+      page,
+      "patterdraw:autosave:project:v1",
+    );
+    return {
+      documentCount: Object.keys(saved?.pdfDocuments || {}).length,
+      pageCount: saved?.pdfPageOrder.length,
+    };
+  }, { timeout: 30_000 }).toEqual({ documentCount: 2, pageCount: 4 });
+  const beforeDelete = await keyvalValue<BatchDeleteStoredProject>(
+    page,
+    "patterdraw:autosave:project:v1",
+  );
+  if (!beforeDelete) throw new Error("The two-source PDF project was not autosaved.");
+  const sourceEntry = (name: string) => Object.entries(beforeDelete.pdfDocuments)
+    .find(([, source]) => source.name === name);
+  const mainDocumentId = sourceEntry("batch-main.pdf")?.[0];
+  const supplementDocumentId = sourceEntry("batch-supplement.pdf")?.[0];
+  if (!mainDocumentId || !supplementDocumentId) {
+    throw new Error("The batch-delete PDF sources are missing from the autosave.");
+  }
+  const mainKey = `patterdraw:autosave:pdf:v1:${mainDocumentId}`;
+  const supplementKey = `patterdraw:autosave:pdf:v1:${supplementDocumentId}`;
+  const mainSceneIds = beforeDelete.pdfPageOrder.filter(
+    (sceneId) => beforeDelete.scenes[sceneId]?.pdfPage?.documentId === mainDocumentId,
+  );
+  const supplementSceneIds = beforeDelete.pdfPageOrder.filter(
+    (sceneId) => beforeDelete.scenes[sceneId]?.pdfPage?.documentId === supplementDocumentId,
+  );
+  expect(mainSceneIds).toHaveLength(2);
+  expect(supplementSceneIds).toHaveLength(2);
+  await expect.poll(async () => Array.from(
+    (await keyvalValue<Uint8Array>(page, supplementKey)) || [],
+  )).toEqual(Array.from(supplementBytes));
+
+  const removeSupplementPages = async () => {
+    await rail.getByRole("button", { name: "Select", exact: true }).click();
+    const supplementCheckboxes = rail.getByRole("checkbox", { name: /batch-supplement\.pdf/ });
+    await expect(supplementCheckboxes).toHaveCount(2);
+    await supplementCheckboxes.nth(0).check();
+    await supplementCheckboxes.nth(1).check();
+    page.once("dialog", async (dialog) => {
+      expect(dialog.message()).toContain("Remove 2 selected PDF pages?");
+      await dialog.accept();
+    });
+    await rail.getByRole("button", { name: "Remove 2", exact: true }).click();
+    await expect(page.locator(".app-toast--pdf-undo"))
+      .toContainText("Removed 2 selected pages");
+  };
+
+  await removeSupplementPages();
+  await expect(pages).toHaveCount(2);
+  await expect.poll(async () => {
+    const saved = await keyvalValue<BatchDeleteStoredProject>(
+      page,
+      "patterdraw:autosave:project:v1",
+    );
+    return {
+      documentIds: Object.keys(saved?.pdfDocuments || {}),
+      pageOrder: saved?.pdfPageOrder,
+    };
+  }, { timeout: 30_000 }).toEqual({
+    documentIds: [mainDocumentId],
+    pageOrder: mainSceneIds,
+  });
+  await expect.poll(() => keyvalValue(page, supplementKey)).toBeUndefined();
+  expect(await autosavePdfKeys(page)).toEqual([mainKey]);
+
+  const undoToast = page.locator(".app-toast--pdf-undo");
+  await undoToast.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(undoToast).toHaveCount(0);
+  await expect(pages).toHaveCount(4, { timeout: 20_000 });
+  await expect.poll(async () => {
+    const saved = await keyvalValue<BatchDeleteStoredProject>(
+      page,
+      "patterdraw:autosave:project:v1",
+    );
+    return {
+      activeSceneId: saved?.activeSceneId,
+      documentNames: Object.values(saved?.pdfDocuments || {})
+        .map((source) => source.name)
+        .sort(),
+      pageOrder: saved?.pdfPageOrder,
+    };
+  }, { timeout: 30_000 }).toEqual({
+    activeSceneId: beforeDelete.activeSceneId,
+    documentNames: ["batch-main.pdf", "batch-supplement.pdf"],
+    pageOrder: beforeDelete.pdfPageOrder,
+  });
+  await expect.poll(async () => Array.from(
+    (await keyvalValue<Uint8Array>(page, supplementKey)) || [],
+  )).toEqual(Array.from(supplementBytes));
+  expect(await autosavePdfKeys(page)).toEqual([mainKey, supplementKey].sort());
+
+  await removeSupplementPages();
+  await expect.poll(() => keyvalValue(page, supplementKey)).toBeUndefined();
+  await expect.poll(async () => (
+    await keyvalValue<BatchDeleteStoredProject>(
+      page,
+      "patterdraw:autosave:project:v1",
+    )
+  )?.pdfPageOrder).toEqual(mainSceneIds);
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({
+    timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT,
+  });
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(pages).toHaveCount(2, { timeout: 20_000 });
+  await expect(pages.nth(0)).toContainText("batch-main.pdf");
+  await expect(pages.nth(1)).toContainText("batch-main.pdf");
+  const reloaded = await keyvalValue<BatchDeleteStoredProject>(
+    page,
+    "patterdraw:autosave:project:v1",
+  );
+  expect(reloaded?.pdfPageOrder).toEqual(mainSceneIds);
+  expect(Object.keys(reloaded?.pdfDocuments || {})).toEqual([mainDocumentId]);
+  expect(await autosavePdfKeys(page)).toEqual([mainKey]);
+  expect(await keyvalValue(page, supplementKey)).toBeUndefined();
+});
+
+test("presents PDF pages in canonical order and keeps one zoom across pages", async ({ page }) => {
+  test.setTimeout(60_000);
+  await openTestPdf(page, 3);
+  const rail = page.locator("#pdf-page-rail");
+  const pages = rail.locator(".pdf-page-item");
+  const resetZoom = page.getByRole("button", { name: "Reset zoom", exact: true });
+  await expect(resetZoom).toBeVisible();
+  await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+  await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+  const rememberedZoom = await resetZoom.textContent();
+  expect(rememberedZoom).toMatch(/^\d+%$/);
+
+  await pages.nth(1).locator(".pdf-page-open").click();
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await expect(resetZoom).toHaveText(rememberedZoom || "");
+  await pages.nth(2).locator(".pdf-page-open").click();
+  await expect(resetZoom).toHaveText(rememberedZoom || "");
+  await page.setViewportSize({ width: 1000, height: 720 });
+  await expect(resetZoom).toHaveText(rememberedZoom || "");
+
+  const present = page.getByRole("button", { name: "Present PDF", exact: true });
+  await expect(present).toBeVisible();
+  await present.click();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-presenting/);
+  const presentationStatus = page.locator('.app-shell.is-presenting > [role="status"]');
+  await expect(presentationStatus).toContainText("Page 3 of 3");
+  await expect(page.getByRole("button", { name: "Previous page", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Previous page", exact: true }).click();
+  await expect(presentationStatus).toContainText("Page 2 of 3");
+  await expect(page.locator(".editor-region")).toHaveAttribute(
+    "data-presentation-zoom",
+    (rememberedZoom || "").replace("%", ""),
+  );
+  await page.keyboard.press("Home");
+  await expect(presentationStatus).toContainText("Page 1 of 3");
+  await page.getByRole("button", { name: "Exit", exact: true }).click();
+  await expect(page.locator(".app-shell")).not.toHaveClass(/is-presenting/);
+  await expect(rail).toBeVisible();
+});
+
 test("adds a blank slide with a live preview without remounting or covering the editor", async ({ page }) => {
   test.setTimeout(90_000);
   const editor = page.locator(".editor-host .excalidraw");
