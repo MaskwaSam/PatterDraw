@@ -4036,6 +4036,112 @@ test("detects PDF content when the browser reports a generic MIME type", async (
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
+test("replaces the old PDF on normal upload and removes its stored source", async ({ page }) => {
+  test.setTimeout(60_000);
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  const initial = await keyvalValue<{
+    activeSceneId: string;
+    scenes: Record<string, { pdfPage?: unknown }>;
+  }>(page, "patterdraw:autosave:project:v1");
+  if (!initial) throw new Error("The baseline board was not autosaved.");
+  const boardSceneId = initial.activeSceneId;
+
+  const first = await PDFDocument.create();
+  first.addPage([612, 792]);
+  first.addPage([500, 700]);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "old-classroom-handout.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await first.save()),
+  });
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await expect(pages).toHaveCount(2, { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  const oldPdfKeys = await autosavePdfKeys(page);
+  expect(oldPdfKeys).toHaveLength(1);
+  await drawPdfRectangleAnnotation(page, { x: 310, y: 230 }, { x: 390, y: 290 });
+  const clearDialog = await openPdfAnnotationClearDialog(page, 1);
+  await clearDialog.getByRole("button", { name: "Clear 1 annotation", exact: true }).click();
+  const staleUndo = page.locator(".pdf-annotation-clear-toast");
+  await expect(staleUndo).toContainText("Cleared 1 annotation from 1 page");
+
+  const replacement = await PDFDocument.create();
+  replacement.addPage([420, 560]);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "replacement-handout.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await replacement.save()),
+  });
+
+  await expect(pages).toHaveCount(1, { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect(pages.first()).toContainText("replacement-handout.pdf");
+  await expect(pages).not.toContainText("old-classroom-handout.pdf");
+  await expect(staleUndo).toHaveCount(0);
+  await expect.poll(async () => {
+    const saved = await keyvalValue<{
+      pdfDocuments: Record<string, { name: string }>;
+      pdfPageOrder: string[];
+      scenes: Record<string, { pdfPage?: unknown }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    return saved ? {
+      boardKept: Boolean(saved.scenes[boardSceneId] && !saved.scenes[boardSceneId].pdfPage),
+      documentNames: Object.values(saved.pdfDocuments).map((source) => source.name),
+      pageCount: saved.pdfPageOrder.length,
+    } : null;
+  }, { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT }).toEqual({
+    boardKept: true,
+    documentNames: ["replacement-handout.pdf"],
+    pageCount: 1,
+  });
+  const replacementPdfKeys = await autosavePdfKeys(page);
+  expect(replacementPdfKeys).toHaveLength(1);
+  expect(replacementPdfKeys[0]).not.toBe(oldPdfKeys[0]);
+
+  await page.reload();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(pages).toHaveCount(1, { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect(pages.first()).toContainText("replacement-handout.pdf");
+});
+
+test("keeps the old PDF when replacement cannot be saved atomically", async ({ page }) => {
+  test.setTimeout(60_000);
+  const original = await PDFDocument.create();
+  original.addPage([612, 792]);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "kept-after-failure.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await original.save()),
+  });
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await expect(pages).toHaveCount(1, { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect(pages.first()).toContainText("kept-after-failure.pdf");
+  const pdfKeysBefore = await autosavePdfKeys(page);
+  expect(pdfKeysBefore).toHaveLength(1);
+  await failPdfCandidateAutosaveWithQuota(page);
+
+  const replacement = await PDFDocument.create();
+  replacement.addPage([420, 560]);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "rejected-replacement.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from(await replacement.save()),
+  });
+
+  await expect(page.getByRole("alert")).toContainText(
+    "browser storage became full. Nothing was imported",
+    { timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT },
+  );
+  await expect(pages).toHaveCount(1);
+  await expect(pages.first()).toContainText("kept-after-failure.pdf");
+  await expect(pages).not.toContainText("rejected-replacement.pdf");
+  expect(await autosavePdfKeys(page)).toEqual(pdfKeysBefore);
+  const saved = await keyvalValue<{
+    pdfDocuments: Record<string, { name: string }>;
+  }>(page, "patterdraw:autosave:project:v1");
+  expect(Object.values(saved?.pdfDocuments || {}).map((source) => source.name))
+    .toEqual(["kept-after-failure.pdf"]);
+});
+
 test("rejects a spoofed PDF extension before rendering pages", async ({ page }) => {
   await page.getByLabel("Open project file").setInputFiles({
     name: "not-a-document.pdf",
@@ -8963,7 +9069,7 @@ test("saves and resumes unusual PDF geometry with the original source intact", a
 });
 
 test("docks the drawing toolbar and resizes or hides the PDF page rail", async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(120_000);
   const toolbar = page.locator(".shapes-section");
   const editorHost = page.locator(".editor-host");
   const boardToolbar = await toolbar.boundingBox();
@@ -9053,9 +9159,12 @@ test("docks the drawing toolbar and resizes or hides the PDF page rail", async (
   await expect(page.locator(".page-status")).toContainText("Page 2 of 2");
   await expect(pageItems.nth(1).locator(".pdf-page-open")).toHaveAttribute("aria-current", "page");
   await expect(pageItems.nth(0).locator(".pdf-page-open")).not.toHaveAttribute("aria-current", "page");
+  const hostWidthBeforeHide = (await editorHost.boundingBox())?.width || 0;
   await page.getByRole("button", { name: "Hide PDF pages", exact: true }).click();
   await expect(rail).toHaveCount(0);
   await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-rail-hidden/);
+  await expect.poll(async () => (await editorHost.boundingBox())?.width || 0)
+    .toBeGreaterThan(hostWidthBeforeHide + resizedWidth / 2);
   await expect.poll(() => pdfPageHorizontalCenterError(page)).toBeLessThan(0.02);
   const showPages = page.getByRole("button", { name: "Show PDF pages", exact: true });
   await expect(showPages).toBeVisible();
@@ -12434,7 +12543,7 @@ test("restores annotations while cancelling an in-flight PDF insertion before it
   await expect.poll(() => autosavedPdfAnnotationCounts(page), { timeout: 20_000 }).toEqual([1]);
 });
 
-test("keeps an appended PDF page when Undo restores earlier annotations", async ({ page }) => {
+test("keeps an explicitly inserted PDF page when Undo restores earlier annotations", async ({ page }) => {
   test.setTimeout(60_000);
   await openTestPdf(page);
   const pages = page.locator("#pdf-page-rail .pdf-page-item");
@@ -12448,11 +12557,18 @@ test("keeps an appended PDF page when Undo restores earlier annotations", async 
   const toast = page.locator(".pdf-annotation-clear-toast");
   await expect(toast).toContainText("Cleared 1 annotation from 1 page");
 
-  await page.getByLabel("Open project file").setInputFiles({
+  await page.getByRole("button", { name: "Add page", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Insert PDF pages/ }).click({ force: true });
+  await page.getByLabel("Select PDFs to insert").setInputFiles({
     name: "appended-after-clear.pdf",
     mimeType: "application/pdf",
     buffer: appendedBytes,
   });
+  const insertDialog = page.getByRole("dialog", { name: "Insert PDF pages", exact: true });
+  await expect(insertDialog).toBeVisible({ timeout: 20_000 });
+  await insertDialog.getByRole("radio", { name: /End of document/ }).check();
+  await insertDialog.getByRole("button", { name: "Insert 1 page", exact: true }).click();
+  await expect(insertDialog).toHaveCount(0, { timeout: 20_000 });
   await expect(pages).toHaveCount(2, { timeout: 20_000 });
   await expect(pages.nth(1)).toContainText("appended-after-clear.pdf");
   await expect(pages.nth(1)).toHaveClass(/is-selected/);

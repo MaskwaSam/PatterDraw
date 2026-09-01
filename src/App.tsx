@@ -174,6 +174,7 @@ import {
   type PdfRasterDeviceTier,
 } from "./lib/pdf/raster-limits";
 import { getPdfStorageAdmissionRequirement } from "./lib/pdf/storage-admission";
+import { projectForPdfReplacement, replaceProjectPdf } from "./lib/pdf/replacement";
 import {
   darkPdfThumbnailRenderSceneIds,
   pruneDarkPdfThumbnails,
@@ -357,6 +358,7 @@ import {
   nextClassroomAlarmGenerationStartMs,
   playClassroomAlarmTone,
   prepareClassroomAlarmAudio,
+  projectTrackedStagedClassroomAlarmTransactionsAsPending,
   pruneClassroomAlarmCancellationTombstones,
   pruneClassroomAlarmDeliveryTombstones,
   persistClassroomTimePreferencePatch,
@@ -2904,7 +2906,13 @@ export function pauseClassroomTimeElementsWithoutMatchingAlarmJob(
   projectId: string,
   registry: ReturnType<typeof readClassroomAlarmRegistry>,
   now = Date.now(),
+  trackedStagedTransactionIds: ReadonlySet<string> = new Set(),
 ): readonly ExcalidrawElement[] {
+  const authorityRegistry = projectTrackedStagedClassroomAlarmTransactionsAsPending(
+    registry,
+    trackedStagedTransactionIds,
+    now,
+  );
   let changed = false;
   const paused = elements.map((element) => {
     if (element.isDeleted) return element;
@@ -2912,7 +2920,7 @@ export function pauseClassroomTimeElementsWithoutMatchingAlarmJob(
     if (!metadata) return element;
     let safeMetadata = metadata;
     for (const descriptor of activeClassroomTimeAlarmDescriptors(projectId, [element])) {
-      const scheduled = registry.jobs.find((job) => (
+      const scheduled = authorityRegistry.jobs.find((job) => (
         job.deliveryState === "pending"
         && job.id === descriptor.id
         && classroomAlarmJobMatchesDescriptor(job, descriptor)
@@ -2937,6 +2945,7 @@ export function pauseUnauthorizedClassroomTimeWidgetsInProject(
   project: ClassroomProject,
   registry: ClassroomAlarmRegistryV1,
   now = Date.now(),
+  trackedStagedTransactionIds: ReadonlySet<string> = new Set(),
 ): ClassroomProject {
   let changed = false;
   const scenes = Object.fromEntries(Object.entries(project.scenes).map(([sceneId, scene]) => {
@@ -2946,6 +2955,7 @@ export function pauseUnauthorizedClassroomTimeWidgetsInProject(
       project.id,
       registry,
       now,
+      trackedStagedTransactionIds,
     );
     if (pausedElements === sourceElements) return [sceneId, scene];
     const canonical = canonicalizeClassroomTimeWidgetsForPersistence(
@@ -5943,6 +5953,7 @@ export default function App() {
                   currentProject.id,
                   readClassroomAlarmRegistry(),
                   Date.now(),
+                  classroomTimeStagedTransactionIdsRef.current,
                 );
                 if (safeLiveElements !== liveElements) {
                   classroomTimeAlarmAuthorityFenceRef.current.push({
@@ -5966,6 +5977,7 @@ export default function App() {
               currentProject.id,
               cancellation.registry,
               Date.now(),
+              classroomTimeStagedTransactionIdsRef.current,
             );
             classroomTimeAlarmAuthorityFenceRef.current.push({
               sceneId,
@@ -5990,6 +6002,7 @@ export default function App() {
         currentProject.id,
         readClassroomAlarmRegistry(),
         now,
+        classroomTimeStagedTransactionIdsRef.current,
       );
       if (safeElements !== elements) {
         api.updateScene({
@@ -6582,12 +6595,13 @@ export default function App() {
         throw new Error("The selected project is too large to open safely.");
       }
       if (isPdfFile) {
-        const preflightProject = commitLiveScenePersistence(
+        const preflightCurrentProject = commitLiveScenePersistence(
           hydratedSceneIdRef.current
             || activeSceneIdRef.current
             || projectRef.current?.activeSceneId
             || "",
         ) || createBlankProject();
+        const preflightProject = projectForPdfReplacement(preflightCurrentProject);
         assertProjectCanAcceptPdfPages(preflightProject, 1);
         const maxPages = remainingProjectPdfPageCapacity(preflightProject);
         const rasterBudget = getBrowserPdfRasterBudget();
@@ -6605,7 +6619,7 @@ export default function App() {
         }
         const preflightSize = assertProjectCanAcceptAdditionalBytes(
           preflightProject,
-          pdfBytesRef.current,
+          {},
           file.size,
         );
         const maxEncodedBytesPerDocument = Math.min(
@@ -6647,57 +6661,40 @@ export default function App() {
           ).then((result) => result.imported)
           : (await import("./lib/pdf/import-pdf")).importPdf(file, importOptions));
         if (!isCurrentOperation()) return;
-        const scenes = Object.fromEntries(imported.scenes.map((scene) => [scene.id, scene]));
-        const importedPageIds = imported.scenes.map((scene) => scene.id);
         // Capture any last live annotation before the imported PDF becomes
         // the active scene. The normal debounce may not have reached the
         // pending ref yet when a large PDF finishes parsing.
-        const base = commitLiveScenePersistence(
+        const currentBase = commitLiveScenePersistence(
           hydratedSceneIdRef.current
             || activeSceneIdRef.current
             || projectRef.current?.activeSceneId
             || "",
         ) || createBlankProject();
-        const baseManifestHash = autosaveManifestHash(base);
+        const replacementBase = projectForPdfReplacement(currentBase);
+        const baseManifestHash = autosaveManifestHash(currentBase);
         const basePdfBytes = pdfBytesRef.current;
         if (!baseManifestHash) throw new Error("The current board could not be fingerprinted safely.");
-        assertProjectCanAcceptPdfPages(base, imported.scenes.length);
-        const baseRasterUsage = base === preflightProject
+        assertProjectCanAcceptPdfPages(replacementBase, imported.scenes.length);
+        const baseRasterUsage = currentBase === preflightCurrentProject
           ? preflightRasterUsage
-          : await inspectLocalProjectRasterUsage(base, {
+          : await inspectLocalProjectRasterUsage(replacementBase, {
             rasterBudget,
             signal: operation.signal,
           });
         if (!isCurrentOperation()) return;
         addLocalProjectRasterUsage(baseRasterUsage, imported.rasterUsage, rasterBudget);
         const nextPdfBytes = {
-          ...basePdfBytes,
           [imported.source.id]: imported.bytes,
         };
-        const nextProject: ClassroomProject = {
-          ...base,
-          updatedAt: nowIso(),
-          activeSceneId: imported.scenes[0].id,
-          scenes: { ...base.scenes, ...scenes },
-          pdfPageOrder: [...reconcilePdfPageOrder(base), ...importedPageIds],
-          pdfDocuments: { ...base.pdfDocuments, [imported.source.id]: imported.source },
-        };
+        const nextProject = replaceProjectPdf(
+          currentBase,
+          imported.scenes,
+          imported.source,
+          nowIso(),
+        );
         assertProjectFitsContentBudget(nextProject, nextPdfBytes);
-        assertPdfAdditionPreservesPendingUndo(
-          nextProject,
-          nextPdfBytes,
-          pendingPdfUndoRef.current,
-        );
-        await assertPdfAdditionPreservesPendingUndoRaster(
-          nextProject,
-          nextPdfBytes,
-          pendingPdfUndoRef.current,
-          Date.now(),
-          operation.signal,
-        );
-        if (!isCurrentOperation()) return;
         const storageAdmission = getPdfStorageAdmissionRequirement(
-          base,
+          currentBase,
           basePdfBytes,
           nextProject,
           nextPdfBytes,
@@ -6705,6 +6702,25 @@ export default function App() {
         );
         await assessAdditionalStorage(storageAdmission.requiredBytes, operation.signal);
         if (!isCurrentOperation()) return;
+        const removedAlarmIdentities = removedClassroomTimeAlarmIdentities(
+          currentBase,
+          nextProject,
+        );
+        let cancellationReceipt: ClassroomAlarmCancellationReceiptV1 | null = null;
+        if (removedAlarmIdentities.length) {
+          const cancellation = await cancelClassroomAlarmIdentitiesWithReceipt(
+            removedAlarmIdentities,
+            Date.now(),
+          );
+          if (cancellation.status !== "persisted" || !cancellation.receipt) {
+            throw new Error("The old PDF could not be replaced because its classroom alarms could not be cancelled durably.");
+          }
+          cancellationReceipt = cancellation.receipt;
+          if (!isCurrentOperation()) {
+            await restoreAbandonedOpenClassroomAlarms(cancellationReceipt, currentBase);
+            return;
+          }
+        }
         // Rendering and validation remain cancellable. The atomic IndexedDB
         // transaction below is the explicit commit boundary: once it begins,
         // the UI no longer offers a cancellation it could not honestly
@@ -6712,37 +6728,57 @@ export default function App() {
         busyCancelRef.current = null;
         setBusyCanCancel(false);
         setBusyMessage(`Saving ${file.name} locally…`);
-        await persistPdfCandidateBeforePublication(nextProject, nextPdfBytes, {
-          forceOverwrite: replaceProtectedAutosave,
-          isBaseCurrent: () => (
-            pdfBytesRef.current === basePdfBytes
-            && autosaveManifestHash(projectRef.current ?? undefined) === baseManifestHash
-          ),
-          publish: () => {
-            setErrorMessage(null);
-            stopPresentationRef.current?.();
-            beginSceneHydration();
-            pendingFrameIdRef.current = null;
-            pendingProjectSearchTargetRef.current = null;
-            pendingCreatedFrameIdRef.current = null;
-            pendingSlideFrameActionRef.current = null;
-            pendingSlideRotationActionRef.current = null;
-            setSlideRotationTargetId(null);
-            autosaveSuspendedRef.current = false;
-            autosaveSuspensionGenerationRef.current = null;
-            setAutosaveRecoveryKind(null);
-            setAutosaveRecoveryDetail(null);
-            pdfBytesRef.current = nextPdfBytes;
-            projectRef.current = nextProject;
-            activeSceneIdRef.current = nextProject.activeSceneId;
-            setPdfBytes(nextPdfBytes);
-            setProject(nextProject);
-            setWorkspaceMode("pdf");
-            setEquationEditor(null);
-            setMermaidEditor(null);
-          },
-          signal: operation.signal,
-        });
+        let published = false;
+        try {
+          await persistPdfCandidateBeforePublication(nextProject, nextPdfBytes, {
+            forceOverwrite: replaceProtectedAutosave,
+            isBaseCurrent: () => (
+              pdfBytesRef.current === basePdfBytes
+              && autosaveManifestHash(projectRef.current ?? undefined) === baseManifestHash
+            ),
+            publish: () => {
+              published = true;
+              cancellationReceipt = null;
+              finalizePendingPdfUndo();
+              setErrorMessage(null);
+              stopPresentationRef.current?.();
+              beginSceneHydration();
+              pendingFrameIdRef.current = null;
+              pendingProjectSearchTargetRef.current = null;
+              pendingCreatedFrameIdRef.current = null;
+              pendingSlideFrameActionRef.current = null;
+              pendingSlideRotationActionRef.current = null;
+              setSlideRotationTargetId(null);
+              autosaveSuspendedRef.current = false;
+              autosaveSuspensionGenerationRef.current = null;
+              setAutosaveRecoveryKind(null);
+              setAutosaveRecoveryDetail(null);
+              pdfBytesRef.current = nextPdfBytes;
+              projectRef.current = nextProject;
+              activeSceneIdRef.current = nextProject.activeSceneId;
+              setPdfBytes(nextPdfBytes);
+              setProject(nextProject);
+              setWorkspaceMode("pdf");
+              setEquationEditor(null);
+              setMermaidEditor(null);
+            },
+            signal: operation.signal,
+          });
+        } catch (error) {
+          if (!published && cancellationReceipt) {
+            const restored = await restoreAbandonedOpenClassroomAlarms(
+              cancellationReceipt,
+              currentBase,
+            );
+            if (!restored) {
+              throw new Error(
+                "The PDF was not replaced, and timers on the prior PDF were paused because their exact alarm schedule could not be restored.",
+                { cause: error },
+              );
+            }
+          }
+          throw error;
+        }
       } else if (
         lowerName.endsWith(".patterdraw")
         || lowerName.endsWith(".canvasclassroom")
@@ -6854,9 +6890,11 @@ export default function App() {
     beginFileOpenOperation,
     beginSceneHydration,
     commitLiveScenePersistence,
+    finalizePendingPdfUndo,
     isCurrentFileOpenOperation,
     openLoadedProject,
     persistPdfCandidateBeforePublication,
+    restoreAbandonedOpenClassroomAlarms,
   ]);
 
   const handleFile = useCallback(async (file: File) => {
@@ -7891,6 +7929,7 @@ export default function App() {
       currentProject.id,
       readClassroomAlarmRegistry(),
       now,
+      classroomTimeStagedTransactionIdsRef.current,
     );
     if (pausedElements === liveElements) return;
     const display = materializeClassroomTimeSceneForDisplay(
@@ -7932,6 +7971,7 @@ export default function App() {
         baseProject,
         registry,
         now,
+        classroomTimeStagedTransactionIdsRef.current,
       );
       if (safeProject === baseProject) return;
       assertProjectFitsContentBudget(safeProject, pdfBytesRef.current);
@@ -11493,8 +11533,14 @@ export default function App() {
       });
     };
     centerPage();
+    const observedHost = editorHostRef.current;
+    const resizeObserver = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(centerPage);
+    if (observedHost) resizeObserver?.observe(observedHost);
     window.addEventListener("resize", centerPage);
     return () => {
+      resizeObserver?.disconnect();
       window.removeEventListener("resize", centerPage);
       window.cancelAnimationFrame(refreshFrame);
       window.cancelAnimationFrame(centerFrame);

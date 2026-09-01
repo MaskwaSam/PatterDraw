@@ -599,7 +599,7 @@ test("pastes and restores a local 3DGeoGon vector export", async ({ page }) => {
 });
 
 test("builds in the bundled GeoGon dialog and persists only its local vector handoff", async ({ page }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(180_000);
   const externalRequests: string[] = [];
   const geoGonRequests: string[] = [];
   const httpRequests: string[] = [];
@@ -637,8 +637,8 @@ test("builds in the bundled GeoGon dialog and persists only its local vector han
   );
   await expect(frameElement).toHaveAttribute("sandbox", "allow-scripts allow-same-origin allow-downloads");
   await expect(frameElement).toHaveAttribute("referrerpolicy", "no-referrer");
-  await expect(frame.getByRole("button", { name: "Add", exact: true })).toBeVisible({ timeout: 30_000 });
-  await expect(insert).toBeEnabled();
+  await expect(insert).toBeEnabled({ timeout: 75_000 });
+  await expect(frame.getByRole("button", { name: "Add", exact: true })).toBeVisible();
   await frame.getByRole("button", { name: "Add", exact: true }).click();
   await frame.getByRole("button", { name: "+ Right Rectangular Prism", exact: true }).click();
   await expect(frame.getByRole("button", { name: "Remove Right Rectangular Prism", exact: true })).toBeVisible();
@@ -685,6 +685,72 @@ test("builds in the bundled GeoGon dialog and persists only its local vector han
   expect(httpRequests.every((url) => new URL(url).origin === new URL(page.url()).origin)).toBe(true);
   expect(externalRequests).toEqual([]);
   expect(runtimeErrors).toEqual([]);
+});
+
+test("surfaces a slow GeoGon startup failure and retries with a fresh local frame", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.clock.install({ time: new Date("2026-08-31T12:00:00Z") });
+
+  let frameRequestCount = 0;
+  await page.route(/\/geogon\/index\.html(?:\?.*)?$/, async (route) => {
+    frameRequestCount += 1;
+    const generation = frameRequestCount;
+    const readyScript = generation > 1
+      ? `<script>
+          window.threeDGeoGonApp = {
+            localStateReady: true,
+            buildObjectSvgMarkup: () => '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="24"><rect width="32" height="24"/></svg>',
+          };
+        </script>`
+      : "";
+    await route.fulfill({
+      status: 200,
+      contentType: "text/html; charset=utf-8",
+      body: `<!doctype html>
+        <html data-geogon-fixture-generation="${generation}">
+          <body><button id="start-btn" type="button">Start fixture</button>${readyScript}</body>
+        </html>`,
+    });
+  });
+
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await page.locator(".App-toolbar__extra-tools-trigger").click();
+  await page.getByTestId("toolbar-math-tools").click();
+  const mathTools = page.getByRole("dialog", { name: "Math tools", exact: true });
+  await mathTools.getByRole("switch", { name: "Experimental features", exact: true }).check();
+  await page.getByTestId("math-tool-geogon").click();
+
+  const dialog = page.getByRole("dialog", { name: "3D GeoGon", exact: true });
+  const frameElement = dialog.locator("iframe.geogon-frame");
+  const frame = page.frameLocator("iframe.geogon-frame");
+  const insert = dialog.getByTestId("geogon-insert");
+  await expect(frame.locator("html")).toHaveAttribute("data-geogon-fixture-generation", "1");
+  const firstFrameElement = await frameElement.elementHandle();
+  expect(firstFrameElement).not.toBeNull();
+  await expect(insert).toBeDisabled();
+
+  await page.clock.fastForward(15_100);
+  await expect(dialog).toContainText("GeoGon is taking longer than usual to start on this device…");
+  await frame.locator("html").evaluate((root) => {
+    root.classList.add("startup-failed");
+    const message = document.createElement("p");
+    message.id = "startup-error-message";
+    message.textContent = "Fixture renderer could not create a local WebGL context.";
+    document.body.append(message);
+  });
+
+  await page.clock.runFor(100);
+  const alert = dialog.getByRole("alert");
+  await expect(alert).toContainText("Fixture renderer could not create a local WebGL context.", { timeout: 2_000 });
+
+  await alert.getByRole("button", { name: "Try again", exact: true }).click();
+  await expect.poll(() => frameRequestCount).toBe(2);
+  await expect(frame.locator("html")).toHaveAttribute("data-geogon-fixture-generation", "2");
+  await expect.poll(async () => firstFrameElement?.evaluate((element) => element.isConnected)).toBe(false);
+  await expect(alert).toBeHidden();
+  await expect(dialog).toContainText("GeoGon is ready. Build a diagram, then insert its vector view.");
+  await expect(insert).toBeEnabled();
 });
 
 test("preflights native and JSON clipboard images before insertion", async ({ page }) => {

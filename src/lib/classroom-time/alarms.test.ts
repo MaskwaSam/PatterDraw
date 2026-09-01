@@ -35,6 +35,7 @@ import {
   parseClassroomAlarmRegistry,
   parseClassroomAlarmStagedTransaction,
   persistClassroomAlarmRegistry,
+  projectTrackedStagedClassroomAlarmTransactionsAsPending,
   pruneClassroomAlarmCancellationTombstones,
   pruneClassroomAlarmJobs,
   pruneClassroomAlarmDeliveryTombstones,
@@ -1989,6 +1990,171 @@ describe("classroom alarm registry", () => {
       { storage, locks: availableLocks() as never },
     );
     expect(callback).toHaveBeenCalledOnce();
+  });
+
+  it("projects only a tracked exact cancelled-restore as temporary pending authority", async () => {
+    const restored = job({
+      id: "projection-restored:timer",
+      ownerId: "projection-restored",
+    });
+    const unrelatedPending = job({
+      id: "projection-pending:timer",
+      ownerId: "projection-pending",
+      label: "Unrelated pending timer",
+    });
+    const untrackedStaged = job({
+      id: "projection-untracked:timer",
+      ownerId: "projection-untracked",
+      label: "Untracked staged timer",
+    });
+    const storage = mapStorage(JSON.stringify({
+      version: 1,
+      revision: 0,
+      jobs: [restored, unrelatedPending],
+    }));
+    const cancelled = await cancelClassroomAlarmIdentitiesWithReceipt(
+      [identityFor(restored)],
+      START + 1,
+      storage,
+    );
+    const tracked = await stageCancelledClassroomAlarmReceipt(
+      cancelled.receipt!,
+      START + 2,
+      storage,
+    );
+    const untracked = await stageTrustedClassroomAlarmJobs(
+      [untrackedStaged],
+      START + 3,
+      storage,
+    );
+    const registry = readClassroomAlarmRegistry(storage);
+    const before = structuredClone(registry);
+
+    const projected = projectTrackedStagedClassroomAlarmTransactionsAsPending(
+      registry,
+      new Set([tracked.receipt!.transactionId]),
+      START + 4,
+    );
+
+    expect(projected.jobs.find(({ id }) => id === restored.id)).toMatchObject({
+      deliveryState: "pending",
+      deliveryStateAtMs: null,
+    });
+    expect(projected.jobs.find(({ id }) => id === untrackedStaged.id)).toMatchObject({
+      deliveryState: "staged",
+      deliveryStateAtMs: START + 3,
+    });
+    expect(projected.jobs.find(({ id }) => id === unrelatedPending.id)).toEqual(
+      unrelatedPending,
+    );
+    expect(projected.stagedTransactions).toBe(registry.stagedTransactions);
+    expect(projected.stagedTransactions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: tracked.receipt!.transactionId }),
+      expect.objectContaining({ id: untracked.receipt!.transactionId }),
+    ]));
+    expect(registry).toEqual(before);
+    expect(readClassroomAlarmRegistry(storage)).toEqual(before);
+  });
+
+  it("keeps invalidated, authority-blocked, and expired tracked stages non-authoritative", async () => {
+    const requested = job({
+      id: "projection-fenced:timer",
+      ownerId: "projection-fenced",
+    });
+    const storage = mapStorage();
+    const staged = await stageTrustedClassroomAlarmJobs(
+      [requested],
+      START + 1,
+      storage,
+    );
+    const trackedIds = new Set([staged.receipt!.transactionId]);
+
+    const invalidated = {
+      ...staged.registry,
+      jobs: staged.registry.jobs.map((candidate) => ({
+        ...candidate,
+        label: "Concurrent replacement",
+      })),
+    };
+    const invalidProjection = projectTrackedStagedClassroomAlarmTransactionsAsPending(
+      invalidated,
+      trackedIds,
+      START + 2,
+    );
+    expect(invalidProjection).toBe(invalidated);
+    expect(invalidProjection.jobs[0].deliveryState).toBe("staged");
+
+    const authorityBlocked = {
+      ...staged.registry,
+      deliveredTombstones: [{
+        version: 1 as const,
+        sourceProjectId: requested.sourceProjectId,
+        ownerId: requested.ownerId,
+        target: requested.target,
+        createdAtMs: requested.createdAtMs,
+        deadlineMs: requested.deadlineMs,
+        deliveredAtMs: requested.deadlineMs,
+      }],
+    };
+    expect(parseClassroomAlarmRegistry(authorityBlocked)).not.toBeNull();
+    const blockedProjection = projectTrackedStagedClassroomAlarmTransactionsAsPending(
+      authorityBlocked,
+      trackedIds,
+      requested.deadlineMs + 1,
+    );
+    expect(blockedProjection).toBe(authorityBlocked);
+    expect(blockedProjection.jobs[0].deliveryState).toBe("staged");
+
+    const expiry = START + 1 + CLASSROOM_ALARM_STAGED_RESTORE_RETENTION_MS + 1;
+    const expiredProjection = projectTrackedStagedClassroomAlarmTransactionsAsPending(
+      staged.registry,
+      trackedIds,
+      expiry,
+    );
+    expect(expiredProjection).toBe(staged.registry);
+    expect(expiredProjection.jobs[0].deliveryState).toBe("staged");
+  });
+
+  it("keeps a tracked staged batch atomic when one job loses activation authority", async () => {
+    const first = job({
+      id: "projection-batch-first:timer",
+      ownerId: "projection-batch-first",
+    });
+    const second = job({
+      id: "projection-batch-second:timer",
+      ownerId: "projection-batch-second",
+      deadlineMs: START + 120_000,
+    });
+    const staged = await stageTrustedClassroomAlarmJobs(
+      [first, second],
+      START + 1,
+      mapStorage(),
+    );
+    const firstDelivered = {
+      ...staged.registry,
+      deliveredTombstones: [{
+        version: 1 as const,
+        sourceProjectId: first.sourceProjectId,
+        ownerId: first.ownerId,
+        target: first.target,
+        createdAtMs: first.createdAtMs,
+        deadlineMs: first.deadlineMs,
+        deliveredAtMs: first.deadlineMs,
+      }],
+    };
+    expect(parseClassroomAlarmRegistry(firstDelivered)).not.toBeNull();
+
+    const projected = projectTrackedStagedClassroomAlarmTransactionsAsPending(
+      firstDelivered,
+      new Set([staged.receipt!.transactionId]),
+      first.deadlineMs + 1,
+    );
+
+    expect(projected).toBe(firstDelivered);
+    expect(projected.jobs.map(({ deliveryState }) => deliveryState)).toEqual([
+      "staged",
+      "staged",
+    ]);
   });
 
   it("restores a cross-project same-ID preimage on rollback and fences it on activation", async () => {

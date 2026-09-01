@@ -30,6 +30,10 @@ type AlarmWriteLockGateWindow = Window & {
     release: () => void;
     requests: number;
   };
+  __alarmActivationLockGate?: {
+    release: () => void;
+    requests: number;
+  };
 };
 
 async function installAlarmWriteLockGate(page: Page): Promise<void> {
@@ -78,6 +82,75 @@ async function alarmWriteLockRequestCount(page: Page): Promise<number> {
 async function releaseAlarmWriteLockGate(page: Page): Promise<void> {
   await page.evaluate(() => {
     (window as AlarmWriteLockGateWindow).__alarmWriteLockGate?.release();
+  });
+}
+
+async function installAlarmActivationLockGate(page: Page): Promise<void> {
+  await page.evaluate(({ alarmWriteLockName, alarmRegistryKey }) => {
+    const state = window as AlarmWriteLockGateWindow;
+    const nativeLocks = navigator.locks;
+    if (!nativeLocks) throw new Error("Web Locks are unavailable in this browser.");
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    state.__alarmActivationLockGate = { release, requests: 0 };
+    const delegatedLocks = new Proxy(nativeLocks, {
+      get(target, property) {
+        if (property !== "request") {
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return async (name: string, ...args: unknown[]) => {
+          if (name !== alarmWriteLockName) {
+            return Reflect.apply(target.request, target, [name, ...args]);
+          }
+          const operation = args.at(-1);
+          if (typeof operation !== "function") {
+            throw new TypeError("Web Lock request is missing its operation callback.");
+          }
+          const operationArgs = args.slice(0, -1);
+          return Reflect.apply(target.request, target, [
+            name,
+            ...operationArgs,
+            async (lock: Lock | null) => {
+              const testState = state.__alarmActivationLockGate;
+              let hasStagedTransaction = false;
+              try {
+                const registry = JSON.parse(localStorage.getItem(alarmRegistryKey) || "null") as {
+                  stagedTransactions?: unknown[];
+                } | null;
+                hasStagedTransaction = (registry?.stagedTransactions?.length ?? 0) > 0;
+              } catch {
+                // Invalid registry state is deliberately not treated as a publishable transaction.
+              }
+              if (testState && hasStagedTransaction && testState.requests === 0) {
+                testState.requests += 1;
+                await gate;
+              }
+              return operation(lock);
+            },
+          ]);
+        };
+      },
+    });
+    Object.defineProperty(navigator, "locks", {
+      configurable: true,
+      value: delegatedLocks,
+    });
+  }, {
+    alarmWriteLockName: ALARM_WRITE_LOCK_NAME,
+    alarmRegistryKey: ALARM_REGISTRY_KEY,
+  });
+}
+
+async function alarmActivationLockRequestCount(page: Page): Promise<number> {
+  return page.evaluate(() => (
+    (window as AlarmWriteLockGateWindow).__alarmActivationLockGate?.requests ?? 0
+  ));
+}
+
+async function releaseAlarmActivationLockGate(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    (window as AlarmWriteLockGateWindow).__alarmActivationLockGate?.release();
   });
 }
 
@@ -594,6 +667,23 @@ async function simplePdfBytes(pageCount = 1): Promise<Buffer> {
   const document = await PDFDocument.create();
   for (let index = 0; index < pageCount; index += 1) document.addPage([612, 792]);
   return Buffer.from(await document.save());
+}
+
+async function failPdfCandidateAutosaveWithQuota(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const originalPut = IDBObjectStore.prototype.put;
+    Object.defineProperty(IDBObjectStore.prototype, "put", {
+      configurable: true,
+      value(this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+        if (typeof key === "string" && key.startsWith("patterdraw:autosave:pdf:v1:")) {
+          throw new DOMException("Storage is full.", "QuotaExceededError");
+        }
+        return key === undefined
+          ? originalPut.call(this, value)
+          : originalPut.call(this, value, key);
+      },
+    });
+  });
 }
 
 async function addOrdinaryRectangle(
@@ -1584,6 +1674,63 @@ test("durably cancels a running Timer on delete, restores it paused with native 
   await expect.poll(async () => (await autosavedProject(page))?.title).toBe("Timer conversion classroom board");
 });
 
+test("restores the old PDF timer when an atomic PDF replacement fails", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "timed-original.pdf",
+    mimeType: "application/pdf",
+    buffer: await simplePdfBytes(),
+  });
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  await expect(pages).toHaveCount(1, { timeout: 30_000 });
+
+  const dialog = await openWidgetDialog(page, "timer");
+  await dialog.getByLabel("Widget label", { exact: true }).fill("Replacement safety timer");
+  await dialog.getByRole("button", { name: "Timer", exact: true }).click();
+  await dialog.getByLabel("Timer hours", { exact: true }).fill("0");
+  await dialog.getByLabel("Timer minutes", { exact: true }).fill("5");
+  await dialog.getByLabel("Timer seconds", { exact: true }).fill("0");
+  await addOpenWidget(page, "timer");
+  const overlay = page.getByTestId("classroom-time-overlay");
+  await overlay.getByRole("button", { name: "Start", exact: true }).click();
+  await expect.poll(async () => (await waitForOnlyWidget(page, "timer")).runtime?.status)
+    .toBe("running");
+  const running = await waitForOnlyWidget(page, "timer");
+  let originalJob: Record<string, unknown> | undefined;
+  await expect.poll(async () => {
+    const registry = await localStorageJson<{ jobs?: Array<Record<string, unknown>> }>(
+      page,
+      ALARM_REGISTRY_KEY,
+    );
+    originalJob = registry?.jobs?.[0];
+    return registry?.jobs?.length ?? 0;
+  }).toBe(1);
+  if (!originalJob) throw new Error("The original PDF timer alarm was not persisted.");
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await failPdfCandidateAutosaveWithQuota(page);
+
+  await page.getByLabel("Open project file").setInputFiles({
+    name: "rejected-timed-replacement.pdf",
+    mimeType: "application/pdf",
+    buffer: await simplePdfBytes(),
+  });
+
+  await expect(page.getByRole("alert")).toContainText(
+    "browser storage became full. Nothing was imported",
+    { timeout: 30_000 },
+  );
+  await expect(pages).toHaveCount(1);
+  await expect(pages.first()).toContainText("timed-original.pdf");
+  await expect(pages).not.toContainText("rejected-timed-replacement.pdf");
+  await expect.poll(async () => (await waitForOnlyWidget(page, "timer")).runtime)
+    .toMatchObject({ status: "running", deadlineMs: running.runtime?.deadlineMs });
+  await expect(overlay.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
+  await expect.poll(async () => (
+    await localStorageJson<{ jobs?: Array<Record<string, unknown>> }>(page, ALARM_REGISTRY_KEY)
+  )?.jobs ?? []).toEqual([originalJob]);
+  await page.getByRole("alert").getByRole("button", { name: "Dismiss", exact: true }).click();
+});
+
 test("keeps overlapping PDF Undo and alarm controls actionable, restores the exact running Timer, and exports one annotation", async ({ page }) => {
   test.setTimeout(120_000);
   await page.getByLabel("Open project file").setInputFiles({
@@ -1693,10 +1840,25 @@ test("keeps overlapping PDF Undo and alarm controls actionable, restores the exa
     };
   }).toEqual({ hasCancellation: true, jobs: 0 });
   const runningUndoNotice = page.getByRole("status").filter({ hasText: "Cleared 1 annotation from 1 page" });
+  await installAlarmActivationLockGate(page);
   await runningUndoNotice.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect.poll(() => alarmActivationLockRequestCount(page)).toBe(1);
+  await expect.poll(async () => {
+    const registry = await localStorageJson<{
+      jobs?: Array<{ deliveryState?: string }>;
+      stagedTransactions?: unknown[];
+    }>(page, ALARM_REGISTRY_KEY);
+    return {
+      jobState: registry?.jobs?.[0]?.deliveryState ?? null,
+      stagedTransactions: registry?.stagedTransactions?.length ?? 0,
+    };
+  }).toEqual({ jobState: "staged", stagedTransactions: 1 });
   await expect(pageItem.locator(".pdf-annotation-count")).toHaveText("1");
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
   await expect.poll(async () => (await waitForOnlyWidget(page, "timer")).runtime)
     .toMatchObject({ status: "running", deadlineMs: runningDeadlineMs });
+  await expect(overlay.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
+  await releaseAlarmActivationLockGate(page);
   await expect.poll(async () => {
     const registry = await localStorageJson<{
       jobs?: Array<{ deadlineMs?: number; id?: string }>;

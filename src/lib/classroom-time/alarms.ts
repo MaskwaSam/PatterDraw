@@ -1972,6 +1972,48 @@ function exactStagedTransactionIsCurrent(
   );
 }
 
+type ClassroomAlarmTransactionActivationFailure = "transaction" | "authority";
+
+/**
+ * Shared activation fence for persisted staged transactions. Keep this pure so
+ * publication-time safety views can ask the same question as durable
+ * activation without making a staged alarm deliverable.
+ */
+function classroomAlarmTransactionActivationFailure(
+  registry: ClassroomAlarmRegistryV1,
+  transaction: ClassroomAlarmStagedTransactionV1,
+  nowMs: number,
+): ClassroomAlarmTransactionActivationFailure | null {
+  if (!exactStagedTransactionIsCurrent(registry, transaction)
+    || (nowMs >= transaction.stagedAtMs
+      && nowMs - transaction.stagedAtMs > CLASSROOM_ALARM_STAGED_TRANSACTION_RETENTION_MS)) {
+    return "transaction";
+  }
+  const authorityRegistry: ClassroomAlarmRegistryV1 = {
+    ...registry,
+    deliveredTombstones: pruneClassroomAlarmDeliveryTombstones(
+      registry.deliveredTombstones,
+      nowMs,
+    ),
+  };
+  for (const staged of transaction.stagedJobs) {
+    const cancellation = latestClassroomAlarmCancellationTombstone(
+      registry.cancellationTombstones,
+      staged,
+      nowMs,
+    );
+    if (hasClassroomAlarmDeliveredGeneration(authorityRegistry, staged, nowMs)
+      || (transaction.mode === "recovery" && cancellation !== null)
+      || (transaction.mode === "cancelled-restore"
+        && (!cancellation || !cancellationAuthorizesRestoredJob(cancellation, staged)))
+      || (nowMs > staged.deadlineMs
+        && nowMs - staged.deadlineMs > CLASSROOM_ALARM_CATCHUP_WINDOW_MS)) {
+      return "authority";
+    }
+  }
+  return null;
+}
+
 function rollbackStagedTransactionState(
   registry: ClassroomAlarmRegistryV1,
   transaction: ClassroomAlarmStagedTransactionV1,
@@ -2397,6 +2439,41 @@ export function listStagedClassroomAlarmTransactions(
   return (current.stagedTransactions ?? []).map(transactionReceipt);
 }
 
+/**
+ * Returns a transient safety-check view in which exact, activatable staged
+ * jobs owned by this caller are treated as pending during synchronous UI
+ * publication. The persisted transaction records intentionally remain staged:
+ * this projection must never be persisted, reparsed, or used for delivery.
+ * Untracked, stale, expired, and authority-invalid stages remain non-authority.
+ */
+export function projectTrackedStagedClassroomAlarmTransactionsAsPending(
+  registry: ClassroomAlarmRegistryV1,
+  trackedTransactionIds: ReadonlySet<string>,
+  nowMs: number,
+): ClassroomAlarmRegistryV1 {
+  if (!isTimestamp(nowMs)) {
+    throw new RangeError("A non-negative integer timestamp is required.");
+  }
+  const current = parseClassroomAlarmRegistry(registry);
+  if (!current) return registry;
+  const projectedJobIds = new Set<string>();
+  for (const transaction of current.stagedTransactions ?? []) {
+    if (trackedTransactionIds.has(transaction.id)
+      && classroomAlarmTransactionActivationFailure(current, transaction, nowMs) === null) {
+      for (const staged of transaction.stagedJobs) projectedJobIds.add(staged.id);
+    }
+  }
+  if (projectedJobIds.size === 0) return registry;
+  return {
+    ...registry,
+    jobs: registry.jobs.map((alarmJob) => projectedJobIds.has(alarmJob.id) ? {
+      ...alarmJob,
+      deliveryState: "pending" as const,
+      deliveryStateAtMs: null,
+    } : alarmJob),
+  };
+}
+
 export async function activateClassroomAlarmTransaction(
   requestedReceipt: ClassroomAlarmTransactionReceiptV1,
   nowMs: number,
@@ -2410,34 +2487,19 @@ export async function activateClassroomAlarmTransaction(
     const transaction = (current.stagedTransactions ?? []).find(
       ({ id }) => id === receipt.transactionId,
     );
-    if (!transaction
-      || !transactionMatchesReceipt(transaction, receipt)
-      || !exactStagedTransactionIsCurrent(current, transaction)
-      || (nowMs >= transaction.stagedAtMs
-        && nowMs - transaction.stagedAtMs > CLASSROOM_ALARM_STAGED_TRANSACTION_RETENTION_MS)) {
+    if (!transaction || !transactionMatchesReceipt(transaction, receipt)) {
       throw new RangeError("A staged classroom alarm transaction can no longer be activated.");
     }
-    const authorityRegistry: ClassroomAlarmRegistryV1 = {
-      ...current,
-      deliveredTombstones: pruneClassroomAlarmDeliveryTombstones(
-        current.deliveredTombstones,
-        nowMs,
-      ),
-    };
-    for (const staged of transaction.stagedJobs) {
-      const cancellation = latestClassroomAlarmCancellationTombstone(
-        current.cancellationTombstones,
-        staged,
-        nowMs,
-      );
-      if (hasClassroomAlarmDeliveredGeneration(authorityRegistry, staged, nowMs)
-        || (transaction.mode === "recovery" && cancellation !== null)
-        || (transaction.mode === "cancelled-restore"
-          && (!cancellation || !cancellationAuthorizesRestoredJob(cancellation, staged)))
-        || (nowMs > staged.deadlineMs
-          && nowMs - staged.deadlineMs > CLASSROOM_ALARM_CATCHUP_WINDOW_MS)) {
-        throw new RangeError("Classroom alarm authority changed before activation.");
-      }
+    const activationFailure = classroomAlarmTransactionActivationFailure(
+      current,
+      transaction,
+      nowMs,
+    );
+    if (activationFailure === "transaction") {
+      throw new RangeError("A staged classroom alarm transaction can no longer be activated.");
+    }
+    if (activationFailure === "authority") {
+      throw new RangeError("Classroom alarm authority changed before activation.");
     }
     const stagedIds = new Set(transaction.stagedJobs.map(({ id }) => id));
     return {

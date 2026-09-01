@@ -9,7 +9,8 @@ import {
 } from "../lib/experimental-features";
 import { useModalDialog } from "./useModalDialog";
 
-const GEOGON_STARTUP_TIMEOUT_MS = 15_000;
+const GEOGON_SLOW_START_NOTICE_MS = 15_000;
+const GEOGON_STARTUP_TIMEOUT_MS = 60_000;
 const GEOGON_STARTUP_POLL_MS = 50;
 const MAX_GEOGON_SVG_TEXT_LENGTH = 8 * 1024 * 1024;
 
@@ -105,13 +106,23 @@ export function GeoGonDialog({ onCancel, onInsert }: GeoGonDialogProps) {
         (startButton as HTMLButtonElement).click();
       }
 
-      const deadline = Date.now() + GEOGON_STARTUP_TIMEOUT_MS;
+      const startedAt = Date.now();
+      const deadline = startedAt + GEOGON_STARTUP_TIMEOUT_MS;
+      let slowStartNoticeShown = false;
       while (generation === loadGenerationRef.current && Date.now() < deadline) {
         const api = frameApi(frame, localGeoGonUrl());
         if (api?.localStateReady) {
           setStatus("ready");
           setMessage("GeoGon is ready. Build a diagram, then insert its vector view.");
           return;
+        }
+        if (childDocument.documentElement.classList.contains("startup-failed")) {
+          const childMessage = childDocument.getElementById("startup-error-message")?.textContent?.trim();
+          throw new Error(childMessage || "GeoGon could not start its local 3D renderer.");
+        }
+        if (!slowStartNoticeShown && Date.now() - startedAt >= GEOGON_SLOW_START_NOTICE_MS) {
+          slowStartNoticeShown = true;
+          setMessage("GeoGon is taking longer than usual to start on this device…");
         }
         await delay(GEOGON_STARTUP_POLL_MS);
       }

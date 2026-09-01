@@ -2214,6 +2214,13 @@ describe("crash-safe classroom alarm publication", () => {
     );
     if (!metadata || metadata.kind !== "timer") throw new Error("Paused staged timer is missing.");
     expect(metadata.runtime.status).toBe("paused");
+
+    expect(pauseUnauthorizedClassroomTimeWidgetsInProject(
+      project,
+      staged.registry,
+      2_001,
+      new Set([staged.receipt!.transactionId]),
+    )).toBe(project);
   });
 });
 
