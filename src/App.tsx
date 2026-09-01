@@ -213,6 +213,10 @@ import {
   type PdfPageDeleteTransaction,
 } from "./lib/pdf/page-actions";
 import {
+  retainedPdfActiveTool,
+  type PdfActiveTool,
+} from "./lib/pdf/active-tool";
+import {
   centeredPdfViewport,
   normalizeSharedPdfZoom,
 } from "./lib/pdf/shared-viewport";
@@ -3364,8 +3368,13 @@ export default function App() {
   const slideRailShowButtonRef = useRef<HTMLButtonElement>(null);
   const pdfRailShowButtonRef = useRef<HTMLButtonElement>(null);
   const pdfSharedZoomRef = useRef<number | null>(null);
+  const pdfActiveToolRef = useRef<{
+    projectId: string;
+    tool: PdfActiveTool;
+  } | null>(null);
   useEffect(() => {
     pdfSharedZoomRef.current = null;
+    pdfActiveToolRef.current = null;
   }, [project?.id]);
   const shellRef = useRef<HTMLDivElement>(null);
   const editorHostRef = useRef<HTMLDivElement>(null);
@@ -5421,6 +5430,35 @@ export default function App() {
     if (!hydratedAppState.activeTool && isPersistedWrapperTool(liveAppState.activeTool)) {
       hydratedAppState.activeTool = { ...liveAppState.activeTool };
     }
+    const currentProject = projectRef.current;
+    const outgoingSceneId = hydratedSceneIdRef.current;
+    const outgoingSceneIsPdf = !!(
+      outgoingSceneId
+      && currentProject?.scenes[outgoingSceneId]?.pdfPage
+    );
+    if (
+      workspaceModeRef.current === "pdf"
+      && scene.pdfPage
+      && !presentationRef.current
+    ) {
+      const rememberedPdfTool = pdfActiveToolRef.current;
+      const retainedTool = (
+        rememberedPdfTool && rememberedPdfTool.projectId === currentProject?.id
+          ? rememberedPdfTool.tool
+          : null
+      )
+        || (outgoingSceneIsPdf ? retainedPdfActiveTool(liveAppState.activeTool) : null)
+        || retainedPdfActiveTool(hydratedAppState.activeTool);
+      if (retainedTool) {
+        hydratedAppState.activeTool = retainedTool;
+        if (currentProject) {
+          pdfActiveToolRef.current = {
+            projectId: currentProject.id,
+            tool: retainedTool,
+          };
+        }
+      }
+    }
     canonicalizePersistedWrapperTool(hydratedAppState);
     // Excalidraw's addFiles() is merge-only and its decoded-image cache is
     // keyed by file ID. Empty the live map before replacing the elements so
@@ -5835,6 +5873,20 @@ export default function App() {
       && currentSceneRef.current.id === activeSceneIdRef.current
     ) {
       pdfSharedZoomRef.current = normalizeSharedPdfZoom(appState.zoom.value);
+      if (!presentationRef.current) {
+        const retainedTool = retainedPdfActiveTool(appState.activeTool);
+        const currentProject = projectRef.current;
+        pdfActiveToolRef.current = retainedTool && currentProject
+          ? { projectId: currentProject.id, tool: retainedTool }
+          : null;
+        if (retainedTool && retainedTool.locked !== appState.activeTool.locked) {
+          api?.updateScene({
+            appState: { activeTool: retainedTool },
+            captureUpdate: CaptureUpdateAction.NEVER,
+          });
+          return;
+        }
+      }
     }
     const preferences = featurePreferencesRef.current;
     const applyingPreferences = applyingEditorPreferencesRef.current;

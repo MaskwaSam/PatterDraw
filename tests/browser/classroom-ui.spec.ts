@@ -13809,6 +13809,68 @@ test("presents PDF pages in canonical order and keeps one zoom across pages", as
   await expect(rail).toBeVisible();
 });
 
+test("keeps the chosen native annotation tool armed across PDF marks and pages", async ({ page }) => {
+  test.setTimeout(60_000);
+  await openTestPdf(page, 2);
+  const rail = page.locator("#pdf-page-rail");
+  const pages = rail.locator(".pdf-page-item");
+  const rectangleTool = page.getByTestId("toolbar-rectangle");
+  const selectionTool = page.getByTestId("toolbar-selection");
+  const liveActiveTool = () => page.evaluate(() => (window as unknown as {
+    h?: { app?: { state?: { activeTool?: { type?: string; locked?: boolean } } } };
+  }).h?.app?.state?.activeTool);
+
+  await rectangleTool.check({ force: true });
+  await expect.poll(liveActiveTool).toMatchObject({ type: "rectangle", locked: true });
+  const firstStart = await liveScenePointInViewport(page, { x: 180, y: 220 });
+  const firstEnd = await liveScenePointInViewport(page, { x: 280, y: 300 });
+  await page.mouse.move(firstStart.x, firstStart.y);
+  await page.mouse.down();
+  await page.mouse.move(firstEnd.x, firstEnd.y, { steps: 6 });
+  await page.mouse.up();
+  await expect(rectangleTool).toBeChecked();
+  await expect.poll(liveActiveTool).toMatchObject({ type: "rectangle", locked: true });
+
+  await pages.nth(1).locator(".pdf-page-open").click();
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
+  await expect(rectangleTool).toBeChecked();
+  await expect.poll(liveActiveTool).toMatchObject({ type: "rectangle", locked: true });
+  const secondStart = await liveScenePointInViewport(page, { x: 220, y: 250 });
+  const secondEnd = await liveScenePointInViewport(page, { x: 340, y: 340 });
+  await page.mouse.move(secondStart.x, secondStart.y);
+  await page.mouse.down();
+  await page.mouse.move(secondEnd.x, secondEnd.y, { steps: 6 });
+  await page.mouse.up();
+  await expect(rectangleTool).toBeChecked();
+
+  await page.locator(".editor-host .excalidraw").focus();
+  await page.keyboard.press("ArrowLeft");
+  await expect(pages.nth(0)).toHaveClass(/is-selected/);
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
+  await expect(rectangleTool).toBeChecked();
+  await expect.poll(liveActiveTool).toMatchObject({ type: "rectangle", locked: true });
+
+  await selectionTool.check({ force: true });
+  await expect.poll(liveActiveTool).toMatchObject({ type: "selection", locked: false });
+  await pages.nth(1).locator(".pdf-page-open").click();
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
+  await expect(selectionTool).toBeChecked();
+  await expect.poll(liveActiveTool).toMatchObject({ type: "selection", locked: false });
+
+  await page.getByRole("button", { name: "Board", exact: true }).click();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
+  await page.getByTestId("toolbar-ellipse").check({ force: true });
+  await expect.poll(liveActiveTool).toMatchObject({ type: "ellipse", locked: false });
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/);
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
+  await expect(selectionTool).toBeChecked();
+  await expect.poll(liveActiveTool).toMatchObject({ type: "selection", locked: false });
+});
+
 test("adds a blank slide with a live preview without remounting or covering the editor", async ({ page }) => {
   test.setTimeout(90_000);
   const editor = page.locator(".editor-host .excalidraw");
