@@ -287,8 +287,9 @@ test("clears the main board safely in the packaged app", async ({ page }, testIn
   await dialog.getByRole("button", { name: "Clear board", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   await expect.poll(async () => liveElements(await autosavedProject(page))).toEqual([]);
-  await page.locator(".editor-host .excalidraw").focus();
-  await page.keyboard.press("ControlOrMeta+z");
+  // Exercise the visible Undo action on every browser/runner platform;
+  // Playwright's ControlOrMeta uses the host OS, not the browser profile.
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
   await expect.poll(async () => liveElements(await autosavedProject(page)).some((element) => (
     element.text === "Keep this lesson recoverable"
   ))).toBe(true);
