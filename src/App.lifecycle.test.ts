@@ -1,3 +1,6 @@
+import { createElement, startTransition, useLayoutEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { flushSync } from "react-dom";
+import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
 import type { ClassroomAlarmCancellationReceiptV1 } from "./lib/classroom-time";
 
@@ -9,7 +12,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
   getCommonBounds: () => [0, 0, 0, 0],
   newElementWith: (element: Record<string, unknown>, patch: Record<string, unknown>) => ({ ...element, ...patch }),
   sceneCoordsToViewportCoords: (point: { sceneX: number; sceneY: number }) => ({ x: point.sceneX, y: point.sceneY }),
-  serializeAsJSON: (
+  serializeAsJSON: vi.fn((
     elements: unknown[],
     appState: Record<string, unknown>,
     files: Record<string, unknown>,
@@ -27,7 +30,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
       "zoom",
     ].includes(key))),
     files,
-  }),
+  })),
   Sidebar: () => null,
   viewportCoordsToSceneCoords: (point: { clientX: number; clientY: number }) => ({ x: point.clientX, y: point.clientY }),
 }));
@@ -90,6 +93,7 @@ const {
   classroomTimeSchedulerPublicationFenceMatches,
   classroomTimeTickFenceMatches,
   createClassroomTimeSchedulerIndex,
+  createPendingSceneProjectUpdate,
   darkPdfDisplaySceneIsCurrent,
   forkNativeClassroomTimeWidgetDuplicates,
   finalizeClassroomTimeSchedulerAlarmReservation,
@@ -2600,6 +2604,153 @@ describe("scene hydration buffer ordering", () => {
     expect(result.pending?.sceneId).toBe("scene-a");
     expect(result.buffered?.sceneId).toBe("scene-b");
   });
+});
+
+describe("replay-stable pending scene publication", () => {
+  type Project = ReturnType<typeof createBlankProject>;
+  const pendingFor = (project: Project): Parameters<typeof projectWithPendingScene>[1] => ({
+    sceneId: project.activeSceneId,
+    elements: [],
+    appState: { scrollX: 120, scrollY: 0, zoom: { value: 1 } },
+    files: {},
+  } as unknown as Parameters<typeof projectWithPendingScene>[1]);
+
+  it("computes once per input identity across A/B/A replay without sharing caches between edits", async () => {
+    const { serializeAsJSON } = await import("@excalidraw/excalidraw");
+    const serializer = vi.mocked(serializeAsJSON);
+    const callsBefore = serializer.mock.calls.length;
+    const first = createBlankProject();
+    const second = { ...first, title: "Renamed during publication" };
+    const pending = pendingFor(first);
+    const update = createPendingSceneProjectUpdate(pending);
+    const firstResult = update(first);
+    const secondResult = update(second);
+    expect(firstResult).not.toBe(first);
+    expect(secondResult).not.toBe(second);
+    expect(update(first)).toBe(firstResult);
+    expect(update(second)).toBe(secondResult);
+    expect(serializer.mock.calls.length - callsBefore).toBe(2);
+    expect(createPendingSceneProjectUpdate(pending)(first)).not.toBe(firstResult);
+  });
+
+  it("retains null, missing-scene, and already-persisted no-op outcomes", () => {
+    const project = createBlankProject();
+    const pending = pendingFor(project);
+    const update = createPendingSceneProjectUpdate(pending);
+    expect(update(null)).toBeNull();
+    const missing = { ...project, scenes: {} };
+    expect(update(missing)).toBeNull();
+    expect(update(missing)).toBeNull();
+    const persisted = update(project)!;
+    expect(createPendingSceneProjectUpdate(pending)(persisted)).toBe(persisted);
+  });
+
+  it("merges each current project's title, calendar, and unrelated scenes without losing concurrent edits", () => {
+    const project = createBlankProject();
+    const calendar = createClassroomCalendarStoreV1("project", [calendarEvent("kept-event", "Field trip")]);
+    const otherScene = { ...project.scenes[project.activeSceneId], id: "other-scene", name: "Other board" };
+    const concurrent = {
+      ...project,
+      title: "Latest classroom title",
+      projectCalendar: calendar,
+      scenes: { ...project.scenes, [otherScene.id]: otherScene },
+    };
+    const update = createPendingSceneProjectUpdate(pendingFor(project));
+    const first = update(project);
+    const merged = update(concurrent)!;
+    expect(merged.title).toBe(concurrent.title);
+    expect(merged.projectCalendar).toBe(calendar);
+    expect(merged.scenes[otherScene.id]).toBe(otherScene);
+    expect(merged.scenes[project.activeSceneId].appState.scrollX).toBe(120);
+    expect(update(project)).toBe(first);
+    expect(update(concurrent)).toBe(merged);
+    expect(project.scenes[project.activeSceneId].appState.scrollX).toBeUndefined();
+  });
+
+  it("captures the cleared slide order once for later rebases and native Undo", () => {
+    const project = createBlankProject();
+    const original = ["second", "first"].map((id) => ({
+      id: `slide-${id}`, sceneId: project.activeSceneId, frameId: id,
+      title: `Lesson ${id}`, titleMode: "custom" as const,
+    }));
+    const pending = pendingFor(project);
+    pending.elements = ["first", "second"].map((id) => ({
+      id, type: "frame", isDeleted: false, name: `Lesson ${id}`,
+      x: 0, y: 0, width: 800, height: 600,
+      customData: { classroomSlide: { kind: "slide", version: 1 } },
+    })) as unknown as typeof pending.elements;
+    const retainedOrder = [...original];
+    const update = createPendingSceneProjectUpdate(pending, retainedOrder);
+    retainedOrder.length = 0;
+    expect(update(project)?.slideOrder).toEqual(original);
+    expect(update({ ...project, title: "Concurrent title" })?.slideOrder).toEqual(original);
+  });
+
+  it.each(["default", "transition"] as const)(
+    "terminates real React %s-lane replay while retaining a concurrent project edit",
+    async (priority) => {
+      const project = createBlankProject();
+      const pending = pendingFor(project);
+      const calendar = createClassroomCalendarStoreV1("project", [calendarEvent("retained", "Project event")]);
+      const otherScene = { ...project.scenes[project.activeSceneId], id: "other-scene", name: "Retained scene" };
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      let layouts = 0;
+      let controls!: { project: Project | null; setProject: Dispatch<SetStateAction<Project | null>> };
+      const replayed: Array<{ input: Project | null; output: Project | null }> = [];
+      // act() changes scheduling and can hide this mixed-priority regression.
+      const actEnvironment = (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean });
+      const previousActEnvironment = actEnvironment.IS_REACT_ACT_ENVIRONMENT;
+      actEnvironment.IS_REACT_ACT_ENVIRONMENT = false;
+      function Harness() {
+        const [current, setProject] = useState<Project | null>(project);
+        const [status, setStatus] = useState("saving");
+        controls = { project: current, setProject };
+        useLayoutEffect(() => {
+          layouts += 1;
+          // Match autosave: even this same-value setter schedules work while
+          // a lower-priority project update is waiting to be rebased.
+          setStatus("saving");
+        }, [current]);
+        return createElement("div", null, `${current?.title}:${status}`);
+      }
+      try {
+        flushSync(() => root.render(createElement(Harness)));
+        const ahead = { ...project, title: "Already queued title" };
+        const schedule = () => {
+          controls.setProject(ahead);
+          controls.setProject((current) => current && ({
+            ...current,
+            title: "Concurrent title",
+            projectCalendar: calendar,
+            scenes: { ...current.scenes, [otherScene.id]: otherScene },
+          }));
+        };
+        if (priority === "transition") startTransition(schedule);
+        else schedule();
+        const update = createPendingSceneProjectUpdate(pending);
+        const resolved = update(ahead);
+        flushSync(() => controls.setProject((current) => {
+          const output = current === ahead ? resolved : update(current);
+          replayed.push({ input: current, output });
+          return output || current;
+        }));
+        await vi.waitFor(() => expect(controls.project?.title).toBe("Concurrent title"));
+        expect(controls.project?.projectCalendar).toBe(calendar);
+        expect(controls.project?.scenes[otherScene.id]).toBe(otherScene);
+        expect(controls.project?.scenes[project.activeSceneId].appState.scrollX).toBe(120);
+        const earlierStateReplays = replayed.filter(({ input }) => input === project);
+        expect(earlierStateReplays.length).toBeGreaterThan(1);
+        expect(earlierStateReplays.every(({ output }) => output === earlierStateReplays[0].output)).toBe(true);
+        expect(layouts).toBeLessThan(10);
+      } finally {
+        flushSync(() => root.unmount());
+        container.remove();
+        actEnvironment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+      }
+    },
+  );
 });
 
 describe("destructive scene persistence", () => {

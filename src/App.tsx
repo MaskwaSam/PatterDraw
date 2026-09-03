@@ -3058,6 +3058,25 @@ export function projectWithPendingScene(
   };
 }
 
+export function createPendingSceneProjectUpdate(
+  pending: PendingScenePersistence,
+  clearedSlideOrder: readonly ClassroomSlide[] = [],
+): (current: ClassroomProject | null) => ClassroomProject | null {
+  const capturedSlideOrder = [...clearedSlideOrder];
+  const mergedProjects = new WeakMap<ClassroomProject, ClassroomProject | null>();
+  return (current) => {
+    if (!current) return null;
+    // React can replay one queued updater against the same earlier state while
+    // rebasing lower-priority edits. Reuse that exact result so autosave's
+    // layout effect cannot keep publishing a new project on every replay.
+    // Cache by input identity, not just the latest input: A/B/A is a valid rebase.
+    if (mergedProjects.has(current)) return mergedProjects.get(current)!;
+    const merged = projectWithPendingScene(current, pending, capturedSlideOrder);
+    mergedProjects.set(current, merged);
+    return merged;
+  };
+}
+
 function nativeExcalidrawProject(text: string): ClassroomProject {
   const data = parseBoundedImportJson<Record<string, unknown>>(text, "scene");
   const project = createBlankProject();
@@ -4149,7 +4168,8 @@ export default function App() {
     if (!pending) return projectRef.current;
     pendingScenePersistenceRef.current = null;
     const baseProject = projectRef.current;
-    const nextProject = projectWithPendingScene(baseProject, pending, clearedBoardSlidesRef.current);
+    const mergePendingScene = createPendingSceneProjectUpdate(pending, clearedBoardSlidesRef.current);
+    const nextProject = mergePendingScene(baseProject);
     if (!nextProject) return baseProject;
     if (nextProject === baseProject) {
       if (
@@ -4180,7 +4200,7 @@ export default function App() {
     }
     setProject((current) => {
       if (current === baseProject) return nextProject;
-      const mergedProject = projectWithPendingScene(current, pending, clearedBoardSlidesRef.current);
+      const mergedProject = mergePendingScene(current);
       if (!mergedProject) return current;
       projectRef.current = mergedProject;
       const mergedSnapshot = {

@@ -1006,6 +1006,15 @@ test.afterEach(async ({ context, page }, testInfo: TestInfo) => {
   const state = runtimeGuardStates.get(context);
   if (!state) return;
   context.off("request", state.requestListener);
+  // Preserve the original exception even when a later UI assertion fails.
+  await testInfo.attach("classroom-runtime-diagnostics", {
+    body: Buffer.from(JSON.stringify({
+      consoleErrors: state.consoleErrors,
+      externalRequests: state.externalRequests,
+      pageErrors: state.pageErrors,
+    }, null, 2)),
+    contentType: "application/json",
+  });
   if (testInfo.status !== testInfo.expectedStatus) return;
   await expect(page.locator(".error-toast"), "visible wrapper errors").toHaveCount(0);
   expect(state.consoleErrors, "browser console errors").toEqual([]);
