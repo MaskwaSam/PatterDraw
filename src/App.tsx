@@ -27,6 +27,7 @@ import type { LassoGeometrySnapshot } from "./lib/lasso/stable-element-adapter";
 import { TopBar } from "./components/TopBar";
 import { ClearBoardDialog } from "./components/ClearBoardDialog";
 import { boardClearSummary, slideOrderForBoardClearUndo } from "./lib/board-clear";
+import { useAutosaveStatus } from "./lib/autosave-status";
 import { SlideRail } from "./components/SlideRail";
 import { SlideRotationDialog } from "./components/SlideRotationDialog";
 import { PDF_RAIL_DEFAULT_WIDTH, PdfPageRail } from "./components/PdfPageRail";
@@ -439,7 +440,6 @@ import {
 } from "./lib/workspace-mode";
 import "./styles.css";
 
-type SaveStatus = "saved" | "saving" | "error";
 type AutosaveRecoveryKind = "conflict" | "unreadable";
 type PresentationState = {
   kind: "pdf" | "slides";
@@ -3109,7 +3109,7 @@ export default function App() {
   const [api, setApi] = useState<ExcalidrawImperativeAPI | null>(null);
   const [isSceneInputBlocked, setIsSceneInputBlocked] = useState(true);
   const [strokeWidth, setStrokeWidth] = useState(2);
-  const [saveStatus, setSaveStatus] = useState<SaveStatus>("saving");
+  const [saveStatus, setSaveStatus] = useAutosaveStatus();
   const [activeSlideId, setActiveSlideId] = useState<string | null>(null);
   const [slideRotationTargetId, setSlideRotationTargetId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(100);
