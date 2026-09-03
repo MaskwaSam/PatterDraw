@@ -474,7 +474,7 @@ async function serveFile(
     path.basename(resolvedFilePath) === "index.html"
       ? "no-store"
       : isServiceWorker
-        ? "no-cache, no-transform"
+        ? "no-store, no-transform"
         : isHashedBuildAsset
           ? "public, max-age=31536000, immutable"
           : "public, max-age=0, must-revalidate",

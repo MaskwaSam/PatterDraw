@@ -357,7 +357,7 @@ test("revalidates, survives gateway errors, and keeps rollback registration safe
     expect(workerResponse.status()).toBe(200);
     expectSecurityHeaders(workerResponse.headers());
     expect(workerResponse.headers()["content-type"]).toContain("text/javascript");
-    expect(workerResponse.headers()["cache-control"]).toBe("no-cache, no-transform");
+    expect(workerResponse.headers()["cache-control"]).toBe("no-store, no-transform");
     expect(workerResponse.headers()["content-encoding"]).toBeUndefined();
     const workerBytes = await workerResponse.body();
     expect(workerBytes.equals(await readFile(path.join(productionDist, "service-worker.js"))))

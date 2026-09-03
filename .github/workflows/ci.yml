@@ -289,7 +289,7 @@ jobs:
           assert_security_headers artifacts/production/deploy-service-worker-headers.txt
           grep -Eqi '^[[:space:]]*Content-Type:[[:space:]]*application/javascript([[:space:]]*;.*)?[[:space:]]*$' \
             artifacts/production/deploy-service-worker-headers.txt
-          grep -Eqi '^[[:space:]]*Cache-Control:[[:space:]]*no-cache, no-transform[[:space:]]*$' \
+          grep -Eqi '^[[:space:]]*Cache-Control:[[:space:]]*no-store, no-transform[[:space:]]*$' \
             artifacts/production/deploy-service-worker-headers.txt
       - name: Start packaged release server
         if: ${{ always() && steps.production-package.outcome == 'success' }}

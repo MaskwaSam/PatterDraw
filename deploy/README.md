@@ -83,7 +83,7 @@ Before adding a public hostname:
 - confirm it is non-root, read-only, capability-free, resource-bounded, log-bounded, and has no host port;
 - from the connector's actual Docker network, require `Host: draw.spatterson.ca` to return the app and an arbitrary Host to return no usable response;
 - require GET/HEAD-only behavior, uncached `404` responses for missing or traversal-like assets, `no-store, no-transform` on every HTML entry/fallback path, immutable caching only for existing hashed `assets/`, and CSP/HSTS/nosniff/frame protections;
-- require `/service-worker.js` to exactly match the packaged bytes with JavaScript MIME, `no-cache, no-transform`, and the full security-header policy; require every main-app HTML response to carry `X-PatterDraw-App-Shell: patterdraw-app-shell-v1`;
+- require `/service-worker.js` to exactly match the packaged bytes with JavaScript MIME, `no-store, no-transform`, and the full security-header policy; require every main-app HTML response to carry `X-PatterDraw-App-Shell: patterdraw-app-shell-v1`;
 - require the main app to allow only same-origin frames while remaining unframeable itself, and require `/geogon/` to use its narrower child CSP with `connect-src 'none'`, `frame-ancestors 'self'`, and `X-Frame-Options: SAMEORIGIN`;
 - restart only PatterDraw and prove health returns without touching the main site or connector.
 
@@ -91,7 +91,15 @@ Before adding a public hostname:
 
 Only after the private origin passes, replace the captured `draw` behavior with one Cloudflare Tunnel Published application route whose Service URL is `http://patterdraw:8080`. Resolve only an exact conflicting `draw` record and remove only the confirmed hostname-scoped redirect behavior.
 
-Acceptance requires public HTTPS `200` for the PatterDraw entry point, a valid certificate, expected security/cache headers, a working board and local persistence, no redirect to Moodle, and no remote application requests. The final edge must preserve `Cache-Control: no-store, no-transform` and `X-PatterDraw-App-Shell: patterdraw-app-shell-v1` on HTML, must serve the exact packaged `/service-worker.js` with JavaScript MIME and `no-cache, no-transform`, and must not inject an analytics beacon. Recheck that `https://spatterson.ca`, `https://www.spatterson.ca`, `https://mesconline.ca`, the standalone connector, email DNS, and router TCP 443 ownership are unchanged.
+Acceptance requires public HTTPS `200` for the PatterDraw entry point, a valid certificate, expected security/cache headers, a working board and local persistence, no redirect to Moodle, and no remote application requests. The final edge must preserve `Cache-Control: no-store, no-transform` and `X-PatterDraw-App-Shell: patterdraw-app-shell-v1` on HTML, must serve the exact packaged `/service-worker.js` with JavaScript MIME and `no-store, no-transform`, and must not inject an analytics beacon. Recheck that `https://spatterson.ca`, `https://www.spatterson.ca`, `https://mesconline.ca`, the standalone connector, email DNS, and router TCP 443 ownership are unchanged.
+
+The worker's fixed URL must use `no-store`, not only `no-cache`: an edge browser
+TTL can rewrite the latter into a stale four-hour response. This policy applies
+only to HTTP caches; it does not remove installed workers or the app's explicit
+offline CacheStorage. Verify the canonical `/service-worker.js` URL without a
+cache-busting query as well as its exact bytes. An already-cached edge object
+or an explicit provider cache override still needs investigation if this gate
+fails; do not accept a query-only success or change provider rules implicitly.
 
 ## Image rollback checkpoint
 

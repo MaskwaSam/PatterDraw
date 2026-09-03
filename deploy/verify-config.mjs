@@ -192,8 +192,8 @@ for (const [routeName, routePattern] of [
 }
 requireMatch(
   nginx,
-  /location = \/service-worker\.js \{[^}]*default_type application\/javascript;[^}]*add_header Cache-Control "no-cache, no-transform" always;[^}]*try_files \$uri =404;[^}]*\}/,
-  "NGINX must revalidate the same-origin app-shell worker without allowing proxy transformation.",
+  /location = \/service-worker\.js \{[^}]*default_type application\/javascript;[^}]*add_header Cache-Control "no-store, no-transform" always;[^}]*try_files \$uri =404;[^}]*\}/,
+  "NGINX must prevent HTTP caching and proxy transformation of the same-origin app-shell worker.",
 );
 requireMatch(nginx, /max-age=31536000, immutable/, "NGINX must cache hashed assets immutably.");
 requireMatch(

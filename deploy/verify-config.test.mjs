@@ -86,3 +86,25 @@ test("configuration verification rejects a broadened Docker context", async () =
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("configuration verification rejects cacheable app-shell worker policies", async () => {
+  const root = await createFixture(expectedDockerignore);
+  try {
+    const nginxPath = path.join(root, "deploy", "nginx.conf");
+    const nginx = await readFile(nginxPath, "utf8");
+    const workerRoute = /location = \/service-worker\.js \{[^}]*\}/;
+    assert.match(nginx, workerRoute);
+    for (const cachePolicy of ["no-cache, no-transform", "max-age=14400, no-transform"]) {
+      const weakened = nginx.replace(workerRoute, (route) => (
+        route.replace('"no-store, no-transform"', `"${cachePolicy}"`)
+      ));
+      assert.notEqual(weakened, nginx);
+      await writeFile(nginxPath, weakened);
+      const result = verifyFixture(root);
+      assert.notEqual(result.status, 0, cachePolicy);
+      assert.match(result.stderr, /must prevent HTTP caching and proxy transformation/);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
