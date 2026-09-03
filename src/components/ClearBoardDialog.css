@@ -1,0 +1,114 @@
+.clear-board-dialog {
+  width: min(480px, 100%);
+  min-width: 0;
+  max-height: calc(100dvh - 40px);
+  overflow: auto;
+  padding: 22px;
+  border: 1px solid #cfd5df;
+  border-radius: 12px;
+  background: #fff;
+  color: #172033;
+  box-shadow: 0 18px 60px rgb(15 23 42 / 28%);
+}
+
+.clear-board-description {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.clear-board-slide-acknowledgement {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid #d2dae7;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.clear-board-slide-acknowledgement input {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin: 1px 0 0;
+  accent-color: var(--accent);
+}
+
+.clear-board-safety {
+  margin: 16px 0 0;
+  padding: 12px;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  background: #f7f8fa;
+  color: #4b566b;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.clear-board-actions button {
+  min-height: 44px;
+}
+
+.clear-board-dialog [disabled] {
+  cursor: default;
+}
+
+.clear-board-dialog :focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.app-shell[data-theme="dark"] .clear-board-dialog {
+  border-color: #45536b;
+  background: #182334;
+  color: #e5edf9;
+}
+
+.app-shell[data-theme="dark"] .clear-board-description {
+  color: #c0cbdb;
+}
+
+.app-shell[data-theme="dark"] .clear-board-slide-acknowledgement {
+  border-color: #45536b;
+}
+
+.app-shell[data-theme="dark"] .clear-board-safety {
+  border-color: #45536b;
+  background: #111a28;
+  color: #c0cbdb;
+}
+
+.app-shell[data-theme="dark"] .clear-board-actions .dialog-danger {
+  border-color: #a74a55;
+  background: #a9323f;
+  color: #fff;
+}
+
+.app-shell[data-theme="dark"] .clear-board-actions .dialog-danger:hover:not(:disabled) {
+  background: #8f2935;
+}
+
+@media (max-width: 560px) {
+  .clear-board-backdrop {
+    padding: 10px;
+  }
+
+  .clear-board-dialog {
+    max-height: calc(100dvh - 20px);
+    padding: 18px;
+  }
+
+  .clear-board-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .clear-board-actions button {
+    width: 100%;
+  }
+}

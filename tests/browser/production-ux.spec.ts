@@ -274,6 +274,42 @@ test.beforeEach(async ({ page }) => {
   await acknowledgeLocalReadinessAdvisory(page);
 });
 
+test("clears the main board safely in the packaged app", async ({ page }, testInfo) => {
+  await addText(page, "Keep this lesson recoverable");
+  await expect.poll(async () => liveElements(await autosavedProject(page)).some((element) => (
+    element.text === "Keep this lesson recoverable"
+  ))).toBe(true);
+  await page.getByRole("button", { name: "Clear board", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Clear main board?", exact: true });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await page.screenshot({ path: testInfo.outputPath("clear-board-dialog.png") });
+  await dialog.getByRole("button", { name: "Clear board", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(async () => liveElements(await autosavedProject(page))).toEqual([]);
+  await page.locator(".editor-host .excalidraw").focus();
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect.poll(async () => liveElements(await autosavedProject(page)).some((element) => (
+    element.text === "Keep this lesson recoverable"
+  ))).toBe(true);
+});
+
+test("keeps the clear-board action separate from workspace tabs at desktop widths", async ({ page }) => {
+  for (const width of [1440, 1280, 1201, 1200, 1101, 1100, 1024, 861]) {
+    await page.setViewportSize({ width, height: 900 });
+    const bounds = await page.evaluate(() => (
+      [".topbar-document", ".workspace-tabs", ".file-actions"].map((selector) => {
+        const rect = document.querySelector(selector)!.getBoundingClientRect();
+        return { left: rect.left, right: rect.right };
+      })
+    ));
+    expect(bounds[0].right, `document/tabs overlap at ${width}`).toBeLessThanOrEqual(bounds[1].left);
+    expect(bounds[1].right, `tabs/actions overlap at ${width}`).toBeLessThanOrEqual(bounds[2].left);
+    expect(bounds[2].right).toBeLessThanOrEqual(width);
+    await expect(page.getByRole("button", { name: "Clear board", exact: true })).toBeVisible();
+  }
+});
+
 test("keeps iPhone chrome compact without covering board controls", async ({ page }) => {
   for (const viewport of [
     { width: 320, height: 568 },
@@ -283,6 +319,7 @@ test("keeps iPhone chrome compact without covering board controls", async ({ pag
     { width: 390, height: 844 },
     { width: 393, height: 852 },
     { width: 430, height: 932 },
+    { width: 450, height: 900 },
     { width: 667, height: 375 },
     { width: 736, height: 414 },
     { width: 812, height: 375 },
@@ -365,7 +402,7 @@ test("keeps iPhone chrome compact without covering board controls", async ({ pag
       expect(bounds.left).toBeGreaterThanOrEqual(geometry.document.left - 1);
       expect(bounds.right).toBeLessThanOrEqual(geometry.document.right + 1);
     }
-    expect(geometry.buttons).toHaveLength(9);
+    expect(geometry.buttons).toHaveLength(10);
     expect(geometry.buttons.every((button) => button.visible)).toBe(true);
     expect(geometry.buttons.every((button) => button.left >= -1 && button.right <= viewport.width + 1)).toBe(true);
     expect(geometry.topbar.height).toBe(viewport.width <= 640 ? 96 : 58);

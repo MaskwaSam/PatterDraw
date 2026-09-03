@@ -25,6 +25,8 @@ import type {
 import type { ExcalidrawElement, FileId } from "@excalidraw/excalidraw/element/types";
 import type { LassoGeometrySnapshot } from "./lib/lasso/stable-element-adapter";
 import { TopBar } from "./components/TopBar";
+import { ClearBoardDialog } from "./components/ClearBoardDialog";
+import { boardClearSummary, slideOrderForBoardClearUndo } from "./lib/board-clear";
 import { SlideRail } from "./components/SlideRail";
 import { SlideRotationDialog } from "./components/SlideRotationDialog";
 import { PDF_RAIL_DEFAULT_WIDTH, PdfPageRail } from "./components/PdfPageRail";
@@ -3017,6 +3019,7 @@ export function pauseUnauthorizedClassroomTimeWidgetsInProject(
 export function projectWithPendingScene(
   current: ClassroomProject | null,
   pending: PendingScenePersistence,
+  clearedSlideOrder: readonly ClassroomSlide[] = [],
 ): ClassroomProject | null {
   const previousScene = current?.scenes[pending.sceneId];
   if (!current || !previousScene) return null;
@@ -3033,7 +3036,7 @@ export function projectWithPendingScene(
   const slideOrder = reconcileSlides(
     pending.sceneId,
     classroomSafeScene.elements,
-    current.slideOrder,
+    slideOrderForBoardClearUndo(current.slideOrder, clearedSlideOrder, pending.sceneId, classroomSafeScene.elements),
   );
   const namedElements = syncSlideFrameNames(classroomSafeScene.elements, slideOrder);
   const scene = serializedSceneFromChange(
@@ -3128,6 +3131,19 @@ export default function App() {
   const [exportOpen, setExportOpen] = useState(false);
   const [pendingVisualPdfFallback, setPendingVisualPdfFallback] = useState<PendingVisualPdfFallback | null>(null);
   const [pendingProjectSwitch, setPendingProjectSwitch] = useState<PendingProjectSwitch | null>(null);
+  const [pendingBoardClear, setPendingBoardClear] = useState<{
+    projectId: string;
+    sceneId: string;
+    objectCount: number;
+    slideCount: number;
+    fingerprint: string;
+  } | null>(null);
+  const [boardClearProcessing, setBoardClearProcessing] = useState(false);
+  const boardClearProcessingRef = useRef(false);
+  const boardClearDialogOpenRef = useRef(false);
+  boardClearDialogOpenRef.current = pendingBoardClear !== null;
+  const clearBoardButtonRef = useRef<HTMLButtonElement>(null);
+  const clearedBoardSlidesRef = useRef<readonly ClassroomSlide[]>([]);
   const [pendingPdfCompatibilityImport, setPendingPdfCompatibilityImport] = useState<PendingPdfCompatibilityImport | null>(null);
   const [archiveWorkerReadiness, setArchiveWorkerReadiness] = useState<ProjectArchiveWorkerReadiness | null>(null);
   const [storageReadiness, setStorageReadiness] = useState<StorageReadiness | null>(null);
@@ -4021,6 +4037,9 @@ export default function App() {
     && !operation.signal.aborted
   ), []);
   const beginSceneHydration = useCallback(() => {
+    // Excalidraw history is scene-local. Retain this sidecar only for the
+    // matching live history; recovery snapshots cover navigation/reload.
+    clearedBoardSlidesRef.current = [];
     classroomTimeAsyncOperationGenerationRef.current += 1;
     // Wrapper pointer overlays belong to the currently hydrated editor scene.
     // Unmount them before replacing Excalidraw state so their visible controls
@@ -4130,7 +4149,7 @@ export default function App() {
     if (!pending) return projectRef.current;
     pendingScenePersistenceRef.current = null;
     const baseProject = projectRef.current;
-    const nextProject = projectWithPendingScene(baseProject, pending);
+    const nextProject = projectWithPendingScene(baseProject, pending, clearedBoardSlidesRef.current);
     if (!nextProject) return baseProject;
     if (nextProject === baseProject) {
       if (
@@ -4161,7 +4180,7 @@ export default function App() {
     }
     setProject((current) => {
       if (current === baseProject) return nextProject;
-      const mergedProject = projectWithPendingScene(current, pending);
+      const mergedProject = projectWithPendingScene(current, pending, clearedBoardSlidesRef.current);
       if (!mergedProject) return current;
       projectRef.current = mergedProject;
       const mergedSnapshot = {
@@ -7088,6 +7107,209 @@ export default function App() {
     }
   }, [beginFileOpenOperation, commitCurrentLiveScenePersistence, isCurrentFileOpenOperation]);
 
+  const pauseUnauthorizedLiveClassroomTimeWidgets = useCallback((now = Date.now()) => {
+    const currentProject = projectRef.current;
+    const sceneId = hydratedSceneIdRef.current;
+    if (
+      !api
+      || !currentProject
+      || !sceneId
+      || currentProject.activeSceneId !== sceneId
+      || switchingSceneRef.current
+    ) return;
+    const liveElements = api.getSceneElementsIncludingDeleted();
+    const pausedElements = pauseClassroomTimeElementsWithoutMatchingAlarmJob(
+      liveElements,
+      currentProject.id,
+      readClassroomAlarmRegistry(),
+      now,
+      classroomTimeStagedTransactionIdsRef.current,
+    );
+    if (pausedElements === liveElements) return;
+    const display = materializeClassroomTimeSceneForDisplay(
+      pausedElements,
+      api.getFiles(),
+      currentProject.projectCalendar,
+      deviceClassroomCalendarRef.current,
+      now,
+      createLocalId,
+      editorThemeRef.current,
+    );
+    if (display.addedFiles.length) api.addFiles([...display.addedFiles]);
+    for (const fileId of display.orphanedFileIds) delete api.getFiles()[fileId];
+    classroomTimeAlarmAuthorityFenceRef.current.push({
+      sceneId,
+      elementFingerprint: classroomTimeElementFingerprint(display.elements),
+      fileFingerprint: classroomTimeFileFingerprint(api.getFiles()),
+    });
+    if (classroomTimeAlarmAuthorityFenceRef.current.length > 8) {
+      classroomTimeAlarmAuthorityFenceRef.current.shift();
+    }
+    api.updateScene({
+      elements: display.elements,
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+    });
+    commitLiveScenePersistence(sceneId, true);
+    flushAutosave(true);
+  }, [api, commitLiveScenePersistence, flushAutosave]);
+
+  const requestBoardClear = useCallback(() => {
+    if (
+      !api || boardClearProcessingRef.current || switchingSceneRef.current
+      || sceneInputBlockedRef.current || workspaceModeRef.current !== "board"
+    ) return;
+    const current = commitCurrentLiveScenePersistence();
+    const sceneId = hydratedSceneIdRef.current;
+    if (!current || !sceneId || current.activeSceneId !== sceneId || current.scenes[sceneId]?.pdfPage) return;
+    const summary = boardClearSummary(current, sceneId);
+    if (!summary.objectCount) {
+      api.setToast({ message: "The main board is already empty." });
+      return;
+    }
+    setErrorMessage(null);
+    setPendingBoardClear({
+      projectId: current.id,
+      sceneId,
+      ...summary,
+      fingerprint: classroomTimeDisplayTickContentFingerprint(api.getSceneElementsIncludingDeleted()),
+    });
+  }, [api, commitCurrentLiveScenePersistence]);
+
+  const confirmBoardClear = useCallback(async () => {
+    const pending = pendingBoardClear;
+    if (!api || !pending || boardClearProcessingRef.current) return;
+    boardClearProcessingRef.current = true;
+    setBoardClearProcessing(true);
+    const operation = beginFileOpenOperation();
+    const isCurrentOperation = () => isCurrentFileOpenOperation(operation);
+    let cleared = false;
+    try {
+      const before = commitCurrentLiveScenePersistence();
+      if (
+        !before || before.id !== pending.projectId || before.activeSceneId !== pending.sceneId
+        || hydratedSceneIdRef.current !== pending.sceneId || switchingSceneRef.current
+        || workspaceModeRef.current !== "board" || before.scenes[pending.sceneId]?.pdfPage
+      ) throw new Error("The board changed. Nothing was cleared; open Clear board again.");
+      const summary = boardClearSummary(before, pending.sceneId);
+      const fingerprint = classroomTimeDisplayTickContentFingerprint(api.getSceneElementsIncludingDeleted());
+      if (fingerprint !== pending.fingerprint || summary.slideCount !== pending.slideCount) {
+        setPendingBoardClear({ ...pending, ...summary, fingerprint });
+        throw new Error("The board changed while confirmation was open. Review the updated counts, then confirm again.");
+      }
+      if (!summary.objectCount) {
+        setPendingBoardClear(null);
+        return;
+      }
+      const fence = beginClassroomTimeAsyncOperation();
+      if (!fence) throw new Error("The board is still opening. Nothing was cleared.");
+      const pdfData = clonePdfBytes(pdfBytesRef.current);
+      setErrorMessage(null);
+      flushAutosave(true);
+      await autosaveQueueRef.current.catch(() => undefined);
+      if (!isCurrentOperation()) return;
+      const { saveAutosaveHistorySnapshot, listAutosaveHistorySnapshots } = await import("./lib/autosave-history");
+      // Never erase the only durable copy. Even a requested browser download
+      // would not prove the file reached disk, so recovery failure is fatal.
+      const saved = await saveAutosaveHistorySnapshot({ project: before, pdfBytes: pdfData }, {
+        signal: operation.signal,
+      });
+      if (!isCurrentOperation()) return;
+      if (!saved.retained) throw new Error("The recovery copy could not be retained. Nothing was cleared.");
+      const retained = await listAutosaveHistorySnapshots();
+      if (!isCurrentOperation()) return;
+      if (!retained.some((entry) => entry.snapshotId === saved.summary.snapshotId)) {
+        throw new Error("The recovery copy was replaced by another history update. Nothing was cleared.");
+      }
+      setRecoverySnapshots(retained);
+      setRecoveryHistoryUnreadable(false);
+      setDismissedRecoverySnapshotId(null);
+      if (!isCurrentClassroomTimeAsyncOperation(fence, true) || workspaceModeRef.current !== "board") {
+        throw new Error("The board changed while its recovery copy was being saved. Nothing was cleared; review the board and try again.");
+      }
+
+      const current = commitCurrentLiveScenePersistence();
+      const scene = current?.scenes[pending.sceneId];
+      if (!current || !scene || scene.pdfPage) throw new Error("The main board is no longer available.");
+      const elements = api.getSceneElementsIncludingDeleted().map((element) => (
+        element.isDeleted ? element : newElementWith(element, { isDeleted: true })
+      ));
+      const appState = {
+        ...api.getAppState(),
+        selectedElementIds: {},
+        selectedGroupIds: {},
+        editingGroupId: null,
+        editingFrame: null,
+        scrollX: 0,
+        scrollY: 0,
+        zoom: { value: 1 as AppState["zoom"]["value"] },
+      };
+      const candidate = projectWithPendingScene(current, {
+        sceneId: pending.sceneId,
+        elements,
+        appState,
+        files: persistentFilesForScene(scene, api.getFiles(), transientDarkPdfFileIdsRef.current),
+        preserveDeleted: true,
+      });
+      if (!candidate) throw new Error("The main board is no longer available.");
+      const cancellationFence = beginClassroomTimeAsyncOperation();
+      const identities = removedClassroomTimeAlarmIdentities(current, candidate);
+      if (identities.length) {
+        const cancellation = await cancelClassroomAlarmIdentitiesWithReceipt(identities, Date.now());
+        if (cancellation.status !== "persisted") {
+          throw new Error("The board could not be cleared because its classroom alarms could not be cancelled safely.");
+        }
+      }
+      if (!isCurrentOperation() || !isCurrentClassroomTimeAsyncOperation(cancellationFence, true)) {
+        if (identities.length) pauseUnauthorizedLiveClassroomTimeWidgets();
+        throw new Error("The board changed before clearing finished. Nothing was cleared; try again.");
+      }
+      // A native Undo must restore wrapper-owned slide IDs and explicit order,
+      // not recreate them from frame coordinates. Keep prior clear entries for
+      // repeated Clear/Undo within this editor's scene-local history.
+      const slideKey = (slide: ClassroomSlide) => JSON.stringify([slide.sceneId, slide.frameId]);
+      const knownFrames = new Set(current.slideOrder.map(slideKey));
+      clearedBoardSlidesRef.current = [
+        ...current.slideOrder,
+        ...clearedBoardSlidesRef.current.filter((slide) => !knownFrames.has(slideKey(slide))),
+      ];
+      classroomTimeAlarmAuthorityFenceRef.current.push({
+        sceneId: pending.sceneId,
+        elementFingerprint: classroomTimeElementFingerprint(elements),
+        fileFingerprint: classroomTimeFileFingerprint(api.getFiles()),
+      });
+      if (classroomTimeAlarmAuthorityFenceRef.current.length > 8) classroomTimeAlarmAuthorityFenceRef.current.shift();
+      resetTransientPointerTools();
+      pendingProjectSearchTargetRef.current = null;
+      setActiveSlideId(null);
+      setSelectedClassroomTime(null);
+      cleared = true;
+      api.updateScene({ elements, appState, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+      api.setActiveTool({ type: "selection" });
+      // Commit the live mutation against the latest project; PDF edits and
+      // other scene state must never be overwritten by the captured snapshot.
+      commitLiveScenePersistence(pending.sceneId, true);
+      flushAutosave(true);
+      setPendingBoardClear(null);
+      api.setToast({ message: "Board cleared. Use Undo to restore it, or Settings → Recovery history after leaving the board." });
+    } catch (error) {
+      if (isCurrentOperation() && !isAbortLikeError(error)) {
+        const detail = error instanceof Error ? error.message : String(error);
+        setErrorMessage(cleared
+          ? `The board was cleared, but saving could not finish. Use Undo or Recovery history to restore it. ${detail}`
+          : `Nothing was cleared. ${detail}`);
+      }
+    } finally {
+      boardClearProcessingRef.current = false;
+      setBoardClearProcessing(false);
+      if (!isCurrentOperation()) setPendingBoardClear(null);
+    }
+  }, [
+    api, pendingBoardClear, beginFileOpenOperation, isCurrentFileOpenOperation,
+    beginClassroomTimeAsyncOperation, isCurrentClassroomTimeAsyncOperation,
+    commitCurrentLiveScenePersistence, commitLiveScenePersistence, flushAutosave,
+    pauseUnauthorizedLiveClassroomTimeWidgets, resetTransientPointerTools,
+  ]);
+
   const cancelPendingProjectSwitch = useCallback(() => {
     if (pendingProjectSwitch?.processing) return;
     setPendingProjectSwitch(null);
@@ -8041,52 +8263,6 @@ export default function App() {
     setMathToolEdit(null);
     setClassroomTimeDialog({ mode: "insert", metadata });
   }, []);
-
-  const pauseUnauthorizedLiveClassroomTimeWidgets = useCallback((now = Date.now()) => {
-    const currentProject = projectRef.current;
-    const sceneId = hydratedSceneIdRef.current;
-    if (
-      !api
-      || !currentProject
-      || !sceneId
-      || currentProject.activeSceneId !== sceneId
-      || switchingSceneRef.current
-    ) return;
-    const liveElements = api.getSceneElementsIncludingDeleted();
-    const pausedElements = pauseClassroomTimeElementsWithoutMatchingAlarmJob(
-      liveElements,
-      currentProject.id,
-      readClassroomAlarmRegistry(),
-      now,
-      classroomTimeStagedTransactionIdsRef.current,
-    );
-    if (pausedElements === liveElements) return;
-    const display = materializeClassroomTimeSceneForDisplay(
-      pausedElements,
-      api.getFiles(),
-      currentProject.projectCalendar,
-      deviceClassroomCalendarRef.current,
-      now,
-      createLocalId,
-      editorThemeRef.current,
-    );
-    if (display.addedFiles.length) api.addFiles([...display.addedFiles]);
-    for (const fileId of display.orphanedFileIds) delete api.getFiles()[fileId];
-    classroomTimeAlarmAuthorityFenceRef.current.push({
-      sceneId,
-      elementFingerprint: classroomTimeElementFingerprint(display.elements),
-      fileFingerprint: classroomTimeFileFingerprint(api.getFiles()),
-    });
-    if (classroomTimeAlarmAuthorityFenceRef.current.length > 8) {
-      classroomTimeAlarmAuthorityFenceRef.current.shift();
-    }
-    api.updateScene({
-      elements: display.elements,
-      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
-    });
-    commitLiveScenePersistence(sceneId, true);
-    flushAutosave(true);
-  }, [api, commitLiveScenePersistence, flushAutosave]);
 
   const reconcileExternalClassroomAlarmRegistry = useCallback((
     registry: ClassroomAlarmRegistryV1,
@@ -9298,7 +9474,11 @@ export default function App() {
         return;
       }
 
-      if (!activeSceneId || !schedulerIndex.scenes.has(activeSceneId)) return;
+      // Keep the confirmation snapshot stable while the teacher reads it or
+      // recovery storage is busy. Only cosmetic clock/countdown drawing is
+      // suspended: alarm delivery and real timer/Pomodoro state transitions
+      // above still run, and those genuine changes invalidate confirmation.
+      if (boardClearDialogOpenRef.current || !activeSceneId || !schedulerIndex.scenes.has(activeSceneId)) return;
       const liveElements = api.getSceneElementsIncludingDeleted();
       const renderContext = classroomTimeRenderContext(
         liveElements,
@@ -14155,6 +14335,9 @@ export default function App() {
           onRestorePdfPreferences={restorePdfPreferences}
           onOpen={() => inputRef.current?.click()}
           onSave={saveProjectFile}
+          onClearBoard={requestBoardClear}
+          clearBoardDisabled={!api || isSceneInputBlocked || boardClearProcessing || !!busyMessage}
+          clearBoardButtonRef={clearBoardButtonRef}
           onEquation={openEquationEditor}
           onMermaid={openMermaidEditor}
           onExportAll={() => void runFullBoardExport()}
@@ -14674,6 +14857,16 @@ export default function App() {
           onCancelProcessing={pdfInsertCommitStarted ? undefined : cancelPdfInsertion}
           onSubmit={(submission) => void submitPdfInsertion(submission)}
           returnFocusRef={pdfInsertTriggerRef}
+        />
+      ) : null}
+      {pendingBoardClear ? (
+        <ClearBoardDialog
+          objectCount={pendingBoardClear.objectCount}
+          slideCount={pendingBoardClear.slideCount}
+          processing={boardClearProcessing}
+          onCancel={() => { if (!boardClearProcessingRef.current) setPendingBoardClear(null); }}
+          onConfirm={() => void confirmBoardClear()}
+          returnFocusRef={clearBoardButtonRef}
         />
       ) : null}
       {pendingProjectSwitch ? (

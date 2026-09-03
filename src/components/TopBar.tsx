@@ -3,6 +3,7 @@ import {
   BoardIcon,
   ChevronDownIcon,
   EquationIcon,
+  EraserIcon,
   ExportIcon,
   HideBottomBarIcon,
   HideTopBarIcon,
@@ -47,6 +48,9 @@ interface TopBarProps {
   onRestorePdfPreferences: () => void;
   onOpen: () => void;
   onSave: () => void;
+  onClearBoard: () => void;
+  clearBoardDisabled: boolean;
+  clearBoardButtonRef: RefObject<HTMLButtonElement>;
   onEquation: () => void;
   onMermaid: () => void;
   onExportAll: () => void;
@@ -257,6 +261,9 @@ export function TopBar({
   onRestorePdfPreferences,
   onOpen,
   onSave,
+  onClearBoard,
+  clearBoardDisabled,
+  clearBoardButtonRef,
   onEquation,
   onMermaid,
   onExportAll,
@@ -350,6 +357,18 @@ export function TopBar({
       <nav className="file-actions" aria-label="File actions">
         <button className="topbar-action" type="button" aria-label="Open" onClick={onOpen} title="Open a project or PDF"><OpenIcon /><span className="icon-label">Open</span></button>
         <button className="topbar-action" type="button" aria-label="Save" onClick={onSave} title="Download a complete PatterDraw project"><SaveIcon /><span className="icon-label">Save</span></button>
+        {mode === "board" ? (
+          <button
+            ref={clearBoardButtonRef}
+            className="topbar-action"
+            type="button"
+            aria-label="Clear board"
+            aria-haspopup="dialog"
+            title="Clear the main board safely"
+            disabled={clearBoardDisabled}
+            onClick={onClearBoard}
+          ><EraserIcon /><span className="icon-label">Clear board</span></button>
+        ) : null}
         {featurePreferences.insert ? (
           <InsertMenu insertButtonRef={insertButtonRef} onEquation={onEquation} onMermaid={onMermaid} />
         ) : null}

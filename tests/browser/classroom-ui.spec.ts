@@ -14010,3 +14010,468 @@ test("adds a blank slide with a live preview without remounting or covering the 
   await expect(mobileControls).toBeVisible();
   await page.getByRole("button", { name: "Exit", exact: true }).click();
 });
+
+test("clears the main board after confirmation with Undo, Redo, and recovery after reload while preserving PDFs and the library", async ({ page }) => {
+  test.setTimeout(120_000);
+  type StoredProject = {
+    activeSceneId: string;
+    pdfPageOrder: string[];
+    pdfDocuments: Record<string, unknown>;
+    scenes: Record<string, {
+      elements: Array<{ id: string; isDeleted?: boolean }>;
+      files: Record<string, unknown>;
+      pdfPage?: unknown;
+      appState: { scrollX?: number; scrollY?: number; zoom?: { value?: number } };
+    }>;
+  };
+  const boardElements = [
+    exportTestRectangle("clear-visible-object", 150, 150, 120, 80, "a0"),
+    exportTestRectangle("clear-offscreen-object", 10_000, -9_000, 120, 80, "a1"),
+  ];
+  const originalIds = boardElements.map((element) => element.id).sort();
+  await openClassroomFixture(page, boardElements, [], "clear-board-recovery.patterdraw");
+  await openTestPdf(page, 2);
+  await expect(page.getByRole("button", { name: "Clear board", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Board", exact: true }).click();
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
+  const projectTitle = "Fresh start safety board";
+  await page.getByRole("textbox", { name: "Project title" }).fill(projectTitle);
+  await expect.poll(async () => (
+    await keyvalValue<{ title: string }>(page, "patterdraw:autosave:project:v1")
+  )?.title).toBe(projectTitle);
+  const personalLibrary = JSON.parse(standardLibraryBytes().toString("utf8")).libraryItems as StoredLibraryItem[];
+  await setKeyvalValue(page, "patterdraw:library:v1", personalLibrary);
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
+  await page.getByRole("button", { name: "Board", exact: true }).click();
+  const { panel, trigger: libraryTrigger } = await openLibraryPanel(page);
+  await expect(panel.locator(".library-unit__active:not(:has(.library-unit__adder))")).toHaveCount(1);
+  await libraryTrigger.click();
+  const normalizedPersonalLibrary = await keyvalValue<StoredLibraryItem[]>(page, "patterdraw:library:v1");
+  expect(normalizedPersonalLibrary).toHaveLength(1);
+  expect(normalizedPersonalLibrary?.[0].id).toBe(personalLibrary[0].id);
+
+  const readProject = () => keyvalValue<StoredProject>(page, "patterdraw:autosave:project:v1");
+  const initial = await readProject();
+  if (!initial) throw new Error("The clear-board fixture was not autosaved.");
+  const boardId = initial.activeSceneId;
+  const readBoardIds = async () => {
+    const saved = await readProject();
+    return (saved?.scenes[boardId]?.elements || [])
+      .filter((element) => element.isDeleted !== true)
+      .map((element) => element.id)
+      .sort();
+  };
+  const pdfSnapshot = (saved: StoredProject | undefined) => ({
+    order: saved?.pdfPageOrder,
+    sources: saved?.pdfDocuments,
+    pages: saved?.pdfPageOrder.map((sceneId) => ({
+      id: sceneId,
+      elements: saved.scenes[sceneId]?.elements,
+      files: saved.scenes[sceneId]?.files,
+      sourcePage: saved.scenes[sceneId]?.pdfPage,
+    })),
+  });
+  const originalPdfs = pdfSnapshot(initial);
+  expect(originalPdfs.order).toHaveLength(2);
+  const sourceKeys = await autosavePdfKeys(page);
+  expect(sourceKeys).toHaveLength(1);
+  const sourceBytes = await keyvalValue<Uint8Array>(page, sourceKeys[0]);
+  expect(sourceBytes?.byteLength).toBeGreaterThan(0);
+  await expect.poll(readBoardIds).toEqual(originalIds);
+
+  const clearTrigger = page.getByRole("button", { name: "Clear board", exact: true });
+  await clearTrigger.click();
+  const dialog = page.getByRole("dialog", { name: "Clear main board?", exact: true });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await expect(dialog).toContainText("including off-screen content");
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(clearTrigger).toBeFocused();
+  await expect.poll(readBoardIds).toEqual(originalIds);
+
+  await page.locator(".footer-zoom-controls").getByRole("button", { name: "Zoom in", exact: true }).click();
+  await expect(page.locator(".footer-zoom-controls").getByRole("button", { name: "Reset zoom", exact: true }))
+    .not.toHaveText("100%");
+  await clearTrigger.click();
+  await dialog.getByRole("button", { name: "Clear board", exact: true }).click();
+  await expect(dialog).toHaveCount(0, { timeout: 30_000 });
+  await expect.poll(readBoardIds).toEqual([]);
+  await expect.poll(async () => pdfSnapshot(await readProject())).toEqual(originalPdfs);
+  expect(await keyvalValue(page, "patterdraw:library:v1")).toEqual(normalizedPersonalLibrary);
+  expect(await keyvalValue(page, sourceKeys[0])).toEqual(sourceBytes);
+  await expect.poll(async () => page.evaluate(() => {
+    const state = (window as Window & { h?: { app?: { state?: {
+      scrollX?: number; scrollY?: number; zoom?: { value?: number };
+    } } } }).h?.app?.state;
+    return { scrollX: state?.scrollX, scrollY: state?.scrollY, zoom: state?.zoom?.value };
+  })).toEqual({ scrollX: 0, scrollY: 0, zoom: 1 });
+
+  await page.locator('.statusbar .footer-history-button[aria-label="Undo"]').click();
+  await expect.poll(readBoardIds).toEqual(originalIds);
+  await page.locator('.statusbar .footer-history-button[aria-label="Redo"]').click();
+  await expect.poll(readBoardIds).toEqual([]);
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
+  await expect.poll(readBoardIds).toEqual([]);
+  await expect.poll(async () => pdfSnapshot(await readProject())).toEqual(originalPdfs);
+  expect(await keyvalValue(page, "patterdraw:library:v1")).toEqual(normalizedPersonalLibrary);
+  expect(await keyvalValue(page, sourceKeys[0])).toEqual(sourceBytes);
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("dialog", { name: "Settings", exact: true })
+    .getByRole("button", { name: /Recovery history/ }).click();
+  const history = page.getByRole("dialog", { name: "Recovery history", exact: true });
+  const protectedCopy = history.getByRole("radio", { name: new RegExp(projectTitle) });
+  await expect(protectedCopy).toHaveCount(1);
+  await protectedCopy.check();
+  page.once("dialog", (confirmation) => void confirmation.accept());
+  await history.getByRole("button", { name: "Recover selected", exact: true }).click();
+  await expect(history).toHaveCount(0, { timeout: 30_000 });
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
+  await expect.poll(readBoardIds).toEqual(originalIds);
+  await expect.poll(async () => pdfSnapshot(await readProject())).toEqual(originalPdfs);
+  expect(await keyvalValue(page, "patterdraw:library:v1")).toEqual(normalizedPersonalLibrary);
+  expect(await keyvalValue(page, sourceKeys[0])).toEqual(sourceBytes);
+});
+
+test("clears the main board only after acknowledging slides and restores their exact order and image files with Undo", async ({ page }, testInfo) => {
+  test.setTimeout(90_000);
+  type StoredProject = {
+    activeSceneId: string;
+    slideOrder: Array<{ id: string; frameId: string; title: string; sceneId: string; titleMode?: string }>;
+    scenes: Record<string, {
+      elements: Array<{ id: string; isDeleted?: boolean; fileId?: string }>;
+      files: Record<string, { dataURL?: string }>;
+    }>;
+  };
+  const fileId = "clear-board-image-file";
+  const imageData = solidPngDataUrl("#008800");
+  const image = {
+    ...exportTestRectangle("clear-board-image", 180, 180, 80, 80, "a0"),
+    type: "image",
+    fileId,
+    status: "saved",
+    scale: [1, 1],
+    crop: null,
+  };
+  const frames = [
+    classroomTestFrame("clear-frame-a", "First slide", 100, 100, 400, 300, "a1", true),
+    classroomTestFrame("clear-frame-b", "Second slide", 800, 100, 400, 300, "a2", true),
+  ];
+  const slides = [
+    { id: "clear-slide-b", frameId: "clear-frame-b", title: "Second slide", titleMode: "custom" as const },
+    { id: "clear-slide-a", frameId: "clear-frame-a", title: "First slide", titleMode: "custom" as const },
+  ];
+  await openClassroomFixture(page, [image, ...frames], slides, "clear-board-slides.patterdraw", undefined, {
+    [fileId]: { id: fileId, mimeType: "image/png", dataURL: imageData, created: 1 },
+  });
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
+  const readState = async () => {
+    const saved = await keyvalValue<StoredProject>(page, "patterdraw:autosave:project:v1");
+    const scene = saved?.scenes[saved.activeSceneId];
+    return {
+      ids: (scene?.elements || []).filter((element) => !element.isDeleted).map((element) => element.id).sort(),
+      slides: saved?.slideOrder || [],
+      imageData: scene?.files[fileId]?.dataURL,
+    };
+  };
+  const expectedIds = [image.id, ...frames.map((frame) => frame.id)].sort();
+  await expect.poll(async () => (await readState()).ids).toEqual(expectedIds);
+  const initialState = await readState();
+  expect(initialState.slides.map((slide) => slide.id)).toEqual(["clear-slide-b", "clear-slide-a"]);
+  expect(initialState.imageData).toBe(imageData);
+
+  const trigger = page.getByRole("button", { name: "Clear board", exact: true });
+  await trigger.click();
+  const dialog = page.getByRole("dialog", { name: "Clear main board?", exact: true });
+  const acknowledgement = dialog.getByRole("checkbox", { name: "Also clear the 2 slides on this board", exact: true });
+  const confirm = dialog.getByRole("button", { name: "Clear board", exact: true });
+  await expect(acknowledgement).not.toBeChecked();
+  await expect(confirm).toBeDisabled();
+  await page.screenshot({ path: testInfo.outputPath("clear-board-dialog.png") });
+  await acknowledgement.check();
+  await expect(confirm).toBeEnabled();
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await trigger.click();
+  await expect(acknowledgement).not.toBeChecked();
+  await acknowledgement.check();
+  await confirm.click();
+  await expect(dialog).toHaveCount(0, { timeout: 30_000 });
+  await expect.poll(async () => {
+    const current = await readState();
+    return { ids: current.ids, slides: current.slides };
+  }).toEqual({ ids: [], slides: [] });
+
+  await page.locator('.statusbar .footer-history-button[aria-label="Undo"]').click();
+  await expect.poll(readState).toEqual(initialState);
+  await page.locator('.statusbar .footer-history-button[aria-label="Redo"]').click();
+  await expect.poll(async () => {
+    const current = await readState();
+    return { ids: current.ids, slides: current.slides };
+  }).toEqual({ ids: [], slides: [] });
+  await page.locator('.statusbar .footer-history-button[aria-label="Undo"]').click();
+  await expect.poll(readState).toEqual(initialState);
+  await page.getByRole("button", { name: "Slides", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Clear board", exact: true })).toHaveCount(0);
+  await expect(page.locator("#slide-rail .slide-thumbnail")).toHaveCount(2);
+});
+
+test("protects the main board from clearing when the automatic recovery-history write fails", async ({ page }) => {
+  const elements = [
+    exportTestRectangle("protected-board-object", 150, 150, 150, 100, "a0"),
+    exportTestRectangle("protected-offscreen-object", -8_000, 10_000, 150, 100, "a1"),
+  ];
+  await openClassroomFixture(page, elements, [], "protected-clear-board.patterdraw");
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
+  const readBoard = async () => {
+    const saved = await keyvalValue<{
+      activeSceneId: string;
+      scenes: Record<string, { elements: Array<{ id: string; isDeleted?: boolean }> }>;
+    }>(page, "patterdraw:autosave:project:v1");
+    return (saved?.scenes[saved.activeSceneId]?.elements || [])
+      .filter((element) => !element.isDeleted)
+      .map((element) => element.id)
+      .sort();
+  };
+  const expectedIds = elements.map((element) => element.id).sort();
+  await expect.poll(readBoard).toEqual(expectedIds);
+  await page.evaluate(() => {
+    const originalPut = IDBObjectStore.prototype.put;
+    const state = window as Window & { __clearBoardHistoryWriteFailed?: boolean };
+    Object.defineProperty(IDBObjectStore.prototype, "put", {
+      configurable: true,
+      value(this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+        if (this.transaction.db.name === "patterdraw-autosave-history-v1" && this.name === "history") {
+          state.__clearBoardHistoryWriteFailed = true;
+          throw new DOMException("Storage is full.", "QuotaExceededError");
+        }
+        return key === undefined
+          ? originalPut.call(this, value)
+          : originalPut.call(this, value, key);
+      },
+    });
+  });
+
+  await page.getByRole("button", { name: "Clear board", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Clear main board?", exact: true });
+  await dialog.getByRole("button", { name: "Clear board", exact: true }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "Nothing was cleared." })).toBeVisible();
+  expect(await page.evaluate(() => (window as Window & {
+    __clearBoardHistoryWriteFailed?: boolean;
+  }).__clearBoardHistoryWriteFailed)).toBe(true);
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Clear board", exact: true })).toBeEnabled();
+  await expect.poll(readBoard).toEqual(expectedIds);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
+  await expect.poll(readBoard).toEqual(expectedIds);
+});
+
+type ClearBoardTimedFixtureProject = {
+  activeSceneId: string;
+  scenes: Record<string, {
+    elements: Array<{
+      id: string;
+      isDeleted?: boolean;
+      customData?: { classroomTimeWidget?: { ownerId?: string; runtime?: { status?: string } } };
+    }>;
+  }>;
+};
+
+async function addClearBoardRunningTimer(page: Page): Promise<{ ownerId: string; elementIds: string[] }> {
+  await page.locator(".App-toolbar__extra-tools-trigger").click();
+  await page.getByTestId("toolbar-math-tools").click();
+  const tools = page.getByRole("dialog", { name: "Math tools", exact: true });
+  const experimental = tools.getByRole("switch", { name: "Experimental features", exact: true });
+  if (!await experimental.isChecked()) await experimental.check();
+  await tools.getByTestId("math-tool-classroom-tab").click();
+  await tools.getByTestId("math-tool-classroom-timer").click();
+  const timerDialog = page.getByRole("dialog", { name: "Add Timer", exact: true });
+  await timerDialog.getByLabel("Widget label", { exact: true }).fill("Clear board running timer");
+  await timerDialog.getByRole("button", { name: "Timer", exact: true }).click();
+  await timerDialog.getByLabel("Timer hours", { exact: true }).fill("0");
+  await timerDialog.getByLabel("Timer minutes", { exact: true }).fill("5");
+  await timerDialog.getByLabel("Timer seconds", { exact: true }).fill("0");
+  await timerDialog.getByRole("button", { name: "Add Timer", exact: true }).click();
+  await expect(timerDialog).toHaveCount(0);
+  await page.getByTestId("classroom-time-overlay").getByRole("button", { name: "Start", exact: true }).click();
+  const read = () => keyvalValue<ClearBoardTimedFixtureProject>(page, "patterdraw:autosave:project:v1");
+  await expect.poll(async () => {
+    const saved = await read();
+    return saved?.scenes[saved.activeSceneId]?.elements.find((element) => (
+      !element.isDeleted && element.customData?.classroomTimeWidget?.runtime
+    ))?.customData?.classroomTimeWidget?.runtime?.status;
+  }).toBe("running");
+  const saved = await read();
+  const elements = saved?.scenes[saved.activeSceneId]?.elements.filter((element) => !element.isDeleted) || [];
+  const ownerId = elements.find((element) => element.customData?.classroomTimeWidget?.runtime)
+    ?.customData?.classroomTimeWidget?.ownerId;
+  if (!ownerId) throw new Error("The clear-board timer fixture has no running owner.");
+  await expect.poll(async () => page.evaluate((id) => {
+    const registry = JSON.parse(localStorage.getItem("patterdraw:classroom-alarm-registry:v1") || "null") as {
+      jobs?: Array<{ ownerId?: string }>;
+    } | null;
+    return registry?.jobs?.filter((job) => job.ownerId === id).length || 0;
+  }, ownerId)).toBe(1);
+  return { ownerId, elementIds: elements.map((element) => element.id).sort() };
+}
+
+type ClearBoardHistoryGateWindow = Window & {
+  __clearBoardHistoryGate?: { release: () => void; requests: number };
+};
+
+async function installClearBoardHistoryGate(page: Page, projectTitle: string): Promise<void> {
+  await page.evaluate((title) => {
+    const nativeDigest = crypto.subtle.digest.bind(crypto.subtle);
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const state = window as ClearBoardHistoryGateWindow;
+    state.__clearBoardHistoryGate = { release, requests: 0 };
+    Object.defineProperty(crypto.subtle, "digest", {
+      configurable: true,
+      value: async (algorithm: AlgorithmIdentifier, bytes: BufferSource) => {
+        let manifest: { title?: string; scenes?: unknown } | null = null;
+        try {
+          manifest = JSON.parse(new TextDecoder().decode(bytes)) as { title?: string; scenes?: unknown };
+        } catch {
+          // PDF and image byte digests are not the protected project manifest.
+        }
+        if (manifest?.title === title && manifest.scenes && state.__clearBoardHistoryGate) {
+          state.__clearBoardHistoryGate.requests += 1;
+          if (state.__clearBoardHistoryGate.requests === 1) await gate;
+        }
+        return nativeDigest(algorithm, bytes);
+      },
+    });
+  }, projectTitle);
+}
+
+async function clearBoardHistoryGateRequests(page: Page): Promise<number> {
+  return page.evaluate(() => (window as ClearBoardHistoryGateWindow).__clearBoardHistoryGate?.requests || 0);
+}
+
+async function releaseClearBoardHistoryGate(page: Page): Promise<void> {
+  await page.evaluate(() => (window as ClearBoardHistoryGateWindow).__clearBoardHistoryGate?.release());
+}
+
+test("clears the main board with a running timer after confirmation and recovery-save delays, cancelling its alarm", async ({ page }) => {
+  test.setTimeout(90_000);
+  const title = "Timed clear board";
+  await page.getByRole("textbox", { name: "Project title" }).fill(title);
+  const { ownerId, elementIds } = await addClearBoardRunningTimer(page);
+  expect(elementIds.length).toBeGreaterThan(2);
+  await page.getByRole("button", { name: "Clear board", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Clear main board?", exact: true });
+  await expect(dialog).toBeVisible();
+  await page.waitForTimeout(2_200);
+  await installClearBoardHistoryGate(page, title);
+  await dialog.getByRole("button", { name: "Clear board", exact: true }).click();
+  await expect.poll(() => clearBoardHistoryGateRequests(page)).toBe(1);
+  await expect(dialog.getByRole("button", { name: "Protecting board…", exact: true })).toBeDisabled();
+  await page.waitForTimeout(2_200);
+  await releaseClearBoardHistoryGate(page);
+  await expect(dialog).toHaveCount(0, { timeout: 30_000 });
+  await expect(page.getByRole("alert").filter({ hasText: "Nothing was cleared." })).toHaveCount(0);
+  await expect.poll(async () => {
+    const saved = await keyvalValue<ClearBoardTimedFixtureProject>(page, "patterdraw:autosave:project:v1");
+    return saved?.scenes[saved.activeSceneId]?.elements.filter((element) => !element.isDeleted).length ?? -1;
+  }).toBe(0);
+  await expect.poll(async () => page.evaluate((id) => {
+    const registry = JSON.parse(localStorage.getItem("patterdraw:classroom-alarm-registry:v1") || "null") as {
+      jobs?: Array<{ ownerId?: string }>;
+      cancellationTombstones?: Array<{ ownerId?: string; target?: string }>;
+    } | null;
+    return {
+      jobs: registry?.jobs?.filter((job) => job.ownerId === id).length || 0,
+      targets: (registry?.cancellationTombstones || []).filter((item) => item.ownerId === id)
+        .map((item) => item.target).sort(),
+    };
+  }, ownerId)).toEqual({ jobs: 0, targets: ["pomodoro", "timer"] });
+});
+
+test("protects the main board from clearing when running-timer alarm cancellation cannot be saved", async ({ page }) => {
+  test.setTimeout(90_000);
+  const { ownerId, elementIds } = await addClearBoardRunningTimer(page);
+  await page.evaluate(() => {
+    const nativeSetItem = Storage.prototype.setItem;
+    Object.defineProperty(Storage.prototype, "setItem", {
+      configurable: true,
+      value(this: Storage, key: string, value: string) {
+        if (this === localStorage && key === "patterdraw:classroom-alarm-registry:v1") {
+          throw new DOMException("The alarm registry is full.", "QuotaExceededError");
+        }
+        return nativeSetItem.call(this, key, value);
+      },
+    });
+  });
+  await page.getByRole("button", { name: "Clear board", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Clear main board?", exact: true });
+  await dialog.getByRole("button", { name: "Clear board", exact: true }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "Nothing was cleared." })).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: "classroom alarms could not be cancelled" })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeEnabled();
+  await expect.poll(async () => {
+    const saved = await keyvalValue<ClearBoardTimedFixtureProject>(page, "patterdraw:autosave:project:v1");
+    return saved?.scenes[saved.activeSceneId]?.elements.filter((element) => !element.isDeleted)
+      .map((element) => element.id).sort() || [];
+  }).toEqual(elementIds);
+  expect(await page.evaluate((id) => {
+    const registry = JSON.parse(localStorage.getItem("patterdraw:classroom-alarm-registry:v1") || "null") as {
+      jobs?: Array<{ ownerId?: string }>;
+    } | null;
+    return registry?.jobs?.filter((job) => job.ownerId === id).length || 0;
+  }, ownerId)).toBe(1);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+});
+
+test("protects the main board from a stale clear when the active scene changes during recovery preparation", async ({ page }) => {
+  test.setTimeout(90_000);
+  await openClassroomFixture(page, [
+    exportTestRectangle("late-scene-board-object", 100, 100, 180, 120, "a0"),
+  ], [], "late-scene-clear.patterdraw");
+  await openTestPdf(page);
+  await page.getByRole("button", { name: "Board", exact: true }).click();
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
+  const title = "Scene fence clear board";
+  await page.getByRole("textbox", { name: "Project title" }).fill(title);
+  type StoredProject = {
+    activeSceneId: string;
+    pdfPageOrder: string[];
+    scenes: Record<string, { elements: Array<{ id: string; isDeleted?: boolean }> }>;
+  };
+  const read = () => keyvalValue<StoredProject>(page, "patterdraw:autosave:project:v1");
+  await expect.poll(async () => {
+    const saved = await read();
+    return saved?.scenes[saved.activeSceneId]?.elements.filter((element) => !element.isDeleted)
+      .map((element) => element.id);
+  }).toEqual(["late-scene-board-object"]);
+  const before = await read();
+  if (!before) throw new Error("The stale-clear fixture was not saved.");
+  await page.getByRole("button", { name: "Clear board", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Clear main board?", exact: true });
+  await installClearBoardHistoryGate(page, title);
+  await dialog.getByRole("button", { name: "Clear board", exact: true }).click();
+  await expect.poll(() => clearBoardHistoryGateRequests(page)).toBe(1);
+  // Model a scene-selection event that was already queued before the modal
+  // opened. A physical click is intentionally blocked by the modal backdrop.
+  await page.getByRole("button", { name: "PDF", exact: true })
+    .evaluate((button: HTMLButtonElement) => button.click());
+  await expect(page.locator(".app-shell")).toHaveClass(/is-pdf-mode/);
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
+  await releaseClearBoardHistoryGate(page);
+  await expect(page.getByRole("alert").filter({ hasText: "Nothing was cleared." })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeEnabled();
+  await expect.poll(async () => (await read())?.scenes[before.activeSceneId]?.elements
+    .filter((element) => !element.isDeleted).map((element) => element.id)).toEqual(["late-scene-board-object"]);
+  await expect.poll(async () => (await read())?.activeSceneId).toBe(before.pdfPageOrder[0]);
+  await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(1);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+});

@@ -39,7 +39,7 @@ button { color: inherit; }
 .topbar {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: minmax(210px, 1fr) auto minmax(330px, 1fr);
+  grid-template-columns: minmax(160px, 1fr) auto auto;
   align-items: center;
   gap: 16px;
   min-width: 0;
@@ -314,6 +314,8 @@ button { color: inherit; }
 .workspace-toggle:disabled:hover { background: transparent; border-color: transparent; }
 .workspace-toggle svg, .file-actions svg, .topbar-menu-trigger svg { width: 17px; height: 17px; }
 .file-actions { justify-self: end; display: flex; flex: 0 0 auto; align-items: center; gap: 3px; }
+.file-actions > .topbar-action,
+.export-split > button:first-child { white-space: nowrap; }
 .file-actions .topbar-library,
 .file-actions .topbar-tool,
 .file-actions .topbar-hide { width: 34px; justify-content: center; padding: 0; }
@@ -3422,6 +3424,22 @@ body:has(.app-shell:fullscreen.is-obs-capture-enabled) #patterdraw-offline-app-s
 .app-shell[data-theme="dark"] .project-find-result-scope { background: #354054; color: #c0cbdb; }
 .app-shell[data-theme="dark"] .project-find-result-scope-slide { background: #243d70; color: #b5c9ff; }
 .app-shell[data-theme="dark"] .project-find-result-scope-pdf { background: #5b3024; color: #ffc1ad; }
+
+/* Reserve intrinsic space for the new board action instead of letting the
+   file controls overlap the workspace tabs at laptop widths. */
+@media (min-width: 861px) and (max-width: 1200px) {
+  .app-shell:not(.is-bottom-interface) .file-actions > .topbar-action,
+  .app-shell:not(.is-bottom-interface) .topbar-menu > .topbar-menu-trigger,
+  .app-shell:not(.is-bottom-interface) .export-split > button:first-child {
+    width: 34px;
+    justify-content: center;
+    padding: 0;
+  }
+  .app-shell:not(.is-bottom-interface) .file-actions > .topbar-action > span,
+  .app-shell:not(.is-bottom-interface) .topbar-menu > .topbar-menu-trigger > span,
+  .app-shell:not(.is-bottom-interface) .topbar-menu > .topbar-menu-trigger > .menu-chevron,
+  .app-shell:not(.is-bottom-interface) .export-split > button:first-child > span { display: none; }
+}
 
 @media (max-width: 860px) {
   .app-shell { grid-template-columns: minmax(0, 1fr); }
