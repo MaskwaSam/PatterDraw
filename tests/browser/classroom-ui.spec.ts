@@ -3175,9 +3175,19 @@ test("edits exact geometry through the optional Size & Position inspector", asyn
   await openClassroomFixture(page, [
     exportTestRectangle("inspected-rectangle", 200, 160, 180, 110, "a0"),
   ], []);
-  const center = await scenePointInViewport(page, { x: 290, y: 215 });
+  // The imported archive is saved before the editor's two-paint input guard
+  // clears. A raw canvas click must wait for readiness and use live offsets,
+  // not the potentially older viewport stored in that archive/autosave.
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
   await page.getByTestId("toolbar-selection").check({ force: true });
+  const center = await liveScenePointInViewport(page, { x: 290, y: 215 });
   await page.mouse.click(center.x, center.y);
+  await expect.poll(() => page.evaluate(() => {
+    const selected = (window as unknown as {
+      h?: { app?: { state?: { selectedElementIds?: Record<string, boolean> } } };
+    }).h?.app?.state?.selectedElementIds || {};
+    return Object.keys(selected).filter((id) => selected[id]);
+  })).toEqual(["inspected-rectangle"]);
 
   const toggle = page.getByRole("button", { name: "Size & Position", exact: true });
   await toggle.click();
