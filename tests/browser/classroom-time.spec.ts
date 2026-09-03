@@ -669,13 +669,23 @@ async function simplePdfBytes(pageCount = 1): Promise<Buffer> {
   return Buffer.from(await document.save());
 }
 
-async function failPdfCandidateAutosaveWithQuota(page: Page): Promise<void> {
-  await page.evaluate(() => {
+async function failPdfCandidateAutosaveWithQuota(page: Page, existingDocumentId: string): Promise<void> {
+  await page.evaluate((originalDocumentId) => {
+    const descriptor = Object.getOwnPropertyDescriptor(IDBObjectStore.prototype, "put");
+    if (!descriptor) throw new Error("IDBObjectStore.put could not be instrumented.");
     const originalPut = IDBObjectStore.prototype.put;
+    const existingKey = `patterdraw:autosave:pdf:v1:${originalDocumentId}`;
+    const state = window as Window & { __pdfCandidateQuotaFailureKey?: string };
     Object.defineProperty(IDBObjectStore.prototype, "put", {
-      configurable: true,
+      ...descriptor,
       value(this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
-        if (typeof key === "string" && key.startsWith("patterdraw:autosave:pdf:v1:")) {
+        if (
+          typeof key === "string"
+          && key.startsWith("patterdraw:autosave:pdf:v1:")
+          && key !== existingKey
+        ) {
+          state.__pdfCandidateQuotaFailureKey = key;
+          Object.defineProperty(IDBObjectStore.prototype, "put", descriptor);
           throw new DOMException("Storage is full.", "QuotaExceededError");
         }
         return key === undefined
@@ -683,7 +693,7 @@ async function failPdfCandidateAutosaveWithQuota(page: Page): Promise<void> {
           : originalPut.call(this, value, key);
       },
     });
-  });
+  }, existingDocumentId);
 }
 
 async function addOrdinaryRectangle(
@@ -1676,6 +1686,9 @@ test("durably cancels a running Timer on delete, restores it paused with native 
 
 test("restores the old PDF timer when an atomic PDF replacement fails", async ({ page }) => {
   test.setTimeout(90_000);
+  // Isolate quota rollback from intervening timer-display revisions while
+  // leaving normal browser timers and animation frames running.
+  await page.clock.setFixedTime(await page.evaluate(() => Date.now()));
   await page.getByLabel("Open project file").setInputFiles({
     name: "timed-original.pdf",
     mimeType: "application/pdf",
@@ -1707,7 +1720,9 @@ test("restores the old PDF timer when an atomic PDF replacement fails", async ({
   }).toBe(1);
   if (!originalJob) throw new Error("The original PDF timer alarm was not persisted.");
   await expect(page.getByText("Saved locally", { exact: true })).toBeVisible({ timeout: 30_000 });
-  await failPdfCandidateAutosaveWithQuota(page);
+  const originalDocumentId = activeScene(await autosavedProject(page))?.pdfPage?.documentId;
+  if (!originalDocumentId) throw new Error("The original PDF source was not persisted.");
+  await failPdfCandidateAutosaveWithQuota(page, originalDocumentId);
 
   await page.getByLabel("Open project file").setInputFiles({
     name: "rejected-timed-replacement.pdf",
@@ -1719,6 +1734,11 @@ test("restores the old PDF timer when an atomic PDF replacement fails", async ({
     "browser storage became full. Nothing was imported",
     { timeout: 30_000 },
   );
+  const rejectedPdfKey = await page.evaluate(() => (
+    window as Window & { __pdfCandidateQuotaFailureKey?: string }
+  ).__pdfCandidateQuotaFailureKey);
+  expect(rejectedPdfKey).toMatch(/^patterdraw:autosave:pdf:v1:/);
+  expect(rejectedPdfKey).not.toBe(`patterdraw:autosave:pdf:v1:${originalDocumentId}`);
   await expect(pages).toHaveCount(1);
   await expect(pages.first()).toContainText("timed-original.pdf");
   await expect(pages).not.toContainText("rejected-timed-replacement.pdf");
