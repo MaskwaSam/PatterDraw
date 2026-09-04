@@ -26,23 +26,32 @@ async function linkCenter(page: Page) {
   return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
 }
 
-async function fixturePoint(page: Page, x: number, y: number) {
-  return page.evaluate(async ({ x, y }) => {
-    const live = (window as unknown as { h?: { app?: { state?: Record<string, any> } } }).h?.app?.state;
-    const state = live ?? await new Promise<Record<string, any>>((resolve, reject) => {
-      const open = indexedDB.open("keyval-store");
-      open.onerror = () => reject(open.error);
-      open.onsuccess = () => {
-        const db = open.result;
-        const read = db.transaction("keyval").objectStore("keyval").get("patterdraw:autosave:project:v1");
-        read.onsuccess = () => { const p = read.result; db.close(); resolve(p.scenes[p.activeSceneId].appState); };
-        read.onerror = () => { db.close(); reject(read.error); };
-      };
-    });
-    const host = document.querySelector(".editor-host")!.getBoundingClientRect();
-    const zoom = state.zoom?.value ?? 1;
-    return { x: (x + (state.scrollX ?? 0)) * zoom + (state.offsetLeft ?? host.x), y: (y + (state.scrollY ?? 0)) * zoom + (state.offsetTop ?? host.y) };
-  }, { x, y });
+async function fixturePoint(page: Page, x: number, y: number, width: number, height: number) {
+  // Find the paper in the rendered bitmap, independently of the link overlay
+  // and viewport metadata (which Excalidraw omits from portable archives).
+  return page.evaluate(({ x, y, width, height }) => {
+    const canvas = document.querySelector<HTMLCanvasElement>("canvas.excalidraw__canvas.static")!;
+    const pixels = canvas.getContext("2d")!.getImageData(0, 0, canvas.width, canvas.height).data;
+    let widest = 0, left = 0, top = 0, bottom = 0;
+    for (let row = 0; row < canvas.height; row += 1) {
+      let start = -1;
+      for (let col = 0; col <= canvas.width; col += 1) {
+        const i = (row * canvas.width + col) * 4;
+        const white = col < canvas.width && pixels[i] === 255 && pixels[i + 1] === 255 && pixels[i + 2] === 255 && pixels[i + 3] === 255;
+        if (white && start < 0) start = col;
+        if (!white && start >= 0) {
+          const span = col - start;
+          if (span > widest) { widest = span; left = start; top = row; bottom = row; }
+          else if (span === widest && start === left) bottom = row;
+          start = -1;
+        }
+      }
+    }
+    if (widest < 200 || bottom - top < 200) throw new Error("Rendered fixture paper is not ready");
+    const box = canvas.getBoundingClientRect();
+    return { x: box.x + (left + x / width * widest) * box.width / canvas.width,
+      y: box.y + (top + y / height * (bottom - top + 1)) * box.height / canvas.height };
+  }, { x, y, width, height });
 }
 
 test("PDF web links require selection clicks and survive zoom, rotation, reorder and project round trips", async ({ page, context }) => {
@@ -55,14 +64,14 @@ test("PDF web links require selection clicks and survive zoom, rotation, reorder
   await expect(page.locator("#pdf-page-rail .pdf-page-item")).toHaveCount(2);
   await page.getByTestId("toolbar-selection").check({ force: true });
   const point = await linkCenter(page);
-  let fixtureCenter = { x: 215, y: 384.5 };
+  let fixtureCenter = { x: 215, y: 384.5, width: 612, height: 792 };
   const openLink = async () => {
     const target = await linkCenter(page);
     await expect.poll(async () => {
-      const expected = await fixturePoint(page, fixtureCenter.x, fixtureCenter.y);
+      const expected = await fixturePoint(page, fixtureCenter.x, fixtureCenter.y, fixtureCenter.width, fixtureCenter.height);
       return Math.hypot(expected.x - target.x, expected.y - target.y);
     }).toBeLessThan(2);
-    const expected = await fixturePoint(page, fixtureCenter.x, fixtureCenter.y);
+    const expected = await fixturePoint(page, fixtureCenter.x, fixtureCenter.y, fixtureCenter.width, fixtureCenter.height);
     const popupPromise = context.waitForEvent("page", { timeout: 15_000 });
     await page.mouse.click(expected.x, expected.y);
     const popup = await popupPromise;
@@ -92,8 +101,11 @@ test("PDF web links require selection clicks and survive zoom, rotation, reorder
   expect(context.pages()).toHaveLength(1); // the ink takes selection priority
   await page.keyboard.press("Delete");
   await expect(page.locator("#pdf-page-rail .pdf-page-item").first().locator(".pdf-annotation-count")).toHaveCount(0);
+  // Keep the full paper visible so its bitmap bounds remain an independent oracle.
+  await page.getByRole("button", { name: "Zoom out", exact: true }).click();
+  await page.getByRole("button", { name: "Zoom out", exact: true }).click();
   await page.mouse.move(point.x, point.y);
-  await page.mouse.wheel(0, 50);
+  await page.mouse.wheel(0, 20);
   await page.getByRole("button", { name: "Zoom in", exact: true }).click();
   await openLink();
 
@@ -107,11 +119,11 @@ test("PDF web links require selection clicks and survive zoom, rotation, reorder
   expect(unexpected).toEqual([]);
 
   await page.locator("#pdf-page-rail .pdf-page-item").nth(1).locator(".pdf-page-open").click();
-  fixtureCenter = { x: 407.5, y: 215 };
+  fixtureCenter = { x: 407.5, y: 215, width: 792, height: 612 };
   await openLink(); // source /Rotate = 90
   await page.getByRole("button", { name: "More actions for output page 2", exact: true }).click();
   await page.getByRole("menuitem", { name: "Rotate clockwise 90 degrees", exact: true }).click();
-  fixtureCenter = { x: 397, y: 407.5 };
+  fixtureCenter = { x: 397, y: 407.5, width: 612, height: 792 };
   await openLink(); // additional wrapper rotation
   await page.getByRole("button", { name: "Move output page 2 earlier", exact: true }).click();
   await openLink();

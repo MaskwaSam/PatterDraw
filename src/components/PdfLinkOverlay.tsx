@@ -17,6 +17,7 @@ interface Props {
 export function PdfLinkOverlay({ api, workspace, bytes, enabled }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [links, setLinks] = useState<PdfPageLink[]>([]);
+  const { width, height, viewRotation = 0, backgroundElementId } = workspace;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -46,8 +47,8 @@ export function PdfLinkOverlay({ api, workspace, bytes, enabled }: Props) {
         && !state.openDialog && !state.selectedElementsAreBeingDragged;
     };
     const bounds = links.map((link) => {
-      const a = rotatePdfPagePoint([link.x, link.y], workspace.width, workspace.height, workspace.viewRotation ?? 0);
-      const b = rotatePdfPagePoint([link.x + link.width, link.y + link.height], workspace.width, workspace.height, workspace.viewRotation ?? 0);
+      const a = rotatePdfPagePoint([link.x, link.y], width, height, viewRotation);
+      const b = rotatePdfPagePoint([link.x + link.width, link.y + link.height], width, height, viewRotation);
       return { link, x: Math.min(a[0], b[0]), y: Math.min(a[1], b[1]), width: Math.abs(b[0] - a[0]), height: Math.abs(b[1] - a[1]) };
     });
     const sync = () => {
@@ -74,7 +75,7 @@ export function PdfLinkOverlay({ api, workspace, bytes, enabled }: Props) {
       if (!rect) return null;
       // Drawn objects retain selection priority over the locked page beneath them.
       const covered = api.getSceneElements().some((element) => {
-        if (element.id === workspace.backgroundElementId || element.isDeleted) return false;
+        if (element.id === backgroundElementId || element.isDeleted) return false;
         const [x1, y1, x2, y2] = getCommonBounds([element]);
         return p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2;
       });
@@ -133,7 +134,7 @@ export function PdfLinkOverlay({ api, workspace, bytes, enabled }: Props) {
       window.removeEventListener("keyup", key, true);
       window.removeEventListener("blur", blur);
     };
-  }, [api, links, workspace, enabled]);
+  }, [api, links, width, height, viewRotation, backgroundElementId, enabled]);
 
   return <div ref={rootRef} className="pdf-link-overlay" data-testid="pdf-link-overlay" hidden>
     {links.map((link, index) => <button
