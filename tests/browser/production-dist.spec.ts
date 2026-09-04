@@ -509,6 +509,19 @@ test("revalidates, survives gateway errors, and keeps rollback registration safe
     });
     await expect(controlledPage.getByRole("button", { name: "Board", exact: true }))
       .toHaveAttribute("aria-pressed", "true");
+    // Rendering the recovered document can precede registration visibility in
+    // WebKit. Wait for that boundary before reading its durable routing state;
+    // the cache, controller, and routing assertions below still have to pass.
+    await expect.poll(() => controlledPage.evaluate(async () => {
+      const registration = await navigator.serviceWorker.getRegistration();
+      const controller = navigator.serviceWorker.controller;
+      return registration && controller
+        ? { scope: registration.scope, scriptUrl: controller.scriptURL }
+        : null;
+    }), { timeout: 15_000 }).toEqual({
+      scope: fixtureRoute,
+      scriptUrl: new URL("service-worker.js", fixtureRoute).href,
+    });
     const recoveredRoutingState = await controlledPage.evaluate(async () => {
       const registration = await navigator.serviceWorker.getRegistration();
       if (!registration) throw new Error("The offline recovery page lost its worker registration.");
