@@ -1,5 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { getCommonBounds, sceneCoordsToViewportCoords, viewportCoordsToSceneCoords } from "@excalidraw/excalidraw";
+import { sceneCoordsToViewportCoords, viewportCoordsToSceneCoords } from "@excalidraw/excalidraw";
+import { hitElementBoundText, hitElementItself } from "@excalidraw/element";
+import type { ExcalidrawElement as GeometryElement } from "@excalidraw/element/types";
+import { DEFAULT_COLLISION_THRESHOLD } from "@excalidraw/common";
+import { pointFrom, type GlobalPoint } from "@excalidraw/math";
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { PdfPageWorkspace } from "../types";
 import type { PdfPageLink } from "../lib/pdf/page-links";
@@ -70,14 +74,22 @@ export function PdfLinkOverlay({ api, workspace, bytes, enabled }: Props) {
     const hit = (event: MouseEvent) => {
       if (!available() || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return null;
       if (!(event.target instanceof HTMLCanvasElement) || !host.contains(event.target)) return null;
-      const p = viewportCoordsToSceneCoords(event, api.getAppState());
+      const state = api.getAppState();
+      const p = viewportCoordsToSceneCoords(event, state);
       const rect = bounds.find((r) => p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height);
       if (!rect) return null;
-      // Drawn objects retain selection priority over the locked page beneath them.
-      const covered = api.getSceneElements().some((element) => {
+      // Only actual shapes and labels cover links, not empty space in their bounds.
+      // Like the lasso adapter, use the pinned geometry package read-only with
+      // stable-editor elements; their binding metadata types differ.
+      const elements = api.getSceneElements() as unknown as readonly GeometryElement[];
+      const elementsMap = new Map(elements.map((element) => [element.id, element]));
+      const point = pointFrom<GlobalPoint>(p.x, p.y);
+      const threshold = DEFAULT_COLLISION_THRESHOLD / state.zoom.value;
+      const covered = elements.some((element) => {
         if (element.id === backgroundElementId || element.isDeleted) return false;
-        const [x1, y1, x2, y2] = getCommonBounds([element]);
-        return p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2;
+        if (element.type === "text" && element.containerId) return false;
+        return hitElementItself({ point, element, threshold, elementsMap })
+          || hitElementBoundText(point, element, elementsMap);
       });
       return covered ? null : rect.link;
     };

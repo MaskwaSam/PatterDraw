@@ -101,6 +101,22 @@ test("PDF web links require selection clicks and survive zoom, rotation, reorder
   expect(context.pages()).toHaveLength(1); // the ink takes selection priority
   await page.keyboard.press("Delete");
   await expect(page.locator("#pdf-page-rail .pdf-page-item").first().locator(".pdf-annotation-count")).toHaveCount(0);
+  // A diagonal mark's bounding box encloses the link, but its ink misses it.
+  // Empty space must still open the link; clicking actual ink must select it.
+  for (const tool of ["toolbar-freedraw", "toolbar-line", "toolbar-arrow"]) {
+    await page.getByTestId(tool).check({ force: true });
+    await page.mouse.move(point.x - 150, point.y - 120);
+    await page.mouse.down();
+    await page.mouse.move(point.x + 150, point.y + 20, { steps: 20 });
+    await page.mouse.up();
+    await page.keyboard.press("Escape");
+    await page.getByTestId("toolbar-selection").check({ force: true });
+    await openLink();
+    await page.mouse.click(point.x, point.y - 50);
+    expect(context.pages()).toHaveLength(1);
+    await page.keyboard.press("Delete");
+    await expect(page.locator("#pdf-page-rail .pdf-page-item").first().locator(".pdf-annotation-count")).toHaveCount(0);
+  }
   // Keep the full paper visible so its bitmap bounds remain an independent oracle.
   await page.getByRole("button", { name: "Zoom out", exact: true }).click();
   await page.getByRole("button", { name: "Zoom out", exact: true }).click();
