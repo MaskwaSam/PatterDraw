@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   filterOfflineFontSources,
   installOfflineNavigationGuard,
+  installOfflineNetworkGuard,
   isAllowedOfflineUrl,
+  openPdfWebLink,
 } from "./offline-network";
 
 describe("offline network policy", () => {
@@ -44,5 +46,15 @@ describe("offline network policy", () => {
     const localClick = new MouseEvent("click", { bubbles: true, cancelable: true });
     local.dispatchEvent(localClick);
     expect(localClick.defaultPrevented).toBe(false);
+  });
+
+  it("does not navigate PDF links through programmatic clicks", () => {
+    const nativeOpen = vi.spyOn(window, "open").mockReturnValue(null);
+    installOfflineNetworkGuard();
+    const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+    expect(event.isTrusted).toBe(false);
+    openPdfWebLink("https://example.test/model", event);
+    expect(nativeOpen).not.toHaveBeenCalled();
+    expect(isAllowedOfflineUrl("https://example.test/model", base)).toBe(false);
   });
 });

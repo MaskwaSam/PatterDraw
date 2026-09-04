@@ -31,6 +31,7 @@ import { useAutosaveStatus } from "./lib/autosave-status";
 import { SlideRail } from "./components/SlideRail";
 import { SlideRotationDialog } from "./components/SlideRotationDialog";
 import { PDF_RAIL_DEFAULT_WIDTH, PdfPageRail } from "./components/PdfPageRail";
+import { PdfLinkOverlay } from "./components/PdfLinkOverlay";
 import {
   PdfInsertDialog,
   defaultPdfPageRange,
@@ -14648,6 +14649,15 @@ export default function App() {
           >
             {featurePreferences.library || featurePreferences.projectFind ? defaultSidebar : null}
           </Excalidraw>
+          {api && workspaceMode === "pdf" && currentScene?.pdfPage && pdfBytes[currentScene.pdfPage.documentId] ? (
+            <PdfLinkOverlay
+              key={`${project?.id}:${currentScene.id}`}
+              api={api}
+              workspace={currentScene.pdfPage}
+              bytes={pdfBytes[currentScene.pdfPage.documentId]}
+              enabled={!isSceneInputBlocked && !presentation && !isScreenshotCaptureActive}
+            />
+          ) : null}
           {isSceneInputBlocked ? (
             <div
               className="scene-hydration-input-guard"

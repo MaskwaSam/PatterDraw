@@ -215,7 +215,7 @@ function reportImportProgress(
   }, options.signal);
 }
 
-function safePdfDocumentParameters(
+export function safePdfDocumentParameters(
   bytes: Uint8Array,
   rasterBudget: Readonly<PdfRasterBudget>,
 ): SafePdfDocumentInitParameters {

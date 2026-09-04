@@ -10,7 +10,7 @@ This repository is intentionally independent from PolyPad. Nothing here patches 
 
 ## Current vertical slice
 
-- Locally bundled `@excalidraw/excalidraw@0.18.1` with collaboration, AI, embeds, external links, public-library routing, telemetry, and remote runtime assets excluded or blocked.
+- Locally bundled `@excalidraw/excalidraw@0.18.1` with collaboration, AI, embeds, external canvas links, public-library routing, telemetry, and remote runtime assets excluded or blocked.
 - Board-first workspace with an accessible **Slides** toggle. The live editor stays mounted, so switching modes does not discard selections, history, or canvas position.
 - **Clear board** in Board mode starts a fresh main canvas after confirmation and a required local recovery copy. Clearing includes off-screen and locked objects; slides require an extra acknowledgement. PDFs and the personal library stay untouched. Use **Undo** before leaving the board, or **Settings → Recovery history** after navigating/reloading. If recovery storage fails, nothing is cleared.
 - Offline LaTeX equations rendered to movable Excalidraw image elements by a locally bundled MathJax 4.1.3. Select an equation and press **Equation** to edit its original LaTeX.
@@ -24,6 +24,7 @@ This repository is intentionally independent from PolyPad. Nothing here patches 
 - An optional, device-local **Settings → Display → Bottom interface** moves project, workspace, file, zoom, history, and fullscreen controls to a responsive bottom dock. The native drawing palette sits just above it, and toggling the preference never replaces the live canvas.
 - Tagged, detached slide windows with explicit ordering, one-shot freeform/16:9/4:3 drawing, native grouping, optional Morph transitions, fullscreen presentation, keyboard navigation, transient laser, and persistent live ink. Ordinary Excalidraw frames remain available for content ownership.
 - One-workspace-per-page PDF import using a bundled PDF.js worker.
+- PDF web links open in a new tab when clicked with the selection tool. Pen strokes, drags, and panning do not open links; drawn annotations keep selection priority. Link areas follow zoom and page rotation and are recovered from retained PDF bytes after reopening a project. Linked websites require their own network access; PatterDraw never loads them automatically.
 - Toggleable **PDF** mode with real local page thumbnails, drag reordering, accessible move-up/down controls, mixed-document ordering, and Previous/Next navigation that follows the chosen output order.
 - Two annotated-PDF exports:
   - **Expand pages** keeps the source scale and enlarges each output page to include off-page writing.
@@ -213,6 +214,7 @@ manifest records `source.dirty: true`.
 - LaTeX input is length- and complexity-limited, blocks links, HTML, external files, extension loading, external SVG paint values, and custom command definitions, and its generated SVG is reduced to explicit tag, attribute, node-count, and byte-size allowlists.
 - Mermaid is wrapper-limited to five editable diagram families and rejects frontmatter, configuration directives, links, callbacks, HTML, custom CSS, remote resources, unsafe geometry, and SVG-image fallback. The heavy converter loads only when Preview is pressed; AI remains disabled.
 - PDF files are loaded from local bytes. The importer never invokes PDF scripting APIs, and generated output is a new sanitized document containing the original page appearance plus annotation overlays.
+- PDF link support reads only bounded HTTP(S) link annotations. A trusted user click opens an isolated tab with no opener or referrer; scripts, file links, forms, and other PDF actions remain disabled. Links are display-only and do not alter project schemas or artwork exports.
 - The package security audit is kept at zero known vulnerabilities with explicit transitive overrides; do not remove those overrides without rerunning `npm audit` and browser tests.
 
 Read [GITHUB_SCAN.md](GITHUB_SCAN.md) for the July 2026 upstream survey and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the data model and implementation boundaries.

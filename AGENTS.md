@@ -5,6 +5,7 @@
 - This is an offline-first classroom editor powered by the Excalidraw npm component.
 - Keep collaboration, hosted sharing, public libraries, web embeds, AI, telemetry, and remote asset loading out of the student build.
 - Treat imported PDF pages as locked local backgrounds. Drawing outside a page must remain visible and must be included in PDF export.
+- PDF HTTP(S) links may open in an isolated new tab only after an explicit selection-tool click. Keep their hit regions display-only; never fetch link targets automatically or enable general Excalidraw links.
 - Excalidraw frames are the slide primitive. Slide order is explicit project metadata rather than inferred from element order.
 - Keep the full-width board as the default workspace. Slides are an optional UI mode and must not remount or replace the live Excalidraw editor.
 - Keep PDF mode separate from frame slides. `pdfPageOrder` is authoritative for the thumbnail rail, navigation, autosave, and annotated export; never rewrite an imported page's immutable source `pageIndex` when reordering.

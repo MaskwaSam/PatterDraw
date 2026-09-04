@@ -1043,6 +1043,11 @@ button { color: inherit; }
 .is-pdf-mode.is-pdf-rail-hidden .editor-region { grid-column: 1; }
 .editor-host { min-height: 0; position: relative; }
 .editor-host > .excalidraw { height: 100%; }
+.pdf-link-overlay { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.pdf-link-overlay[hidden] { display: none; }
+.pdf-page-link { position: absolute; pointer-events: none; background: transparent; border: 0; padding: 0; }
+.pdf-page-link:focus-visible { outline: 2px solid var(--accent); background: #2859c522; }
+.editor-host canvas.is-pdf-link-hovered { cursor: pointer !important; }
 .editor-host .excalidraw { --color-primary: #2859c5; --color-primary-darker: #204aa5; }
 .scene-hydration-input-guard {
   position: absolute;

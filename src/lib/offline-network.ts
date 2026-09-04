@@ -1,5 +1,15 @@
+import { sanitizePdfLinkUrl } from "./pdf/link-url";
+
 const blockedMessage = "PatterDraw blocks external network access.";
 const guardedDocuments = new WeakSet<Document>();
+let openPdfWindow: typeof window.open | undefined;
+
+/** The sole external-navigation exception: an explicit click on a local PDF link. */
+export function openPdfWebLink(value: string, event: MouseEvent): void {
+  const url = sanitizePdfLinkUrl(value);
+  if (!url || !event.isTrusted || event.type !== "click" || event.button !== 0) return;
+  openPdfWindow?.(url, "_blank", "noopener,noreferrer");
+}
 
 declare global {
   interface Window {
@@ -64,6 +74,7 @@ export function installOfflineNetworkGuard(): void {
   }
 
   const nativeWindowOpen = window.open.bind(window);
+  openPdfWindow = nativeWindowOpen;
   window.open = ((url?: string | URL, target?: string, features?: string) => {
     if (url && !isAllowedOfflineUrl(url)) return null;
     return nativeWindowOpen(url, target, features);

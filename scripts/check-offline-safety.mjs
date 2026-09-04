@@ -181,6 +181,21 @@ if (!appSource.includes("aiEnabled={false}") || !appSource.includes("MermaidDial
 if (appSource.includes("openExternalWebLink") || !appSource.includes("External links are disabled")) {
   findings.push("src/App.tsx:1 external canvas links must remain blocked");
 }
+const pdfLinkOverlaySource = await readFile(path.join(root, "src/components/PdfLinkOverlay.tsx"), "utf8");
+const offlineNetworkSource = await readFile(path.join(root, "src/lib/offline-network.ts"), "utf8");
+const pdfLinkSource = await readFile(path.join(root, "src/lib/pdf/page-links.ts"), "utf8");
+if (
+  !pdfLinkOverlaySource.includes('state.activeTool.type === "selection"')
+  || !pdfLinkOverlaySource.includes("openPdfWebLink")
+  || !offlineNetworkSource.includes("!event.isTrusted")
+  || !offlineNetworkSource.includes('event.type !== "click"')
+  || !offlineNetworkSource.includes("sanitizePdfLinkUrl(value)")
+  || !offlineNetworkSource.includes('"_blank", "noopener,noreferrer"')
+  || !pdfLinkSource.includes("safePdfDocumentParameters(")
+  || !pdfLinkSource.includes("sanitizePdfLinkUrl(annotation.unsafeUrl ?? annotation.url)")
+) {
+  findings.push("PDF web links must use a trusted selection-tool click, validated HTTP(S) URL, isolated new tab, and local hardened PDF parser");
+}
 const geoGonDialogSource = await readFile(path.join(root, "src/components/GeoGonDialog.tsx"), "utf8");
 const localGeoGonSource = await readFile(path.join(root, "src/lib/local-geogon.ts"), "utf8");
 const embeddedContentPolicySource = await readFile(path.join(root, "src/lib/embedded-content-policy.ts"), "utf8");

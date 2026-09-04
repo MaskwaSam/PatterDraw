@@ -23,6 +23,7 @@ export default defineConfig({
     productionPerformanceSpec,
     crossEnginePdfLifecycleSpec,
     imageEmbedSafetySpec,
+    "**/pdf-links.spec.ts",
   ],
   // Packaged PDF/MathJax flows and cross-engine page setup are intentionally
   // serial. Allow constrained CI hosts time to finish without accepting a
