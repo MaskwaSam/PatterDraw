@@ -74,12 +74,18 @@ export function MathToolsMenuExtension({ editorHost, onOpen, onPrepareLasso, onS
           aria-label="Lasso selection"
           title="Lasso selection"
           onPointerDown={(event) => {
+            if (event.button !== 0) return;
             event.preventDefault();
             event.stopPropagation();
             void onStartLasso();
             closeExtraTools();
           }}
-          onClick={() => {
+          onClick={(event) => {
+            // Pointer activation is handled on pointerdown so the current
+            // canvas selection is captured before Excalidraw closes its menu.
+            // Keep click for keyboard/assistive activation only and never
+            // start the async lasso lifecycle twice for one pointer gesture.
+            if (event.detail !== 0) return;
             closeExtraTools();
             void onStartLasso();
           }}

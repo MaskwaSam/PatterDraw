@@ -277,8 +277,12 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     include: ["src/**/*.test.ts"],
+    // PDF and SVG safety fixtures are deliberately CPU-heavy and share large
+    // parser/rendering modules. Serial execution avoids oversubscribing a
+    // classroom or CI host; the timeout still fails a genuinely stuck test.
+    testTimeout: 30_000,
     pool: "threads",
-    maxWorkers: 2,
+    maxWorkers: 1,
     server: {
       deps: {
         inline: ["@excalidraw/excalidraw", "open-color"],

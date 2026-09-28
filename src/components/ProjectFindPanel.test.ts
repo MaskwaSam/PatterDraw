@@ -127,7 +127,7 @@ describe("ProjectFindPanel keyboard isolation", () => {
     expect(bubbledKeyDown).not.toHaveBeenCalled();
   });
 
-  it("isolates editor shortcuts while preserving focused button activation", () => {
+  it("isolates editor shortcuts and activates focused buttons consistently", () => {
     const { container, onClose, onOpenCanvasSearch, parent } = mount();
     const bubbledKeyDown = vi.fn();
     const bubbledKeyUp = vi.fn();
@@ -160,26 +160,22 @@ describe("ProjectFindPanel keyboard isolation", () => {
     expect(escape.defaultPrevented).toBe(true);
     expect(onClose).toHaveBeenCalledOnce();
 
-    const activateWithKey = (button: HTMLButtonElement, key: "Enter" | " ") => {
-      // Browsers synthesize a click for these keys after the keydown reaches
-      // the focused button. This target listener models that default action;
-      // a capture-time stopPropagation would prevent it from running.
-      button.addEventListener("keydown", (event) => {
-        if (event.key === key && !event.defaultPrevented) button.click();
-      }, { once: true });
-      act(() => button.dispatchEvent(new KeyboardEvent("keydown", {
+    const activateWithKey = (button: HTMLButtonElement, key: "Enter" | "Space") => {
+      const keydown = new KeyboardEvent("keydown", {
         bubbles: true,
         cancelable: true,
         key,
-      })));
+      });
+      act(() => button.dispatchEvent(keydown));
       act(() => button.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key })));
+      expect(keydown.defaultPrevented).toBe(true);
     };
 
     if (!canvasSearch) throw new Error("Canvas search button was not rendered.");
     canvasSearch.focus();
     activateWithKey(canvasSearch, "Enter");
     canvasSearch.focus();
-    activateWithKey(canvasSearch, " ");
+    activateWithKey(canvasSearch, "Space");
 
     expect(onOpenCanvasSearch).toHaveBeenCalledTimes(2);
     expect(bubbledKeyDown).not.toHaveBeenCalled();

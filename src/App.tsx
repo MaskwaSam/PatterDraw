@@ -6,7 +6,6 @@ import {
   Excalidraw,
   getDataURL,
   getCommonBounds,
-  loadLibraryFromBlob,
   newElementWith,
   sceneCoordsToViewportCoords,
   serializeAsJSON,
@@ -95,6 +94,7 @@ import {
 } from "./lib/autosave-policy";
 import {
   loadLibraryItems,
+  loadSafeLibraryFromBlob,
   sanitizeLibraryItems,
   saveLibraryItems,
 } from "./lib/library-persistence";
@@ -172,6 +172,7 @@ import {
   stripExcalidrawSvgSceneMetadata,
 } from "./lib/image-safety";
 import {
+  assertClipboardTextPayloadsWithinLimit,
   clipboardElementsContainBlockedContent,
   clipboardHtmlContainsBlockedContent,
   installSafeClipboardReadGuard,
@@ -184,6 +185,12 @@ import {
   assertProjectFitsContentBudget,
   getJsonUtf8ByteLength,
 } from "./lib/project-budget";
+import {
+  MAX_NATIVE_SCENE_BLOB_BYTES,
+  assertImportBlobBytes,
+  assertSceneStructure,
+  parseBoundedImportJson,
+} from "./lib/structural-limits";
 import {
   DEFAULT_FEATURE_PREFERENCES,
   persistFeaturePreference,
@@ -343,6 +350,17 @@ export function sceneOperationIsCurrent(
     && operation.hydrationGeneration === current.hydrationGeneration;
 }
 
+export function darkPdfDisplaySceneIsCurrent(
+  sceneId: string,
+  activeSceneId: string | null,
+  hydratedSceneId: string | null,
+  switchingScene: boolean,
+): boolean {
+  return !switchingScene
+    && sceneId === activeSceneId
+    && sceneId === hydratedSceneId;
+}
+
 /**
  * Browsers without matchMedia (and test/embedded hosts that expose a broken
  * implementation) should keep the normal animation path instead of leaving
@@ -386,6 +404,16 @@ export function startupLoadGenerationIsCurrent(
   cancelled: boolean,
 ): boolean {
   return !cancelled && startupGeneration === currentGeneration;
+}
+
+/**
+ * Read a classroom project only after its cheap Blob-size boundary has passed.
+ * Keep this guard adjacent to arrayBuffer(): future call-site refactors must
+ * not move the potentially very large allocation ahead of the import limit.
+ */
+export async function readBoundedProjectFileBytes(file: Blob): Promise<Uint8Array> {
+  assertImportBlobBytes(file, MAX_PROJECT_BYTES, "Project file");
+  return new Uint8Array(await file.arrayBuffer());
 }
 type ProjectFindShortcutBridge = {
   enabled: boolean;
@@ -903,13 +931,7 @@ function projectWithPendingScene(
 }
 
 function nativeExcalidrawProject(text: string): ClassroomProject {
-  let data: Record<string, unknown>;
-  try {
-    data = JSON.parse(text) as Record<string, unknown>;
-  } catch {
-    throw new Error("The Excalidraw file is not valid JSON.");
-  }
-  if (!Array.isArray(data.elements)) throw new Error("The Excalidraw file has no scene elements.");
+  const data = parseBoundedImportJson<Record<string, unknown>>(text, "scene");
   const project = createBlankProject();
   const sceneId = project.activeSceneId;
   project.scenes[sceneId] = sanitizeScene({
@@ -1087,6 +1109,7 @@ export default function App() {
     featurePreferences.snapToObjects,
   ]);
   const inputRef = useRef<HTMLInputElement>(null);
+  const libraryInputRef = useRef<HTMLInputElement>(null);
   const insertTriggerRef = useRef<HTMLButtonElement>(null);
   const exportOptionsTriggerRef = useRef<HTMLButtonElement>(null);
   const projectFindTriggerRef = useRef<HTMLButtonElement>(null);
@@ -2258,6 +2281,11 @@ export default function App() {
         ) return;
         switchingSceneRef.current = false;
         sceneHydrationBaselineRef.current = null;
+        // The dark-PDF effect may have rendered while the replacement scene
+        // was still behind the imperative editor boundary. Re-run it only
+        // after both hydration paints have completed so no display-only
+        // update can re-enter Excalidraw's LayerUI during scene replacement.
+        setDarkPdfDisplayRevision((revision) => revision + 1);
         const bufferedHydrationChange = bufferedHydrationChangeRef.current;
         const pendingSceneId = pendingScenePersistenceRef.current?.sceneId;
         if (
@@ -3009,10 +3037,10 @@ export default function App() {
         file.name.toLowerCase().endsWith(".patterdraw")
         || file.name.toLowerCase().endsWith(".canvasclassroom")
       ) {
-        const bytes = await file.arrayBuffer();
+        const bytes = await readBoundedProjectFileBytes(file);
         if (!isCurrentOperation()) return;
         const loaded = await decodeProjectFile(
-          new Uint8Array(bytes),
+          bytes,
           MAX_PROJECT_BYTES,
           { signal: operation.signal },
         );
@@ -3023,6 +3051,7 @@ export default function App() {
         file.name.toLowerCase().endsWith(".excalidraw")
         || file.type === "application/vnd.excalidraw+json"
       ) {
+        assertImportBlobBytes(file, MAX_NATIVE_SCENE_BLOB_BYTES, "Excalidraw file");
         const text = await file.text();
         if (!isCurrentOperation()) return;
         const loaded = {
@@ -4386,6 +4415,12 @@ export default function App() {
       return;
     }
     if (!api) return;
+    if (!darkPdfDisplaySceneIsCurrent(
+      scene.id,
+      activeSceneIdRef.current,
+      hydratedSceneIdRef.current,
+      switchingSceneRef.current,
+    )) return;
     const generation = ++darkPdfPreviewGenerationRef.current;
     const hydrationGeneration = sceneHydrationGenerationRef.current;
     const liveElements = api.getSceneElements();
@@ -4417,7 +4452,12 @@ export default function App() {
         || editorThemeRef.current !== "dark"
         || suspendDarkPdfDisplayRef.current
         || nativeImageExportOpenRef.current
-        || activeSceneIdRef.current !== scene.id
+        || !darkPdfDisplaySceneIsCurrent(
+          scene.id,
+          activeSceneIdRef.current,
+          hydratedSceneIdRef.current,
+          switchingSceneRef.current,
+        )
       ) return;
       darkPdfPreviewErrorsRef.current.delete(scene.id);
       darkPdfDisplayFileIdsRef.current.clear();
@@ -4447,7 +4487,12 @@ export default function App() {
         || controller.signal.aborted
         || generation !== darkPdfPreviewGenerationRef.current
         || hydrationGeneration !== sceneHydrationGenerationRef.current
-        || activeSceneIdRef.current !== scene.id
+        || !darkPdfDisplaySceneIsCurrent(
+          scene.id,
+          activeSceneIdRef.current,
+          hydratedSceneIdRef.current,
+          switchingSceneRef.current,
+        )
         || darkPdfPreviewErrorsRef.current.has(scene.id)
       ) return;
       darkPdfDisplayFileIdsRef.current.clear();
@@ -4939,17 +4984,14 @@ export default function App() {
 
   const importDroppedLibrary = useCallback(async (file: File) => {
     if (!api) return;
+    setErrorMessage(null);
     try {
-      const restored = await loadLibraryFromBlob(file, "unpublished");
-      const safe = sanitizeLibraryItems(restored as LibraryItems);
+      const safe = await loadSafeLibraryFromBlob(file);
       await api.updateLibrary({
         libraryItems: safe,
         merge: true,
         openLibraryMenu: true,
       });
-      if (safe !== restored) {
-        api.setToast({ message: "Web embeds and external links were removed from the library." });
-      }
     } catch (error) {
       setErrorMessage(`Personal library could not be imported: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -5644,6 +5686,17 @@ export default function App() {
         || target.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]')
       ) return;
       const clipboard = event.clipboardData;
+      try {
+        assertClipboardTextPayloadsWithinLimit(
+          clipboard?.getData("text/plain"),
+          clipboard?.getData("text/html"),
+        );
+      } catch (error) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        api?.setToast({ message: error instanceof Error ? error.message : String(error) });
+        return;
+      }
       if (!clipboardHtmlContainsBlockedContent(
         clipboard?.getData("text/html"),
         Array.from(clipboard?.files || []).some((file) => (
@@ -5660,6 +5713,19 @@ export default function App() {
 
   const handlePaste = useCallback<NonNullable<ExcalidrawProps["onPaste"]>>(async (data, event) => {
     const clipboard = event?.clipboardData;
+    try {
+      // Excalidraw JSON clipboard payloads reach this callback before its
+      // restore/addFiles path. Bound the complete graph before any wrapper or
+      // dependency code walks, clones, or decodes it.
+      assertSceneStructure({
+        elements: data.elements || [],
+        appState: {},
+        files: data.files || {},
+      }, { label: "Clipboard drawing" });
+    } catch (error) {
+      api?.setToast({ message: error instanceof Error ? error.message : String(error) });
+      return false;
+    }
     if (
       clipboardHtmlContainsBlockedContent(
         clipboard?.getData("text/html"),
@@ -5719,6 +5785,24 @@ export default function App() {
 
   const handleEditorClickCapture = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
     const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest('[data-testid="lib-dropdown--load"]')) {
+      // Own the native library chooser so its bytes and recursive shape are
+      // checked before Excalidraw's migration/restore code can traverse them.
+      const menuTrigger = editorHostRef.current?.querySelector<HTMLButtonElement>(
+        '.layer-ui__library [data-testid="dropdown-menu-button"]',
+      );
+      event.preventDefault();
+      event.stopPropagation();
+      event.nativeEvent.stopImmediatePropagation();
+      libraryInputRef.current?.click();
+      // Stopping the native menu item's event also prevents Excalidraw from
+      // clearing its internal open state. Close it after preserving the
+      // synchronous user gesture used to launch the local file chooser.
+      globalThis.queueMicrotask(() => {
+        if (menuTrigger?.isConnected) menuTrigger.click();
+      });
+      return;
+    }
     if (
       safeClipboardReadGuardRef.current
       || !target?.closest('.context-menu [data-testid="paste"]')
@@ -6381,8 +6465,21 @@ export default function App() {
         ref={inputRef}
         className="visually-hidden"
         type="file"
+        aria-label="Open project file"
         accept=".patterdraw,.canvasclassroom,.excalidraw,.pdf,application/pdf"
         onChange={(event) => event.target.files?.[0] && void handleFile(event.target.files[0])}
+      />
+      <input
+        ref={libraryInputRef}
+        className="visually-hidden"
+        type="file"
+        aria-label="Import personal library file"
+        accept=".excalidrawlib,application/vnd.excalidrawlib+json"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          event.target.value = "";
+          if (file) void importDroppedLibrary(file);
+        }}
       />
       {exportOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={closeExportDialog}>

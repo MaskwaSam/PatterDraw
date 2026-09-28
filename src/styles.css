@@ -1795,7 +1795,8 @@ button { color: inherit; }
 .spinner { width: 20px; height: 20px; border: 2px solid #cbd5e7; border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .error-toast { position: fixed; z-index: 310; right: 18px; bottom: 58px; max-width: 440px; display: flex; align-items: center; gap: 16px; padding: 12px 13px; border: 1px solid #e8b6b6; border-radius: 8px; background: #fff7f7; color: #7d2525; box-shadow: 0 8px 30px rgb(80 20 20 / 16%); font-size: 13px; }
-.error-toast button { border: 0; background: transparent; color: #8d3030; font-size: 12px; font-weight: 700; cursor: pointer; }
+.error-toast span { min-width: 0; overflow-wrap: anywhere; }
+.error-toast button { flex: 0 0 auto; border: 0; background: transparent; color: #8d3030; font-size: 12px; font-weight: 700; cursor: pointer; }
 .autosave-recovery-banner {
   position: fixed;
   z-index: 250;

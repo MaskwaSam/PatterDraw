@@ -32,13 +32,15 @@ const sbomSchema = "CycloneDX";
 
 function usage() {
   return `Usage:
-  node scripts/package-release.mjs [--allow-dirty] [--dist <directory>] [--out <directory>]
+  node scripts/package-release.mjs [--build] [--allow-dirty] [--dist <directory>] [--out <directory>]
   node scripts/package-release.mjs --verify [--allow-dirty] [--out <release-directory>]
 
 The default output is dist/release/. Packaging requires a clean git worktree unless
 --allow-dirty is supplied. SOURCE_DATE_EPOCH may be set to a commit-compatible
 Unix timestamp; otherwise the HEAD commit timestamp is used. Packaging output
 must be a top-level release or release-* directory inside the build directory.
+--build performs a fresh empty-output Vite build first and is required by the
+supported npm release:package workflow so provenance cannot describe stale dist bytes.
 `;
 }
 
@@ -62,6 +64,7 @@ function isWithin(parent, candidate) {
 function parseArguments(argv) {
   const options = {
     allowDirty: false,
+    build: false,
     dist: defaultDist,
     help: false,
     out: defaultOutput,
@@ -71,6 +74,8 @@ function parseArguments(argv) {
     const argument = argv[index];
     if (argument === "--allow-dirty" || argument === "--development") {
       options.allowDirty = true;
+    } else if (argument === "--build") {
+      options.build = true;
     } else if (argument === "--verify") {
       options.verify = true;
     } else if (argument === "--help" || argument === "-h") {
@@ -109,6 +114,7 @@ async function gitMetadata() {
     commitShort: commit.slice(0, 12),
     commitEpoch,
     dirty: status.length > 0,
+    statusSha256: sha256(Buffer.from(status, "utf8")),
   };
 }
 
@@ -413,7 +419,7 @@ function checksumLines(files) {
     .join("\n")}\n`;
 }
 
-async function toolchainMetadata(packageInfo, lockfile) {
+async function toolchainMetadata(packageInfo, lockfile, buildCommand) {
   const lockedVersion = (name) => lockfile.packages?.[`node_modules/${name}`]?.version || "unavailable";
   return {
     node: process.version,
@@ -421,13 +427,16 @@ async function toolchainMetadata(packageInfo, lockfile) {
     packageManager: packageInfo.packageManager || "npm",
     typescript: lockedVersion("typescript"),
     vite: lockedVersion("vite"),
-    buildCommand: "npm run build",
+    buildCommand,
     sourceMaps: "forbidden",
   };
 }
 
 async function packageRelease(options) {
   const { dist: distRoot, out: outputRoot } = options;
+  if (!options.build && !options.allowDirty) {
+    fail("Final release packaging requires --build so the payload is rebuilt from the recorded source. Use --allow-dirty only for an explicitly prebuilt development artifact.");
+  }
   await ensureDirectory(distRoot, "Build directory");
   if (!isWithin(distRoot, outputRoot)) fail("--out must be inside the build directory (use an ignored directory such as dist/release).");
   const outputRelativeToDist = normalizedRelativePath(path.relative(distRoot, outputRoot));
@@ -453,7 +462,11 @@ async function packageRelease(options) {
   if (lockfile.name !== packageInfo.name || lockfile.version !== packageInfo.version) {
     fail("package.json and package-lock.json root metadata do not match.");
   }
-  const toolchain = await toolchainMetadata(packageInfo, lockfile);
+  const toolchain = await toolchainMetadata(
+    packageInfo,
+    lockfile,
+    options.build ? "npm run build -- --emptyOutDir" : "prebuilt dist (development only)",
+  );
 
   const outputInsideDist = isWithin(distRoot, outputRoot);
   if (outputInsideDist && outputRelativeToDist === "") fail("--out must not be the build directory itself.");
@@ -557,6 +570,35 @@ async function packageRelease(options) {
   console.log(`Payload: ${payload.length} files, ${totalBytes} bytes`);
   console.log(`Source: ${source.commitShort} (dirty=${source.dirty})`);
   console.log(`Verify: node scripts/package-release.mjs --verify${options.allowDirty ? " --allow-dirty" : ""} --out ${artifactDisplayPath}`);
+}
+
+async function buildAndPackageRelease(options) {
+  if (options.verify) fail("--build cannot be combined with --verify.");
+  if (options.dist !== defaultDist || options.out !== defaultOutput) {
+    fail("--build uses the canonical dist/ and dist/release/ paths; omit --dist and --out.");
+  }
+  const sourceBeforeBuild = await gitMetadata();
+  if (sourceBeforeBuild.dirty && !options.allowDirty) {
+    fail("Refusing a final release build from a dirty worktree. Commit all source changes first, or pass --allow-dirty for a development artifact.");
+  }
+  await command("npm", ["run", "build", "--", "--emptyOutDir"]);
+  const sourceAfterBuild = await gitMetadata();
+  if (
+    sourceAfterBuild.commit !== sourceBeforeBuild.commit
+    || sourceAfterBuild.dirty !== sourceBeforeBuild.dirty
+    || sourceAfterBuild.statusSha256 !== sourceBeforeBuild.statusSha256
+  ) {
+    fail("The source checkout changed while the release build was running.");
+  }
+  await packageRelease(options);
+  const sourceAfterPackage = await gitMetadata();
+  if (
+    sourceAfterPackage.commit !== sourceBeforeBuild.commit
+    || sourceAfterPackage.dirty !== sourceBeforeBuild.dirty
+    || sourceAfterPackage.statusSha256 !== sourceBeforeBuild.statusSha256
+  ) {
+    fail("The source checkout changed while the release was being packaged.");
+  }
 }
 
 function parseChecksumFile(text) {
@@ -786,6 +828,7 @@ async function main() {
     return;
   }
   if (options.verify) await verifyRelease(options);
+  else if (options.build) await buildAndPackageRelease(options);
   else await packageRelease(options);
 }
 

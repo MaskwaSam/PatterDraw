@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
-import { mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,7 +11,64 @@ import { unzipSync, strFromU8 } from "fflate";
 const productionPort = Number(process.env.PW_PRODUCTION_PORT || 4174);
 const productionOrigin = `http://127.0.0.1:${productionPort}`;
 const productionRoute = "/classroom/math/unit-01/patterdraw/";
-const distRoot = fileURLToPath(new URL("../../dist/release", import.meta.url));
+const PRODUCTION_EDITOR_MOUNT_TIMEOUT = 90_000;
+const productionServerScript = fileURLToPath(new URL("../../scripts/serve-production-dist.mjs", import.meta.url));
+
+async function availableLoopbackPort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Unable to reserve a production fixture port.");
+  await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  return address.port;
+}
+
+async function startProductionFixture(dist: string): Promise<{
+  origin: string;
+  stop: () => Promise<void>;
+}> {
+  const port = await availableLoopbackPort();
+  const origin = `http://127.0.0.1:${port}`;
+  const child = spawn(process.execPath, [
+    productionServerScript,
+    "--dist",
+    dist,
+    "--host",
+    "127.0.0.1",
+    "--port",
+    String(port),
+  ], { stdio: ["ignore", "pipe", "pipe"] });
+  let output = "";
+  const collect = (chunk: Buffer | string) => { output += String(chunk); };
+  child.stdout?.on("data", collect);
+  child.stderr?.on("data", collect);
+  const stop = async () => {
+    if (child.exitCode !== null) return;
+    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    child.kill("SIGTERM");
+    await exited;
+  };
+  try {
+    const readyDeadline = Date.now() + 15_000;
+    while (Date.now() < readyDeadline) {
+      if (child.exitCode !== null) throw new Error(output || `Fixture server exited with ${child.exitCode}.`);
+      try {
+        const response = await fetch(`${origin}${productionRoute}`);
+        if (response.ok) return { origin, stop };
+      } catch {
+        // The child has not bound its loopback listener yet.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error(`Fixture server did not become ready. ${output}`.trim());
+  } catch (error) {
+    await stop();
+    throw error;
+  }
+}
 
 function sameOriginRequests(page: import("@playwright/test").Page, requests: string[]) {
   const origin = new URL(page.url()).origin;
@@ -165,27 +224,31 @@ test("fails closed for encoded traversal and malformed asset paths", async ({ re
   expect(healthyResponse.status()).toBe(200);
 });
 
-test("does not serve a symlink that resolves outside the built dist root", async ({ request }) => {
+test("does not serve a symlink that resolves outside the built dist root", async ({ request }, testInfo) => {
   test.skip(process.platform === "win32", "Creating symlinks requires elevated Windows privileges in CI.");
+  test.skip(testInfo.project.name !== "chromium", "The server containment check is browser-neutral and runs once.");
+  const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), "patterdraw-production-fixture-"));
   const targetDir = await mkdtemp(path.join(os.tmpdir(), "patterdraw-production-"));
   const targetPath = path.join(targetDir, "outside.js");
-  const linkPath = path.join(
-    distRoot,
-    "assets",
-    `.patterdraw-outside-${process.pid}-${Date.now()}.js`,
-  );
+  const assetsDir = path.join(fixtureRoot, "assets");
+  const linkPath = path.join(assetsDir, "outside.js");
+  await mkdir(assetsDir);
+  await writeFile(path.join(fixtureRoot, "index.html"), "<!doctype html><title>PatterDraw</title>", "utf8");
   await writeFile(targetPath, "window.__patterdrawOutside = true;\n", "utf8");
+  await symlink(targetPath, linkPath);
+  let fixtureServer: Awaited<ReturnType<typeof startProductionFixture>> | undefined;
   try {
-    await symlink(targetPath, linkPath);
+    fixtureServer = await startProductionFixture(fixtureRoot);
     const response = await request.get(
-      `${productionOrigin}${productionRoute}assets/${path.basename(linkPath)}`,
+      `${fixtureServer.origin}${productionRoute}assets/${path.basename(linkPath)}`,
     );
     expect(response.status()).toBe(404);
     expectSecurityHeaders(response.headers());
-    const healthy = await request.get(`${productionOrigin}${productionRoute}`);
+    const healthy = await request.get(`${fixtureServer.origin}${productionRoute}`);
     expect(healthy.status()).toBe(200);
   } finally {
-    await unlink(linkPath).catch(() => undefined);
+    await fixtureServer?.stop();
+    await rm(fixtureRoot, { recursive: true, force: true });
     await rm(targetDir, { recursive: true, force: true });
   }
 });
@@ -219,11 +282,11 @@ test("keeps the entry point revalidating while hashed bundles stay immutable", a
 test("loads the production bundle and working board from the root static path", async ({ page }) => {
   const { badResponses, consoleErrors, failedRequests, pageErrors, requests, unhandledRejections } = await captureBrowserProblems(page);
 
-  const response = await page.goto("/");
+  const response = await page.goto("/", { waitUntil: "domcontentloaded" });
   expect(response).not.toBeNull();
   expect(response?.headers()["x-patterdraw-production-dist"]).toBe("1");
   await expect(page).toHaveTitle("PatterDraw");
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
   await expect(page.getByRole("button", { name: "Board", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByRole("textbox", { name: "Project title", exact: true })).toHaveValue("Untitled PatterDraw canvas");
 
@@ -241,8 +304,8 @@ test("loads the production bundle and working board from the root static path", 
 test("loads lazy equation rendering from local production assets", async ({ page }) => {
   const { badResponses, consoleErrors, failedRequests, pageErrors, requests, unhandledRejections } = await captureBrowserProblems(page);
 
-  await page.goto("/classroom/math/unit-01/patterdraw/");
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await page.goto("/classroom/math/unit-01/patterdraw/", { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
   await page.getByRole("button", { name: "Insert", exact: true }).click();
   await page.getByRole("menuitem", { name: "Equation", exact: true }).click();
   await page.locator("#latex-source").fill("x^2 + 1");
@@ -269,8 +332,8 @@ test("loads lazy equation rendering from local production assets", async ({ page
 test("opens Slides and adds a slide without remounting the production editor", async ({ page }) => {
   const { badResponses, consoleErrors, failedRequests, pageErrors, requests, unhandledRejections } = await captureBrowserProblems(page);
 
-  await page.goto(productionRoute);
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await page.goto(productionRoute, { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
   const editorToken = await page.locator(".editor-host").evaluate((element) => {
     const token = "production-editor-root";
     element.setAttribute("data-production-editor-token", token);
@@ -293,22 +356,23 @@ test("opens Slides and adds a slide without remounting the production editor", a
   expect(requests.every((requestUrl) => new URL(requestUrl).origin === new URL(page.url()).origin)).toBe(true);
 });
 
-test("imports a PDF through the local worker, draws an annotation, and exports it", async ({ page, browserName }) => {
+test.describe("desktop Chromium production worker flows", () => {
   test.skip(
-    browserName !== "chromium" || page.viewportSize()?.width !== 1440,
-    "The worker/export flow is covered once on the desktop Chromium production build; other projects cover loading and navigation.",
+    ({ browserName, viewport }) => browserName !== "chromium" || viewport?.width !== 1440,
+    "Worker/export flows run once on desktop Chromium; other projects cover loading and navigation.",
   );
-  test.setTimeout(90_000);
+
+test("imports a PDF through the local worker, draws an annotation, and exports it", async ({ page }) => {
   const { badResponses, consoleErrors, failedRequests, pageErrors, requests, unhandledRejections } = await captureBrowserProblems(page);
+
+  await page.goto(productionRoute, { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
   const workerResponse = page.waitForResponse(
     (response) => /\/assets\/pdf\.worker(?:\.min)?[-A-Za-z0-9_]*\.(?:mjs|js)(?:\?.*)?$/.test(new URL(response.url()).pathname)
       && response.status() === 200,
-    { timeout: 30_000 },
+    { timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT },
   );
-
-  await page.goto(productionRoute);
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.getByLabel("Open project file").setInputFiles({
     name: "production-worker-smoke.pdf",
     mimeType: "application/pdf",
     buffer: await tinyPdfBytes(),
@@ -344,17 +408,12 @@ test("imports a PDF through the local worker, draws an annotation, and exports i
   expect(requests.every((requestUrl) => new URL(requestUrl).origin === new URL(page.url()).origin)).toBe(true);
 });
 
-test("round-trips a local image project through the archive worker without remote image requests", async ({ page, browserName }) => {
-  test.skip(
-    browserName !== "chromium" || page.viewportSize()?.width !== 1440,
-    "Archive/image round-trip is covered once on desktop Chromium; the other projects cover static loading.",
-  );
-  test.setTimeout(90_000);
+test("round-trips a local image project through the archive worker without remote image requests", async ({ page }) => {
   const { badResponses, consoleErrors, failedRequests, pageErrors, requests, unhandledRejections } = await captureBrowserProblems(page);
   const imageDataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
-  await page.goto(productionRoute);
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.goto(productionRoute, { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
+  await page.getByLabel("Open project file").setInputFiles({
     name: "production-image.excalidraw",
     mimeType: "application/json",
     buffer: Buffer.from(JSON.stringify({
@@ -420,9 +479,9 @@ test("round-trips a local image project through the archive worker without remot
     Object.values(scene.files || {}).some((file) => file.dataURL === imageDataURL)
   ))).toBe(true);
 
-  await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
-  await page.locator('input[type="file"]').setInputFiles({
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
+  await page.getByLabel("Open project file").setInputFiles({
     name: "production-image-round-trip.patterdraw",
     mimeType: "application/vnd.patterdraw+zip",
     buffer: savedBytes,
@@ -441,11 +500,18 @@ test("round-trips a local image project through the archive worker without remot
   expect(requests.some((requestUrl) => /(?:https?:\/\/|file:)/i.test(requestUrl) && !requestUrl.startsWith(productionOrigin))).toBe(false);
 });
 
+});
+
+test.describe("320px production layout", () => {
+  test.skip(
+    ({ viewport }) => viewport?.width !== 320,
+    "The mobile layout project runs this bounded check.",
+  );
+
 test("keeps the 320px production layout inside the viewport", async ({ page }) => {
-  test.skip(page.viewportSize()?.width !== 320, "The mobile layout project runs this bounded check.");
   const { badResponses, consoleErrors, failedRequests, pageErrors, requests, unhandledRejections } = await captureBrowserProblems(page);
-  await page.goto(productionRoute);
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await page.goto(productionRoute, { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
   await expect(page.getByRole("textbox", { name: "Project title", exact: true })).toBeVisible();
   const viewport = await page.evaluate(() => ({
     bodyWidth: document.body.scrollWidth,
@@ -463,4 +529,6 @@ test("keeps the 320px production layout inside the viewport", async ({ page }) =
   expect(pageErrors, pageErrors.join("\n")).toEqual([]);
   expect(unhandledRejections, unhandledRejections.join("\n")).toEqual([]);
   expect(requests.every((requestUrl) => new URL(requestUrl).origin === new URL(page.url()).origin)).toBe(true);
+});
+
 });

@@ -10,6 +10,11 @@ import {
 import { sha256Hex } from "./sha256";
 import { assertProjectFitsContentBudget } from "./project-budget";
 import { createProjectArchive, extractProjectArchive } from "./project-archive-client";
+import {
+  assertImportBytes,
+  assertImportTextBytes,
+  assertProjectStructure,
+} from "./structural-limits";
 
 const MANIFEST_PATH = "project.json";
 const textEncoder = new TextEncoder();
@@ -25,6 +30,11 @@ async function encodeProject(
   if (!Number.isSafeInteger(maxUncompressedBytes) || maxUncompressedBytes <= 0) {
     throw new Error("The project size limit is invalid.");
   }
+  // The prepared path deliberately skips sanitizeProject for memory reasons,
+  // so it explicitly validates the untrusted graph before archive
+  // serialization can walk it. The normal path validates inside
+  // sanitizeProject before its defensive clone.
+  if (prepared) assertProjectStructure(project, { label: "Project" });
   const safe = prepared ? project : sanitizeProject(project);
   assertSanitizedProject(safe);
   const verifiedDocuments = await Promise.all(
@@ -92,13 +102,17 @@ export async function decodeProjectFile(
   }
   const entries = await extractProjectArchive(bytes, maxUncompressedBytes, options.signal);
   if (!entries[MANIFEST_PATH]) throw new Error("Project manifest is missing.");
+  assertImportBytes(entries[MANIFEST_PATH].byteLength, maxUncompressedBytes, "Project manifest");
 
   let project: ClassroomProject;
+  const manifestText = textDecoder.decode(entries[MANIFEST_PATH]);
+  assertImportTextBytes(manifestText, maxUncompressedBytes, "Project manifest");
   try {
-    project = JSON.parse(textDecoder.decode(entries[MANIFEST_PATH])) as ClassroomProject;
+    project = JSON.parse(manifestText) as ClassroomProject;
   } catch {
     throw new Error("Project manifest is not valid JSON.");
   }
+  assertProjectStructure(project, { label: "Project manifest" });
   assertSafeProject(project);
 
   const pdfBytes: Record<PdfDocumentId, Uint8Array> = {};

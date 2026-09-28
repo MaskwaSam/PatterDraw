@@ -421,23 +421,24 @@ describe("PDF embedded-image limits", () => {
     EmbeddedWorkerTransportFailure.instances.length = 0;
     EmbeddedWorkerSemanticFailure.instances.length = 0;
     EmbeddedWorkerPending.instances.length = 0;
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
-  it("falls back to the bounded inline inspector when the worker cannot start", async () => {
+  it("fails closed instead of parsing inline when the worker cannot start", async () => {
     vi.stubGlobal("Worker", EmbeddedWorkerStartupFailure);
     await expect(assertPdfEmbeddedImageLimit(
       await pdfWithDeclaredImage(100, 100),
       IMAGE_LIMIT,
-    )).resolves.toBeUndefined();
+    )).rejects.toThrow(/failed to load embedded-image worker module/i);
   });
 
-  it("falls back once after a worker transport error", async () => {
+  it("fails closed instead of parsing inline after a worker transport error", async () => {
     vi.stubGlobal("Worker", EmbeddedWorkerTransportFailure);
     await expect(assertPdfEmbeddedImageLimit(
       await pdfWithDeclaredImage(100, 100),
       IMAGE_LIMIT,
-    )).resolves.toBeUndefined();
+    )).rejects.toThrow(/404 loading worker module/i);
     expect(EmbeddedWorkerTransportFailure.instances).toHaveLength(1);
     expect(EmbeddedWorkerTransportFailure.instances[0].postMessage).toHaveBeenCalledOnce();
     expect(EmbeddedWorkerTransportFailure.instances[0].terminate).toHaveBeenCalledOnce();
@@ -451,6 +452,21 @@ describe("PDF embedded-image limits", () => {
     )).rejects.toThrow(/too large to import safely/i);
     expect(EmbeddedWorkerSemanticFailure.instances).toHaveLength(1);
     expect(EmbeddedWorkerSemanticFailure.instances[0].postMessage).toHaveBeenCalledOnce();
+  });
+
+  it("treats a worker inspection timeout as terminal instead of retrying inline", async () => {
+    const bytes = await pdfWithDeclaredImage(100, 100);
+    vi.useFakeTimers();
+    vi.stubGlobal("Worker", EmbeddedWorkerPending);
+    const validation = assertPdfEmbeddedImageLimit(bytes, IMAGE_LIMIT);
+    const rejection = expect(validation).rejects.toThrow(/safety inspection timed out/i);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    await rejection;
+    expect(EmbeddedWorkerPending.instances).toHaveLength(1);
+    expect(EmbeddedWorkerPending.instances[0].postMessage).toHaveBeenCalledOnce();
+    expect(EmbeddedWorkerPending.instances[0].terminate).toHaveBeenCalledOnce();
   });
 
   it("does not run inline recovery after an abort", async () => {

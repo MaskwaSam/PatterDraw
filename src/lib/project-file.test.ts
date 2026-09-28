@@ -9,6 +9,7 @@ import {
 } from "./project-file";
 import { sanitizeProject } from "./safety";
 import { MATH_TOOL_CATALOGUE } from "./math-tools/catalogue";
+import { MAX_STRUCTURAL_DEPTH } from "./structural-limits";
 
 const MINIMAL_PDF_BASE64 = "JVBERi0xLjcKJYGBgYEKCjEgMCBvYmoKPDwKL1R5cGUgL1BhZ2VzCi9LaWRzIFsgNCAwIFIgXQovQ291bnQgMQo+PgplbmRvYmoKCjIgMCBvYmoKPDwKL1R5cGUgL0NhdGFsb2cKL1BhZ2VzIDEgMCBSCj4+CmVuZG9iagoKMyAwIG9iago8PAovUHJvZHVjZXIgPEZFRkYwMDcwMDA2NDAwNjYwMDJEMDA2QzAwNjkwMDYyMDAyMDAwMjgwMDY4MDA3NDAwNzQwMDcwMDA3MzAwM0EwMDJGMDAyRjAwNjcwMDY5MDA3NDAwNjgwMDc1MDA2MjAwMkUwMDYzMDA2RjAwNkQwMDJGMDA0ODAwNkYwMDcwMDA2NDAwNjkwMDZFMDA2NzAwMkYwMDcwMDA2NDAwNjYwMDJEMDA2QzAwNjkwMDYyMDAyOT4KL01vZERhdGUgKEQ6MjAyNjA4MDUwMTQ2MzFaKQovQ3JlYXRvciA8RkVGRjAwNzAwMDY0MDA2NjAwMkQwMDZDMDA2OTAwNjIwMDIwMDAyODAwNjgwMDc0MDA3NDAwNzAwMDczMDAzQTAwMkYwMDJGMDA2NzAwNjkwMDc0MDA2ODAwNzUwMDYyMDAyRTAwNjMwMDZGMDA2RDAwMkYwMDQ4MDA2RjAwNzAwMDY0MDA2OTAwNkUwMDY3MDAyRjAwNzAwMDY0MDA2NjAwMkQwMDZDMDA2OTAwNjIwMDI5PgovQ3JlYXRpb25EYXRlIChEOjIwMjYwODA1MDE0NjMxWikKPj4KZW5kb2JqCgo0IDAgb2JqCjw8Ci9UeXBlIC9QYWdlCi9QYXJlbnQgMSAwIFIKL1Jlc291cmNlcyA8PAo+PgovTWVkaWFCb3ggWyAwIDAgNjEyIDc5MiBdCj4+CmVuZG9iagoKeHJlZgowIDUKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDE2IDAwMDAwIG4gCjAwMDAwMDAwNzYgMDAwMDAgbiAKMDAwMDAwMDEyNiAwMDAwMCBuIAowMDAwMDAwNTk2IDAwMDAwIG4gCgp0cmFpbGVyCjw8Ci9TaXplIDUKL1Jvb3QgMiAwIFIKL0luZm8gMyAwIFIKPj4KCnN0YXJ0eHJlZgo2ODcKJSVFT0Y=";
 const validPdfBytes = () => Uint8Array.from(atob(MINIMAL_PDF_BASE64), (char) => char.charCodeAt(0));
@@ -82,6 +83,22 @@ function pdfPageScene(
 }
 
 describe("classroom project files", () => {
+  it("rejects a deeply nested manifest before project sanitization", async () => {
+    const project = createBlankProject();
+    let nested: Record<string, unknown> = { leaf: true };
+    for (let index = 0; index < MAX_STRUCTURAL_DEPTH + 1; index += 1) {
+      nested = { next: nested };
+    }
+    project.scenes[project.activeSceneId].elements = [{
+      id: "deep",
+      type: "rectangle",
+      customData: nested,
+    }];
+    const archive = zipSync({ "project.json": strToU8(JSON.stringify(project)) });
+
+    await expect(decodeProjectFile(archive)).rejects.toThrow(/maximum structural depth/);
+  });
+
   it("rejects an already-cancelled archive restore before extraction starts", async () => {
     const controller = new AbortController();
     controller.abort();

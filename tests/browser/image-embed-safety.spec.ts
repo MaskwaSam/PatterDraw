@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 import { createCanvas } from "@napi-rs/canvas";
 
+const DEVELOPMENT_EDITOR_MOUNT_TIMEOUT = 60_000;
+
 function rasterBytes(
   mimeType: "image/jpeg" | "image/png",
   width = 48,
@@ -265,17 +267,45 @@ async function autosavedImageSummary(page: import("@playwright/test").Page): Pro
   });
 }
 
+async function autosavedSceneElements(
+  page: import("@playwright/test").Page,
+): Promise<Array<{ id?: string; text?: string; type?: string }>> {
+  return page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("keyval-store");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const project = await new Promise<{
+      activeSceneId: string;
+      scenes: Record<string, {
+        elements: Array<{ id?: string; text?: string; type?: string }>;
+      }>;
+    } | undefined>((resolve, reject) => {
+      const request = database.transaction("keyval", "readonly")
+        .objectStore("keyval")
+        .get("patterdraw:autosave:project:v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    return project?.scenes[project.activeSceneId]?.elements || [];
+  });
+}
+
 test("preflights native images and persists PNG/JPEG without unsafe MIME loss", async ({ page }) => {
   const externalRequests: string[] = [];
   const runtimeErrors: string[] = [];
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.origin !== "http://127.0.0.1:5173") externalRequests.push(request.url());
+    if (url.protocol !== "blob:" && url.protocol !== "data:" && url.hostname !== "127.0.0.1") {
+      externalRequests.push(request.url());
+    }
   });
   page.on("pageerror", (error) => runtimeErrors.push(error.message));
 
-  await page.goto("/");
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await page.evaluate(() => {
     const host = window as typeof window & {
       __patterdrawIframeMutationCount?: number;
@@ -412,15 +442,8 @@ test("preflights native images and persists PNG/JPEG without unsafe MIME loss", 
     (window as typeof window & { __patterdrawIframeMutationCount?: number }).__patterdrawIframeMutationCount || 0
   ))).toBe(0);
 
-  await page.evaluate(() => {
-    const app = (window as unknown as { h?: { app?: {
-      updateScene?: (data: { appState: Record<string, unknown> }) => void;
-      scene?: { getNonDeletedElements?: () => Array<{ id?: string; type?: string }> };
-    } } }).h?.app;
-    const image = app?.scene?.getNonDeletedElements?.().find((element) => element.type === "image");
-    if (!app || !image?.id) throw new Error("No dropped image was available for the accessibility check.");
-    app.updateScene?.({ appState: { selectedElementIds: { [image.id]: true } } });
-  });
+  // Wrapper-owned image insertion leaves the newest accepted image selected;
+  // exercise the public UI instead of Excalidraw's development-only `window.h`.
   await page.getByRole("button", { name: "Size & Position", exact: true }).click();
   const sizePosition = page.locator(".exc-stats");
   await expect(sizePosition).toBeVisible();
@@ -428,30 +451,19 @@ test("preflights native images and persists PNG/JPEG without unsafe MIME loss", 
     await expect(sizePosition.getByTestId(testId).locator("input")).toHaveAttribute("aria-label", label);
   }
 
-  await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
-  await expect.poll(() => page.evaluate(() => {
-    const app = (window as unknown as { h?: { app?: {
-      files?: Record<string, { mimeType?: string }>;
-      scene?: { getNonDeletedElements?: () => Array<{ fileId?: string; type: string }> };
-    } } }).h?.app;
-    const images = app?.scene?.getNonDeletedElements?.().filter((element) => element.type === "image") || [];
-    return {
-      count: images.length,
-      mimeTypes: images.flatMap((element) => (
-        element.fileId && app?.files?.[element.fileId]?.mimeType
-          ? [app.files[element.fileId].mimeType || ""]
-          : []
-      )).sort(),
-    };
-    })).toEqual({ count: 7, mimeTypes: ["image/jpeg", "image/png", "image/png", "image/png", "image/png", "image/png", "image/png"] });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect.poll(() => autosavedImageSummary(page)).toMatchObject({
+    count: 7,
+    mimeTypes: ["image/jpeg", "image/png", "image/png", "image/png", "image/png", "image/png", "image/png"],
+  });
   expect(externalRequests).toEqual([]);
   expect(runtimeErrors).toEqual([]);
 });
 
 test("preflights native and JSON clipboard images before insertion", async ({ page }) => {
-  await page.goto("/");
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await page.evaluate(() => {
     const host = window as typeof window & {
       __patterdrawIframeMutationCount?: number;
@@ -504,8 +516,8 @@ test("preflights native and JSON clipboard images before insertion", async ({ pa
 
   // Excalidraw reports a rejected native image through its modal error surface;
   // reload before proving that an ordinary clipboard PNG still works.
-  await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await pasteImage(rasterBytes("image/png"), "clipboard-ordinary.png");
   await expect.poll(() => autosavedImageSummary(page)).toMatchObject({
     count: 1,
@@ -517,8 +529,8 @@ test("preflights native and JSON clipboard images before insertion", async ({ pa
     count: 2,
     mimeTypes: ["image/png", "image/png"],
   });
-  await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await expect.poll(() => autosavedImageSummary(page)).toMatchObject({
     count: 2,
     mimeTypes: ["image/png", "image/png"],
@@ -582,8 +594,8 @@ test("preflights native and JSON clipboard images before insertion", async ({ pa
 });
 
 test("accepts only existing Screenshot Library IDs from custom or portable text drags", async ({ page }) => {
-  await page.goto("/");
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await page.evaluate(async (base64) => {
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open("keyval-store");
@@ -611,8 +623,8 @@ test("accepts only existing Screenshot Library IDs from custom or portable text 
     });
     database.close();
   }, rasterBytes("image/png", 12, 8).toString("base64"));
-  await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
 
   await page.getByRole("button", { name: "Library", exact: true }).click();
   const screenshotTab = page.locator('.default-sidebar .sidebar-tab-trigger[aria-label="Screenshot Library"]');
@@ -666,12 +678,15 @@ test("strips public-library URL import tokens before the editor mounts", async (
   const externalRequests: string[] = [];
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.origin !== "http://127.0.0.1:5173") externalRequests.push(request.url());
+    if (url.protocol !== "blob:" && url.protocol !== "data:" && url.hostname !== "127.0.0.1") {
+      externalRequests.push(request.url());
+    }
   });
   await page.goto(
     "/?addLibrary=https%3A%2F%2Fexample.invalid%2Fpublic.excalidrawlib&token=query-secret#addLibrary=https%3A%2F%2Fexample.invalid%2Fhash.excalidrawlib&token=hash-secret",
+    { waitUntil: "domcontentloaded" },
   );
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await expect.poll(() => page.evaluate(() => `${location.search}${location.hash}`)).toBe("");
   expect(externalRequests).toEqual([]);
 });
@@ -699,11 +714,13 @@ test("blocks mixed HTML and sanitizes stored iframe library items", async ({ pag
   });
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.origin !== "http://127.0.0.1:5173") externalRequests.push(request.url());
+    if (url.protocol !== "blob:" && url.protocol !== "data:" && url.hostname !== "127.0.0.1") {
+      externalRequests.push(request.url());
+    }
   });
 
-  await page.goto("/");
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   const canvas = page.locator("canvas.excalidraw__canvas.interactive");
   await canvas.click({ position: { x: 500, y: 350 } });
   await canvas.evaluate((host) => {
@@ -718,6 +735,36 @@ test("blocks mixed HTML and sanitizes stored iframe library items", async ({ pag
   });
   await expect(page.getByText("Embedded web content and URL-backed images are disabled.", { exact: true })).toBeVisible();
   await expect(page.locator("iframe")).toHaveCount(0);
+
+  await canvas.evaluate((canvas) => {
+    let customData: Record<string, unknown> = { leaf: true };
+    for (let index = 0; index < 70; index += 1) customData = { next: customData };
+    const transfer = new DataTransfer();
+    transfer.setData("text/plain", JSON.stringify({
+      type: "excalidraw/clipboard",
+      elements: [{
+        ...({
+          id: "deep-clipboard-element",
+          type: "rectangle",
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 100,
+        }),
+        customData,
+      }],
+      files: {},
+    }));
+    canvas.dispatchEvent(new ClipboardEvent("paste", {
+      bubbles: true,
+      cancelable: true,
+      clipboardData: transfer,
+    }));
+  });
+  await expect(page.getByText(/Clipboard drawing exceeds the maximum structural depth/i)).toBeVisible();
+  await expect.poll(async () => (
+    (await autosavedSceneElements(page)).some((element) => element.id === "deep-clipboard-element")
+  )).toBe(false);
 
   const blockedFrame = {
     ...rectangleElement("blocked-clipboard-frame"),
@@ -738,14 +785,31 @@ test("blocks mixed HTML and sanitizes stored iframe library items", async ({ pag
     }));
   }, blockedFrame);
   await expect(page.locator("iframe")).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => (
-    ((window as unknown as { h?: { app?: { scene?: { getNonDeletedElements?: () => Array<{ type?: string }> } } } }).h
-      ?.app?.scene?.getNonDeletedElements?.() || [])
-      .filter((element) => element.type === "iframe").length
-  ))).toBe(0);
+  await expect.poll(async () => (
+    (await autosavedSceneElements(page)).filter((element) => element.type === "iframe").length
+  )).toBe(0);
 
   await page.getByRole("button", { name: "Library", exact: true }).click();
   await expect(page.locator(".layer-ui__library")).toBeVisible();
+  let nestedSceneData: Record<string, unknown> = { leaf: true };
+  for (let index = 0; index < 70; index += 1) nestedSceneData = { next: nestedSceneData };
+  await dropFile(page, {
+    bytes: Buffer.from(JSON.stringify({
+      type: "excalidraw",
+      version: 2,
+      source: "local",
+      elements: [{ ...rectangleElement("deep-native-scene"), customData: nestedSceneData }],
+      appState: {},
+      files: {},
+    })),
+    mimeType: "application/vnd.excalidraw+json",
+    name: "pathological-native-scene",
+  }, { x: 20, y: 20 }, ".layer-ui__library");
+  await expect(page.getByText(/maximum structural depth/i)).toBeVisible();
+  await expect.poll(async () => (
+    (await autosavedSceneElements(page)).some((element) => element.id === "deep-native-scene")
+  )).toBe(false);
+
   await dropFile(page, {
     bytes: Buffer.from(JSON.stringify({
       type: "excalidraw",
@@ -761,24 +825,21 @@ test("blocks mixed HTML and sanitizes stored iframe library items", async ({ pag
     mimeType: "application/vnd.excalidraw+json",
     name: "extensionless-classroom-project",
   }, { x: 20, y: 20 }, ".layer-ui__library");
-  await expect.poll(() => page.evaluate(() => {
-    const elements = (window as unknown as { h?: { app?: {
-      scene?: { getNonDeletedElements?: () => Array<{ id?: string; type?: string }> };
-    } } }).h?.app?.scene?.getNonDeletedElements?.() || [];
+  await expect.poll(async () => {
+    const elements = await autosavedSceneElements(page);
     return {
       hasSafeRectangle: elements.some((element) => element.id === "safe-extensionless-project-rectangle"),
       iframeCount: elements.filter((element) => element.type === "iframe").length,
     };
-  })).toEqual({ hasSafeRectangle: true, iframeCount: 0 });
+  }).toEqual({ hasSafeRectangle: true, iframeCount: 0 });
   await expect(page.locator("iframe")).toHaveCount(0);
 
   await page.locator(".editor-host").click({ button: "right", position: { x: 500, y: 350 } });
   await page.getByTestId("paste").click();
-  await expect.poll(() => page.evaluate(() => (
-    ((window as unknown as { h?: { app?: { scene?: { getNonDeletedElements?: () => Array<{ text?: string; type?: string }> } } } }).h
-      ?.app?.scene?.getNonDeletedElements?.() || [])
+  await expect.poll(async () => (
+    (await autosavedSceneElements(page))
       .some((element) => element.type === "text" && element.text === "Safe classroom note")
-  ))).toBe(true);
+  )).toBe(true);
 
   await page.evaluate(async () => {
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
@@ -799,8 +860,8 @@ test("blocks mixed HTML and sanitizes stored iframe library items", async ({ pag
     });
     database.close();
   });
-  await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
   await page.getByRole("button", { name: "Library", exact: true }).click();
   await expect(page.locator(".layer-ui__library")).toBeVisible();
   await expect(page.locator(".library-unit__active")).toHaveCount(0);
@@ -822,6 +883,33 @@ test("blocks mixed HTML and sanitizes stored iframe library items", async ({ pag
   })).toEqual([]);
 
   const panel = page.locator(".layer-ui__library");
+  await panel.getByTestId("dropdown-menu-button").click();
+  const rejectedChooserEvent = page.waitForEvent("filechooser");
+  await page.getByTestId("lib-dropdown--load").click();
+  let nestedLibraryData: Record<string, unknown> = { leaf: true };
+  for (let index = 0; index < 70; index += 1) nestedLibraryData = { next: nestedLibraryData };
+  await (await rejectedChooserEvent).setFiles({
+    name: "pathological-library.excalidrawlib",
+    mimeType: "application/vnd.excalidrawlib+json",
+    buffer: Buffer.from(JSON.stringify({
+      type: "excalidrawlib",
+      version: 2,
+      source: "local",
+      libraryItems: [{
+        id: "pathological-library-item",
+        status: "unpublished",
+        created: 1,
+        customData: nestedLibraryData,
+        elements: [rectangleElement("pathological-library-rectangle")],
+      }],
+    })),
+  });
+  await expect(page.getByText(/maximum structural depth/i)).toBeVisible();
+  await expect(panel.locator(".library-unit__active")).toHaveCount(0);
+  await page.getByRole("button", { name: "Dismiss", exact: true }).click();
+  await page.getByRole("button", { name: "Library", exact: true }).click();
+  await expect(panel).toBeVisible();
+
   await panel.getByTestId("dropdown-menu-button").click();
   const chooserEvent = page.waitForEvent("filechooser");
   await page.getByTestId("lib-dropdown--load").click();

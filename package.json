@@ -16,7 +16,7 @@
     "test:browser": "playwright test",
     "test:browser:production": "playwright test --config=playwright.production.config.ts",
     "test:watch": "vitest",
-    "release:package": "node scripts/package-release.mjs",
+    "release:package": "node scripts/package-release.mjs --build",
     "release:verify": "node scripts/package-release.mjs --verify",
     "check:safety": "node scripts/check-offline-safety.mjs",
     "check:browser-types": "tsc -p tsconfig.browser.json",

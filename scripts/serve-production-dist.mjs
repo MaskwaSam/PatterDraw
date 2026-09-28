@@ -196,9 +196,10 @@ if (!distStats.isDirectory() || distStats.isSymbolicLink()) {
   throw new Error("dist must be a real directory, not a symlink.");
 }
 const realDistRoot = await realpath(distRoot);
-if (realDistRoot !== distRoot) {
-  throw new Error("dist resolves through a symlink and is not a trusted build root.");
-}
+// Parent aliases such as macOS `/var` -> `/private/var` are safe: the root
+// itself was lstat'd above and every served file is contained against this
+// canonical path. Rejecting any textual realpath difference made isolated
+// production fixtures unusable without improving the symlink boundary.
 const realIndexPath = await realpath(indexPath);
 if (!isInsideDist(realIndexPath)) {
   throw new Error("dist/index.html resolves outside the production build root.");

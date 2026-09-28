@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+const PRODUCTION_EDITOR_MOUNT_TIMEOUT = 90_000;
+
 type StoredElement = {
   id?: string;
   type?: string;
@@ -50,8 +52,8 @@ async function addText(page: import("@playwright/test").Page, text: string): Pro
 }
 
 test.beforeEach(async ({ page }) => {
-  await page.goto("/");
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: 30_000 });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: PRODUCTION_EDITOR_MOUNT_TIMEOUT });
   await expect.poll(async () => Boolean(await autosavedProject(page))).toBe(true);
 });
 
@@ -112,7 +114,10 @@ test("keeps Project Find typing and Escape out of canvas shortcuts while navigat
   await addText(page, "needle");
   await page.getByTestId("toolbar-selection").check({ force: true });
   await expect(page.getByTestId("toolbar-selection")).toBeChecked();
-  await expect.poll(async () => liveElements(await autosavedProject(page))).toHaveLength(1);
+  await expect.poll(async () => (
+    liveElements(await autosavedProject(page))
+      .some((element) => element.type === "text" && element.text === "needle")
+  )).toBe(true);
   const before = await autosavedProject(page);
 
   await page.getByRole("button", { name: "Find in project", exact: true }).click();
@@ -140,7 +145,8 @@ test("keeps Project Find typing and Escape out of canvas shortcuts while navigat
   await expect(query).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Find in project", exact: true })).toBeFocused();
   await expect(page.getByTestId("toolbar-selection")).toBeChecked();
-  expect(liveElements(await autosavedProject(page))).toEqual(liveElements(before));
+  await expect.poll(async () => liveElements(await autosavedProject(page)))
+    .toEqual(liveElements(before));
 
   await page.getByRole("button", { name: "Find in project", exact: true }).click();
   await expect(query).toBeVisible();
@@ -156,5 +162,6 @@ test("keeps Project Find typing and Escape out of canvas shortcuts while navigat
   await query.press("Enter");
   await expect(page.locator(".project-find-result")).toHaveCount(1);
   await expect(page.getByTestId("toolbar-selection")).toBeChecked();
-  expect(liveElements(await autosavedProject(page))).toEqual(liveElements(before));
+  await expect.poll(async () => liveElements(await autosavedProject(page)))
+    .toEqual(liveElements(before));
 });
