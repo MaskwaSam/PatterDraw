@@ -6,6 +6,15 @@ export const AUTOSAVE_LARGE_PROJECT_BYTES = 30 * MEBIBYTE;
 export const AUTOSAVE_MAX_RECOVERY_MS = 15_000;
 const AUTOSAVE_WORK_TO_REST_RATIO = 4;
 
+/** Timer-driven scene serialization can wait until native freehand ink ends.
+ * Explicit save, navigation and page-exit callers still capture immediately.
+ */
+export function shouldDeferFreehandPersistence(appState: {
+  newElement?: { type: string } | null;
+}): boolean {
+  return appState.newElement?.type === "freedraw";
+}
+
 /**
  * Small projects keep the immediate interaction flush teachers expect. Larger
  * projects get a short cooldown so one expensive full-project write cannot run

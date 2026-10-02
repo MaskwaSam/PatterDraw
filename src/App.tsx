@@ -24,6 +24,7 @@ import type {
 } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, FileId } from "@excalidraw/excalidraw/element/types";
 import type { LassoGeometrySnapshot } from "./lib/lasso/stable-element-adapter";
+import { captureFreehandInput } from "./lib/freehand-input";
 import { TopBar } from "./components/TopBar";
 import { ClearBoardDialog } from "./components/ClearBoardDialog";
 import { boardClearSummary, slideOrderForBoardClearUndo } from "./lib/board-clear";
@@ -121,6 +122,7 @@ import {
   AUTOSAVE_BASE_INTERVAL_MS,
   getAutosaveCooldownMs,
   getAutosaveFollowupDelayMs,
+  shouldDeferFreehandPersistence,
 } from "./lib/autosave-policy";
 import {
   loadLibraryItems,
@@ -4151,7 +4153,7 @@ export default function App() {
     restoreFocus: shouldRestoreExportDialogFocus,
     returnFocusRef: exportOptionsTriggerRef,
   });
-  const commitPendingScenePersistence = useCallback(() => {
+  const commitPendingScenePersistence = useCallback((deferActiveFreehand = false) => {
     const adopted = preservePendingScenePersistence(
       pendingScenePersistenceRef.current,
       bufferedHydrationChangeRef.current,
@@ -4167,6 +4169,12 @@ export default function App() {
     }
     const pending = pendingScenePersistenceRef.current;
     if (!pending) return projectRef.current;
+    // Full-scene validation/serialization is expensive on ink-heavy boards.
+    // Keep the latest native points in the pending slot while the pen is down;
+    // pointer release and explicit save/navigation/exit paths still commit it.
+    if (deferActiveFreehand && shouldDeferFreehandPersistence(pending.appState)) {
+      return projectRef.current;
+    }
     pendingScenePersistenceRef.current = null;
     const baseProject = projectRef.current;
     const mergePendingScene = createPendingSceneProjectUpdate(pending, clearedBoardSlidesRef.current);
@@ -4298,7 +4306,7 @@ export default function App() {
       window.clearTimeout(scenePersistenceTimerRef.current);
     }
     scenePersistenceTimerRef.current = window.setTimeout(
-      commitPendingScenePersistence,
+      () => commitPendingScenePersistence(true),
       SCENE_PERSISTENCE_DELAY_MS,
     );
   }, [commitPendingScenePersistence]);
@@ -4385,7 +4393,15 @@ export default function App() {
         // autosaveDirtyRef here could briefly report "Saved locally" with a
         // stale snapshot still queued. Commit it now and keep the follow-up
         // write on the same autosave path.
-        if (pendingScenePersistenceRef.current) commitPendingScenePersistence();
+        if (pendingScenePersistenceRef.current) {
+          commitPendingScenePersistence(true);
+          if (pendingScenePersistenceRef.current) {
+            // The ongoing stroke is deliberately still pending. Do not label
+            // that newer ink saved merely because an older write completed.
+            setSaveStatus("saving");
+            return;
+          }
+        }
         if (!autosaveDirtyRef.current) {
           autosaveNeedsUnloadWarningRef.current = false;
           setSaveStatus(autosaveStartupReadyRef.current ? "saved" : "saving");
@@ -14075,6 +14091,12 @@ export default function App() {
     }
     captureMathInteractionPoint(event);
   }, [captureMathInteractionPoint]);
+
+  useEffect(() => {
+    const host = editorHostRef.current;
+    if (!api || !host) return;
+    return captureFreehandInput(host, api, () => sceneInputBlockedRef.current);
+  }, [api]);
 
   const slideBoundsForGesture = useCallback((gesture: SlideFrameGesture): SlideFrameBounds => {
     const aspectRatio = slideFrameAspectRatioValue(slideFrameAspectRatioRef.current);
