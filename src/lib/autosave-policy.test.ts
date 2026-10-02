@@ -15,6 +15,10 @@ describe("autosave policy", () => {
     expect(shouldDeferFreehandPersistence({})).toBe(false);
     expect(shouldDeferFreehandPersistence({ newElement: { type: "rectangle" } })).toBe(false);
   });
+  it("allows interrupted ink to save despite a stale native newElement, but defers the next stroke", () => {
+    expect(shouldDeferFreehandPersistence({ newElement: { type: "freedraw", id: "cancelled" } }, "cancelled")).toBe(false);
+    expect(shouldDeferFreehandPersistence({ newElement: { type: "freedraw", id: "next" } }, "cancelled")).toBe(true);
+  });
   it("keeps small projects immediate", () => {
     expect(getAutosaveCooldownMs(AUTOSAVE_MEDIUM_PROJECT_BYTES - 1)).toBe(0);
   });

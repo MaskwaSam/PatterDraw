@@ -10,9 +10,10 @@ const AUTOSAVE_WORK_TO_REST_RATIO = 4;
  * Explicit save, navigation and page-exit callers still capture immediately.
  */
 export function shouldDeferFreehandPersistence(appState: {
-  newElement?: { type: string } | null;
-}): boolean {
-  return appState.newElement?.type === "freedraw";
+  newElement?: { id?: string; type: string } | null;
+}, interruptedElementId: string | null = null): boolean {
+  return appState.newElement?.type === "freedraw"
+    && (!interruptedElementId || appState.newElement.id !== interruptedElementId);
 }
 
 /**

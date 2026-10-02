@@ -10,9 +10,11 @@ export function captureFreehandInput(
   host: HTMLElement,
   api: ExcalidrawImperativeAPI,
   inputBlocked: () => boolean,
+  onInterrupted: (elementId: string) => void = () => {},
 ): () => void {
   interface Stroke {
     pointerId: number;
+    elementBeforeDownId: string | null;
     element: ExcalidrawFreeDrawElement | null;
     samples: Array<{ x: number; y: number; pressure: number }>;
     applied: number;
@@ -25,6 +27,9 @@ export function captureFreehandInput(
     if (!current || inputBlocked()) return;
     const native = api.getAppState().newElement;
     if (!native || native.type !== "freedraw" || native.isDeleted) return;
+    // Capture-phase pointerdown runs before native creation. If the engine
+    // consumes/rejects this down, never adopt its previous unfinished stroke.
+    if (native.id === current.elementBeforeDownId) return;
     if (current.element && current.element.id !== native.id) return;
     current.element = native;
     if (current.applied === current.samples.length) return;
@@ -65,7 +70,11 @@ export function captureFreehandInput(
     ) return;
     if (frame !== null) cancelAnimationFrame(frame);
     frame = null;
-    stroke = { pointerId: event.pointerId, element: null, samples: [], applied: 0 };
+    stroke = {
+      pointerId: event.pointerId,
+      elementBeforeDownId: api.getAppState().newElement?.id ?? null,
+      element: null, samples: [], applied: 0,
+    };
     append(event);
   };
   const move = (event: PointerEvent) => {
@@ -77,15 +86,23 @@ export function captureFreehandInput(
       apply(true);
     });
   };
-  const release = (event: PointerEvent) => {
+  const finish = (event: PointerEvent, interrupted = false) => {
     if (!stroke || event.pointerId !== stroke.pointerId) return;
     if (frame !== null) cancelAnimationFrame(frame);
     frame = null;
     // Flush before the engine's window pointerup finalizes its undo entry.
     // Keep release pressure/endpoint handling in the native engine.
     apply(false);
+    const element = stroke.element;
     stroke = null;
+    if (interrupted && element && !inputBlocked() && api.getAppState().newElement?.id === element.id) {
+      // The engine leaves newElement set after pointercancel. Persist the
+      // actual captured ink without manufacturing pointerup/history entries.
+      onInterrupted(element.id);
+    }
   };
+  const release = (event: PointerEvent) => finish(event);
+  const cancel = (event: PointerEvent) => finish(event, true);
   const captureBeforeExit = () => apply(false);
   const captureWhenHidden = () => {
     if (document.visibilityState === "hidden") captureBeforeExit();
@@ -93,8 +110,9 @@ export function captureFreehandInput(
   host.addEventListener("pointerdown", down, true);
   window.addEventListener("pointermove", move, true);
   window.addEventListener("pointerup", release, true);
-  window.addEventListener("pointercancel", release, true);
-  window.addEventListener("lostpointercapture", release, true);
+  window.addEventListener("pointercancel", cancel, true);
+  // Capture loss alone does not end the physical gesture. These window
+  // listeners keep its samples until pointerup/cancel, including outside host.
   // Capture samples before the wrapper's existing exit/visibility handlers
   // read the native scene, even when the pending animation frame is suspended.
   document.addEventListener("visibilitychange", captureWhenHidden, true);
@@ -106,8 +124,7 @@ export function captureFreehandInput(
     host.removeEventListener("pointerdown", down, true);
     window.removeEventListener("pointermove", move, true);
     window.removeEventListener("pointerup", release, true);
-    window.removeEventListener("pointercancel", release, true);
-    window.removeEventListener("lostpointercapture", release, true);
+    window.removeEventListener("pointercancel", cancel, true);
     document.removeEventListener("visibilitychange", captureWhenHidden, true);
     window.removeEventListener("pagehide", captureBeforeExit, true);
     window.removeEventListener("beforeunload", captureBeforeExit, true);

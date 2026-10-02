@@ -21,12 +21,18 @@ describe("native freehand input capture", () => {
     Object.assign(event, { pointerId: 7, isPrimary: true, pressure: 0.2, ...overrides });
     return event;
   };
-  const setup = (simulatePressure = false) => {
+  const setup = (simulatePressure = false, onInterrupted = vi.fn()) => {
     const element = { id: "first", type: "freedraw", isDeleted: false, x: 50, y: 100, points: [[0, 0]], pressures: [0.2], simulatePressure };
-    const state = { activeTool: { type: "freedraw" }, zoom: { value: 2 }, newElement: element };
+    const state = { activeTool: { type: "freedraw" }, zoom: { value: 2 }, newElement: null as typeof element | null };
+    let nextElement = element;
+    // Native pointerdown creates its stroke after our host capture listener.
+    canvas.addEventListener("pointerdown", () => { state.newElement = nextElement; });
     let blocked = false;
-    cleanup = captureFreehandInput(host, { getAppState: () => state } as never, () => blocked);
-    return { element, state, block: () => { blocked = true; } };
+    cleanup = captureFreehandInput(host, { getAppState: () => state } as never, () => blocked, onInterrupted);
+    return {
+      element, state, onInterrupted, block: () => { blocked = true; },
+      nextStroke: (next: typeof element) => { nextElement = next; state.newElement = null; },
+    };
   };
   const runFrames = () => {
     const pending = [...frames.values()];
@@ -82,18 +88,45 @@ describe("native freehand input capture", () => {
     expect(mutateElement).toHaveBeenCalledOnce();
   });
 
-  it.each(["pointercancel", "lostpointercapture"])("isolates other pointers and queued work across %s", (endEvent) => {
-    const { element, state } = setup();
+  it("flushes cancelled ink before notifying persistence and isolates the next stroke", () => {
+    const { element, state, onInterrupted, nextStroke } = setup(false, vi.fn(() => {
+      expect(element.points).toEqual([[0, 0], [10, 10]]);
+    }));
     canvas.dispatchEvent(pointer("pointerdown", 100, 200));
     canvas.dispatchEvent(pointer("pointermove", 500, 500, { pointerId: 99 }));
     canvas.dispatchEvent(pointer("pointermove", 120, 220));
-    canvas.dispatchEvent(pointer(endEvent, 120, 220));
+    canvas.dispatchEvent(pointer("pointercancel", 120, 220));
     expect(element.points).toEqual([[0, 0], [10, 10]]);
-    state.newElement = { ...element, id: "second", x: 300, y: 100, points: [[0, 0]], pressures: [0.2] };
+    expect(onInterrupted).toHaveBeenCalledExactlyOnceWith("first");
+    canvas.dispatchEvent(pointer("lostpointercapture", 120, 220));
+    nextStroke({ ...element, id: "second", x: 300, y: 100, points: [[0, 0]], pressures: [0.2] });
     canvas.dispatchEvent(pointer("pointerdown", 600, 200));
     canvas.dispatchEvent(pointer("pointermove", 620, 240));
     runFrames();
-    expect(state.newElement.points).toEqual([[0, 0], [10, 20]]);
+    expect(state.newElement!.points).toEqual([[0, 0], [10, 20]]);
+  });
+
+  it("never adopts a pre-existing native stroke when a new pointerdown is consumed", () => {
+    const { element, state, onInterrupted } = setup();
+    state.newElement = element;
+    canvas.dispatchEvent(pointer("pointerdown", 600, 200));
+    canvas.dispatchEvent(pointer("pointermove", 620, 240));
+    runFrames();
+    canvas.dispatchEvent(pointer("pointercancel", 620, 240));
+    expect(element.points).toEqual([[0, 0]]);
+    expect(mutateElement).not.toHaveBeenCalled();
+    expect(onInterrupted).not.toHaveBeenCalled();
+  });
+
+  it("keeps collecting after capture loss without interrupting persistence", () => {
+    const { element, onInterrupted } = setup();
+    canvas.dispatchEvent(pointer("pointerdown", 100, 200));
+    canvas.dispatchEvent(pointer("pointermove", 120, 220));
+    canvas.dispatchEvent(pointer("lostpointercapture", 120, 220));
+    canvas.dispatchEvent(pointer("pointermove", 140, 240));
+    canvas.dispatchEvent(pointer("pointerup", 140, 240));
+    expect(element.points).toEqual([[0, 0], [10, 10], [20, 20]]);
+    expect(onInterrupted).not.toHaveBeenCalled();
   });
 
   it("does not mutate a different native element or a blocked scene", () => {

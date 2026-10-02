@@ -139,70 +139,212 @@ test("captures active freehand ink when the page becomes hidden", async ({ page 
   await page.mouse.up();
 });
 
-test("retains a fast complete pen circle during a pause at zoom and through undo and reload", async ({ page, browserName }) => {
-  test.skip(browserName !== "chromium", "Rapid input uses Chromium's native pointer API.");
-  await ready(page);
-  await page.locator(".footer-zoom-controls").getByRole("button", { name: "Zoom in", exact: true }).click();
-  await page.getByTestId("toolbar-freedraw").check({ force: true });
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
-  await cdp.send("Input.dispatchMouseEvent", {
-    type: "mousePressed", pointerType: "pen", x: 895, y: 450,
-    button: "left", buttons: 1, clickCount: 1, force: 0.2,
-  });
-  const sends: Promise<unknown>[] = [];
-  for (let index = 1; index <= 120; index++) {
-    const angle = index / 120 * Math.PI * 2;
-    if (index === 60) sends.push(cdp.send("Runtime.evaluate", {
-      expression: "{ const end = performance.now() + 350; while (performance.now() < end) {} }",
-    }));
-    sends.push(cdp.send("Input.dispatchMouseEvent", {
-      type: "mouseMoved", pointerType: "pen",
-      x: 800 + 95 * Math.cos(angle), y: 450 + 95 * Math.sin(angle),
-      buttons: 1, force: 0.2 + 0.6 * index / 120,
-    }));
-    // Input arrives while the main thread is busy; don't serialize this test
-    // by waiting for the drawing to acknowledge every individual move.
-    await new Promise(resolve => setTimeout(resolve, 2));
-  }
-  sends.push(cdp.send("Input.dispatchMouseEvent", {
-    type: "mouseReleased", pointerType: "pen", x: 895, y: 450,
-    button: "left", buttons: 0, clickCount: 1,
-  }));
-  await Promise.all(sends);
-  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
-  const [circle] = await savedInk(page);
-  // Native finalization may contribute an extra point. Verify every injected
-  // move and its pressure in order, rather than relying on a fixed total or
-  // closed endpoints that could hide an arc joined by a chord.
-  expect(circle.points.length).toBeGreaterThanOrEqual(122);
-  expect(circle.pressures).toHaveLength(circle.points.length);
-  expect(circle.points.at(-1)).toEqual(circle.points[0]);
-  const radius = (Math.max(...circle.points.map(p => p[0])) - Math.min(...circle.points.map(p => p[0]))) / 2;
-  let cursor = 1;
-  for (let index = 1; index <= 120; index++) {
-    const angle = index / 120 * Math.PI * 2;
-    const expected = [radius * (Math.cos(angle) - 1), radius * Math.sin(angle)];
-    const pressure = 0.2 + 0.6 * index / 120;
-    while (cursor < circle.points.length && (
-      Math.hypot(circle.points[cursor][0] - expected[0], circle.points[cursor][1] - expected[1]) > 0.002
-      || Math.abs(circle.pressures[cursor] - pressure) > 0.001
-    )) cursor += 1;
-    expect(cursor, `Measured move ${index} and its pressure must survive in order`).toBeLessThan(circle.points.length);
-    cursor += 1;
-  }
-  expect(circle.points.some(p => p[1] < -radius * 0.95)).toBe(true);
-  expect(circle.points.some(p => p[1] > radius * 0.95)).toBe(true);
-  expect(Math.max(...circle.pressures)).toBeGreaterThan(0.79);
+for (const loseCapture of [false, true]) {
+  test(`retains a fast complete pen circle during a pause at zoom and through undo and reload${loseCapture ? " after capture loss" : ""}`, async ({ page, browserName }) => {
+    test.skip(browserName !== "chromium", "Rapid input uses Chromium's native pointer API.");
+    await ready(page);
+    await page.locator(".footer-zoom-controls").getByRole("button", { name: "Zoom in", exact: true }).click();
+    await page.getByTestId("toolbar-freedraw").check({ force: true });
+    const cdp = await page.context().newCDPSession(page);
+    if (loseCapture) await page.evaluate(() => {
+      const state = window as Window & { __penPointerId?: number; __penCaptureLosses?: number };
+      state.__penCaptureLosses = 0;
+      window.addEventListener("pointerdown", event => {
+        state.__penPointerId = event.pointerId;
+      }, { once: true });
+      window.addEventListener("lostpointercapture", event => {
+        if (event.isTrusted && event.pointerId === state.__penPointerId) state.__penCaptureLosses! += 1;
+      });
+    });
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mousePressed", pointerType: "pen", x: 895, y: 450,
+      button: "left", buttons: 1, clickCount: 1, force: 0.2,
+    });
+    if (loseCapture) {
+      // Process native capture first; otherwise releasing pending capture can
+      // suppress the very lostpointercapture event this regression must cover.
+      await cdp.send("Input.dispatchMouseEvent", {
+        type: "mouseMoved", pointerType: "pen", x: 895, y: 450, buttons: 1, force: 0.2,
+      });
+      await page.evaluate(() => {
+        const id = (window as Window & { __penPointerId?: number }).__penPointerId;
+        if (id === undefined) throw new Error("Native pen pointerdown was not observed.");
+        const canvas = document.querySelector<HTMLCanvasElement>(".excalidraw__canvas.interactive")!;
+        if (!canvas.hasPointerCapture(id)) throw new Error("Native pen capture was not held.");
+        canvas.releasePointerCapture(id);
+      });
+    }
+    const sends: Promise<unknown>[] = [];
+    for (let index = 1; index <= 120; index++) {
+      const angle = index / 120 * Math.PI * 2;
+      if (index === 60) sends.push(cdp.send("Runtime.evaluate", {
+        expression: "{ const end = performance.now() + 350; while (performance.now() < end) {} }",
+      }));
+      sends.push(cdp.send("Input.dispatchMouseEvent", {
+        type: "mouseMoved", pointerType: "pen",
+        x: 800 + 95 * Math.cos(angle), y: 450 + 95 * Math.sin(angle),
+        buttons: 1, force: 0.2 + 0.6 * index / 120,
+      }));
+      // Input arrives while the main thread is busy; don't serialize this test
+      // by waiting for the drawing to acknowledge every individual move.
+      await new Promise(resolve => setTimeout(resolve, 2));
+    }
+    await Promise.all(sends);
+    if (loseCapture) {
+      expect(await page.evaluate(() => (window as Window & { __penCaptureLosses?: number }).__penCaptureLosses)).toBe(1);
+      await page.waitForTimeout(700);
+      expect(await savedInk(page)).toHaveLength(0);
+      await expect(page.getByText("Saving locally", { exact: true })).toBeVisible();
+    }
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseReleased", pointerType: "pen", x: 895, y: 450,
+      button: "left", buttons: 0, clickCount: 1,
+    });
+    await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+    const [circle] = await savedInk(page);
+    // Native finalization may contribute an extra point. Verify every injected
+    // move and its pressure in order, rather than relying on a fixed total or
+    // closed endpoints that could hide an arc joined by a chord.
+    expect(circle.points.length).toBeGreaterThanOrEqual(122);
+    expect(circle.pressures).toHaveLength(circle.points.length);
+    expect(circle.points.at(-1)).toEqual(circle.points[0]);
+    const radius = (Math.max(...circle.points.map(p => p[0])) - Math.min(...circle.points.map(p => p[0]))) / 2;
+    let cursor = 1;
+    for (let index = 1; index <= 120; index++) {
+      const angle = index / 120 * Math.PI * 2;
+      const expected = [radius * (Math.cos(angle) - 1), radius * Math.sin(angle)];
+      const pressure = 0.2 + 0.6 * index / 120;
+      while (cursor < circle.points.length && (
+        Math.hypot(circle.points[cursor][0] - expected[0], circle.points[cursor][1] - expected[1]) > 0.002
+        || Math.abs(circle.pressures[cursor] - pressure) > 0.001
+      )) cursor += 1;
+      expect(cursor, `Measured move ${index} and its pressure must survive in order`).toBeLessThan(circle.points.length);
+      cursor += 1;
+    }
+    expect(circle.points.some(p => p[1] < -radius * 0.95)).toBe(true);
+    expect(circle.points.some(p => p[1] > radius * 0.95)).toBe(true);
+    expect(Math.max(...circle.pressures)).toBeGreaterThan(0.79);
 
-  await page.keyboard.press("ControlOrMeta+z");
-  await expect.poll(async () => (await savedInk(page)).length).toBe(0);
-  await page.keyboard.press("ControlOrMeta+Shift+z");
-  await expect.poll(async () => (await savedInk(page)).length).toBe(1);
-  expect((await savedInk(page))[0].points).toEqual(circle.points);
-  expect((await savedInk(page))[0].pressures).toEqual(circle.pressures);
-  await page.reload();
-  await expect(page.locator(".editor-host .excalidraw")).toBeVisible();
-  expect((await savedInk(page))[0].points).toEqual(circle.points);
-  expect((await savedInk(page))[0].pressures).toEqual(circle.pressures);
+    await page.keyboard.press("ControlOrMeta+z");
+    await expect.poll(async () => (await savedInk(page)).length).toBe(0);
+    await page.keyboard.press("ControlOrMeta+Shift+z");
+    await expect.poll(async () => (await savedInk(page)).length).toBe(1);
+    expect((await savedInk(page))[0].points).toEqual(circle.points);
+    expect((await savedInk(page))[0].pressures).toEqual(circle.pressures);
+    await page.reload();
+    await expect(page.locator(".editor-host .excalidraw")).toBeVisible();
+    expect((await savedInk(page))[0].points).toEqual(circle.points);
+    expect((await savedInk(page))[0].pressures).toEqual(circle.pressures);
+  });
+}
+
+test.describe("cancelled native ink", () => {
+  test.use({ hasTouch: true });
+
+  async function touchStroke(page: Page, moves: number, end: "touchCancel" | "touchEnd", y = 400) {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart", touchPoints: [{ id: 1, x: 350, y, force: 0.6 }],
+    });
+    for (let index = 1; index <= moves; index++) await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove", touchPoints: [{ id: 1, x: 350 + index * 10, y: y + index * 2, force: 0.6 }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", { type: end, touchPoints: [] });
+    await cdp.detach();
+  }
+
+  for (const moves of [0, 30]) {
+    test(`saves trusted touch cancellation without another interaction (${moves} moves)`, async ({ page, browserName }) => {
+      test.skip(browserName !== "chromium", "Trusted touch cancellation uses Chromium's native input API.");
+      await ready(page);
+      await touchStroke(page, moves, "touchCancel");
+      await expect.poll(async () => (await savedInk(page)).length).toBe(1);
+      await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+      const [cancelled] = await savedInk(page);
+      expect(cancelled.points).toHaveLength(moves + 1);
+      expect(cancelled.pressures).toHaveLength(cancelled.points.length);
+      await page.reload();
+      await expect(page.locator(".editor-host .excalidraw")).toBeVisible();
+      expect((await savedInk(page))[0].points).toEqual(cancelled.points);
+      expect((await savedInk(page))[0].pressures).toEqual(cancelled.pressures);
+    });
+  }
+
+  test("saves cancellation behind an older blocked autosave", async ({ page, browserName }) => {
+    test.skip(browserName !== "chromium", "Trusted touch cancellation uses Chromium's native input API.");
+    await ready(page);
+    // Hold the real autosave Web Lock. The first finished stroke then waits
+    // inside the existing save pipeline while the second one is cancelled.
+    await page.evaluate(async () => {
+      const state = window as Window & { __releaseInkAutosave?: () => void };
+      await new Promise<void>(resolve => {
+        void navigator.locks.request("patterdraw:autosave:mutation:v1", () => new Promise<void>(release => {
+          state.__releaseInkAutosave = release;
+          resolve();
+        }));
+      });
+    });
+    await touchStroke(page, 15, "touchEnd", 350);
+    await expect.poll(() => page.evaluate(async () => (
+      (await navigator.locks.query()).pending?.filter(lock => lock.name === "patterdraw:autosave:mutation:v1").length
+    ))).toBe(1);
+    await touchStroke(page, 30, "touchCancel", 500);
+    expect(await savedInk(page)).toHaveLength(0);
+    await page.evaluate(() => {
+      (window as Window & { __releaseInkAutosave?: () => void }).__releaseInkAutosave?.();
+    });
+    await expect.poll(async () => (await savedInk(page)).length).toBe(2);
+    await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+    const strokes = await savedInk(page);
+    expect(strokes[1].points).toHaveLength(31);
+    await page.reload();
+    await expect(page.locator(".editor-host .excalidraw")).toBeVisible();
+    expect(await savedInk(page)).toEqual(strokes);
+  });
+
+  test("keeps the next stroke deferred and its history separate after native cancellation cleanup", async ({ page, browserName }) => {
+    test.skip(browserName !== "chromium", "Trusted touch cancellation uses Chromium's native input API.");
+    await ready(page);
+    await touchStroke(page, 30, "touchCancel");
+    await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+    const [cancelled] = await savedInk(page);
+    // Pinned Excalidraw consumes the first touch after cancellation while
+    // finalizing the prior stroke, adding its endpoint at this touch origin.
+    // The unchanged baseline does the same; keep this native behavior explicit.
+    await touchStroke(page, 0, "touchEnd", 550);
+    await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+    expect(await savedInk(page)).toHaveLength(1);
+    expect((await savedInk(page))[0].points.slice(0, cancelled.points.length)).toEqual(cancelled.points);
+    expect((await savedInk(page))[0].pressures.slice(0, cancelled.pressures.length)).toEqual(cancelled.pressures);
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart", touchPoints: [{ id: 2, x: 350, y: 650, force: 0.7 }],
+    });
+    for (let index = 1; index <= 20; index++) await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove", touchPoints: [{ id: 2, x: 350 + index * 10, y: 650 + index, force: 0.7 }],
+    });
+    await page.waitForTimeout(700);
+    expect(await savedInk(page)).toHaveLength(1);
+    await expect(page.getByText("Saving locally", { exact: true })).toBeVisible();
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+    const strokes = await savedInk(page);
+    expect(strokes).toHaveLength(2);
+    expect(strokes[0].id).toBe(cancelled.id);
+    // Native missing-pointerup cleanup may add its own final point. All
+    // cancelled samples must remain intact, independently of the next stroke.
+    expect(strokes[0].points.slice(0, cancelled.points.length)).toEqual(cancelled.points);
+    expect(strokes[1].points).toHaveLength(22);
+    await page.keyboard.press("ControlOrMeta+z");
+    await expect.poll(async () => (await savedInk(page)).length).toBe(1);
+    await page.keyboard.press("ControlOrMeta+z");
+    await expect.poll(async () => (await savedInk(page)).length).toBe(0);
+    await page.keyboard.press("ControlOrMeta+Shift+z");
+    await expect.poll(async () => (await savedInk(page)).length).toBe(1);
+    await page.keyboard.press("ControlOrMeta+Shift+z");
+    await expect.poll(async () => (await savedInk(page)).length).toBe(2);
+    const content = (items: Ink[]) => items.map(({ id, points, pressures }) => ({ id, points, pressures }));
+    expect(content(await savedInk(page))).toEqual(content(strokes));
+  });
 });

@@ -3885,6 +3885,9 @@ export default function App() {
   const autosaveLastQueuedAtRef = useRef(0);
   const autosaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingScenePersistenceRef = useRef<PendingScenePersistence | null>(null);
+  // Native cancellation leaves newElement set. Exempt only that stroke from
+  // deferred saves; every subsequent native ID still waits for its release.
+  const interruptedFreehandElementIdRef = useRef<string | null>(null);
   const scenePersistenceTimerRef = useRef<number | null>(null);
   projectRef.current = project;
   pdfBytesRef.current = pdfBytes;
@@ -4172,7 +4175,10 @@ export default function App() {
     // Full-scene validation/serialization is expensive on ink-heavy boards.
     // Keep the latest native points in the pending slot while the pen is down;
     // pointer release and explicit save/navigation/exit paths still commit it.
-    if (deferActiveFreehand && shouldDeferFreehandPersistence(pending.appState)) {
+    if (deferActiveFreehand && shouldDeferFreehandPersistence(
+      pending.appState,
+      interruptedFreehandElementIdRef.current,
+    )) {
       return projectRef.current;
     }
     pendingScenePersistenceRef.current = null;
@@ -14095,8 +14101,12 @@ export default function App() {
   useEffect(() => {
     const host = editorHostRef.current;
     if (!api || !host) return;
-    return captureFreehandInput(host, api, () => sceneInputBlockedRef.current);
-  }, [api]);
+    return captureFreehandInput(host, api, () => sceneInputBlockedRef.current, (elementId) => {
+      interruptedFreehandElementIdRef.current = elementId;
+      commitCurrentLiveScenePersistence();
+      flushAutosave(true);
+    });
+  }, [api, commitCurrentLiveScenePersistence, flushAutosave]);
 
   const slideBoundsForGesture = useCallback((gesture: SlideFrameGesture): SlideFrameBounds => {
     const aspectRatio = slideFrameAspectRatioValue(slideFrameAspectRatioRef.current);
