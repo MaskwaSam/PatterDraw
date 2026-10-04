@@ -19,6 +19,8 @@ jobs:
     steps:
       # v4.2.2
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -38,6 +40,8 @@ jobs:
     steps:
       # v4.2.2
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -75,7 +79,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           # Final packaging checks the real local origin/main tracking ref.
-          # PR merge commits remain explicitly development-only below.
+          # Test the exact candidate; PR artifacts remain development-only.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
