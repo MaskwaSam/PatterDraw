@@ -352,7 +352,43 @@ test("revalidates, survives gateway errors, and keeps rollback registration safe
     testNavigationFaults: true,
   });
   const fixtureRoute = `${fixture.origin}${productionRoute}`;
+  let problems: Awaited<ReturnType<typeof captureBrowserProblems>> | undefined;
+  const windowErrors: string[] = [];
+  const recoveryObservations: unknown[] = [];
+  const configuredTrace = testInfo.project.use.trace;
+  const traceMode = typeof configuredTrace === "string" ? configuredTrace : configuredTrace?.mode;
+  // Automatic retry tracing cannot recover the first attempt's worker state.
+  // Use the public context API only when automatic tracing is off for this
+  // attempt; never replace an existing runner trace or create a new context.
+  const traceFirstAttempt = testInfo.retry === 0
+    && (!traceMode || ["off", "on-first-retry", "on-all-retries"].includes(traceMode));
+  let manualTraceStarted = false;
+  let failed = false;
+  let phase = "first-install";
   try {
+    if (traceFirstAttempt) {
+      await page.context().tracing.start({ screenshots: true, snapshots: true, sources: false });
+      manualTraceStarted = true;
+    }
+    problems = await captureBrowserProblems(page);
+    const windowErrorPrefix = "[patterdraw-worker-recovery:window-error] ";
+    page.on("console", (message) => {
+      if (message.type() === "debug" && message.text().startsWith(windowErrorPrefix)) {
+        windowErrors.push(message.text().slice(windowErrorPrefix.length));
+      }
+    });
+    await page.addInitScript((prefix) => {
+      window.addEventListener("error", (event) => {
+        if (event.target instanceof Element) return;
+        console.debug(prefix + JSON.stringify({
+          message: event.message,
+          stack: event.error?.stack,
+          filename: event.filename,
+          line: event.lineno,
+          column: event.colno,
+        }));
+      });
+    }, windowErrorPrefix);
     const workerResponse = await request.get(`${fixtureRoute}service-worker.js`);
     expect(workerResponse.status()).toBe(200);
     expectSecurityHeaders(workerResponse.headers());
@@ -476,6 +512,7 @@ test("revalidates, survives gateway errors, and keeps rollback registration safe
     const context = page.context();
     const controlledPage = page;
 
+    phase = "network-error-fallback";
     if (browserName === "webkit") {
       // Context-level offline navigation currently fails inside the
       // Playwright/WebKit driver before it exposes the worker's cached
@@ -512,16 +549,29 @@ test("revalidates, survives gateway errors, and keeps rollback registration safe
     // Rendering the recovered document can precede registration visibility in
     // WebKit. Wait for that boundary before reading its durable routing state;
     // the cache, controller, and routing assertions below still have to pass.
-    await expect.poll(() => controlledPage.evaluate(async () => {
-      const registration = await navigator.serviceWorker.getRegistration();
-      const controller = navigator.serviceWorker.controller;
-      return registration && controller
-        ? { scope: registration.scope, scriptUrl: controller.scriptURL }
+    await expect.poll(async () => {
+      const observation = await controlledPage.evaluate(async () => {
+        const registration = await navigator.serviceWorker.getRegistration();
+        const controller = navigator.serviceWorker.controller;
+        return {
+          observedAt: new Date().toISOString(),
+          registrationPresent: Boolean(registration),
+          scope: registration?.scope ?? null,
+          controllerScriptUrl: controller?.scriptURL ?? null,
+          activeState: registration?.active?.state ?? null,
+          installingState: registration?.installing?.state ?? null,
+          waitingState: registration?.waiting?.state ?? null,
+        };
+      });
+      recoveryObservations.push(observation);
+      return observation.registrationPresent && observation.controllerScriptUrl
+        ? { scope: observation.scope, scriptUrl: observation.controllerScriptUrl }
         : null;
-    }), { timeout: 15_000 }).toEqual({
+    }, { timeout: 15_000 }).toEqual({
       scope: fixtureRoute,
       scriptUrl: new URL("service-worker.js", fixtureRoute).href,
     });
+    phase = "recovered-routing-state";
     const recoveredRoutingState = await controlledPage.evaluate(async () => {
       const registration = await navigator.serviceWorker.getRegistration();
       if (!registration) throw new Error("The offline recovery page lost its worker registration.");
@@ -552,6 +602,7 @@ test("revalidates, survives gateway errors, and keeps rollback registration safe
     });
 
     for (const status of [502, 503]) {
+      phase = `gateway-${status}`;
       const response = await controlledPage.goto(
         `${fixtureRoute}?__patterdraw_test_navigation_status=${status}`,
         { waitUntil: "domcontentloaded" },
@@ -562,6 +613,7 @@ test("revalidates, survives gateway errors, and keeps rollback registration safe
       });
     }
 
+    phase = "rollback-retirement";
     await controlledPage.goto(
       `${fixtureRoute}?__patterdraw_test_rollback=1`,
       { waitUntil: "domcontentloaded" },
@@ -591,6 +643,7 @@ test("revalidates, survives gateway errors, and keeps rollback registration safe
 
     // A deterministic aborted navigation avoids browser-driver differences
     // while proving the retired worker fails closed instead of resurrecting A.
+    phase = "expected-retired-navigation-abort";
     const retiredOfflineResponse = await controlledPage
       .goto(`${fixtureRoute}?__patterdraw_test_navigation_abort=1`, {
         timeout: 15_000,
@@ -601,7 +654,73 @@ test("revalidates, survives gateway errors, and keeps rollback registration safe
       .toBe("patterdraw-app-shell-v1");
     await expect(controlledPage.locator(".editor-host .excalidraw")).toHaveCount(0);
     await controlledPage.close();
+  } catch (error) {
+    failed = true;
+    // Preserve the original failure even if a damaged browser cannot answer
+    // the passive snapshot. Never repair its cache, registration or storage.
+    let snapshot: unknown;
+    let diagnosticTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      snapshot = await Promise.race([
+        page.evaluate(() => ({
+          url: location.href,
+          readyState: document.readyState,
+          controllerScriptUrl: navigator.serviceWorker.controller?.scriptURL ?? null,
+          alerts: Array.from(document.querySelectorAll('[role="alert"]'))
+            .slice(0, 10).map((element) => (element.textContent ?? "").slice(0, 2_000)),
+        })),
+        new Promise((_, reject) => {
+          diagnosticTimer = setTimeout(() => reject(new Error("Diagnostic snapshot exceeded 2 seconds.")), 2_000);
+        }),
+      ]);
+    } catch (snapshotError) {
+      snapshot = { error: snapshotError instanceof Error ? snapshotError.message : String(snapshotError) };
+    } finally {
+      if (diagnosticTimer) clearTimeout(diagnosticTimer);
+    }
+    try {
+      const diagnosticsPath = testInfo.outputPath("worker-recovery-diagnostics.json");
+      await writeFile(diagnosticsPath, JSON.stringify({
+        title: testInfo.title,
+        browserName,
+        phase,
+        originalError: error instanceof Error ? (error.stack || error.message) : String(error),
+        recoveryObservations,
+        snapshot,
+        windowErrors,
+        ...(problems ?? {}),
+      }, null, 2) + "\n");
+      await testInfo.attach("worker-recovery-diagnostics.json", {
+        contentType: "application/json",
+        path: diagnosticsPath,
+      });
+    } catch (diagnosticError) {
+      console.error("Worker recovery diagnostics could not be retained:", diagnosticError);
+    }
+    throw error;
   } finally {
+    if (manualTraceStarted) {
+      let traceTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const tracePath = failed ? testInfo.outputPath("worker-recovery-first-attempt.zip") : undefined;
+        await Promise.race([
+          page.context().tracing.stop(tracePath ? { path: tracePath } : undefined),
+          new Promise((_, reject) => {
+            traceTimer = setTimeout(() => reject(new Error("Diagnostic trace exceeded 5 seconds.")), 5_000);
+          }),
+        ]);
+        if (tracePath) {
+          await testInfo.attach("worker-recovery-first-attempt.zip", {
+            contentType: "application/zip",
+            path: tracePath,
+          });
+        }
+      } catch (traceError) {
+        console.error("Worker recovery trace could not be retained:", traceError);
+      } finally {
+        if (traceTimer) clearTimeout(traceTimer);
+      }
+    }
     await fixture.stop();
   }
 });

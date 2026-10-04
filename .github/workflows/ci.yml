@@ -342,7 +342,8 @@ jobs:
           }
           verify_served_release before-browser
           browser_status=0
-          PW_PRODUCTION_REUSE_SERVER=1 npm run test:browser:production || browser_status=$?
+          DEBUG=pw:browser PW_PRODUCTION_REUSE_SERVER=1 npm run test:browser:production 2>&1 \
+            | tee artifacts/production/browser.log || browser_status=$?
           verify_served_release after-browser
           exit "$browser_status"
       - id: production-postverify
