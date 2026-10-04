@@ -5107,14 +5107,27 @@ test("keeps the current board open when its exact recovery copy loses the retent
 });
 
 test("hydrates changed content when a replacement reuses project and scene IDs", async ({ page }) => {
+  const liveElementIds = () => page.evaluate(() => (
+    (window as unknown as {
+      h?: { app?: { scene?: { getNonDeletedElements?: () => Array<{ id: string }> } } };
+    }).h?.app?.scene?.getNonDeletedElements?.().map((element) => element.id) || []
+  ));
   await openClassroomFixture(page, [
     exportTestRectangle("same-id-first", 100, 120, 140, 90, "a0"),
   ], [], "same-id-first.patterdraw");
+  await expect.poll(liveElementIds).toEqual(["same-id-first"]);
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
   await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
 
   await openClassroomFixture(page, [
     exportTestRectangle("same-id-replacement", 220, 160, 160, 100, "a0"),
   ], [], "same-id-replacement.patterdraw");
+  // Title and project/scene IDs intentionally match the outgoing fixture.
+  // They cannot acknowledge this particular replacement; wait for its live
+  // content and input boundary before trying to draw through the open flow.
+  await expect.poll(liveElementIds).toEqual(["same-id-replacement"]);
+  await expect(page.locator(".busy-overlay")).toHaveCount(0);
+  await expect(page.getByTestId("scene-hydration-input-guard")).toHaveCount(0);
   await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
 
   await page.getByTestId("toolbar-rectangle").check({ force: true });
