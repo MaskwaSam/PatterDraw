@@ -1,5 +1,6 @@
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { writeFile } from "node:fs/promises";
+import { installEditorUpdateDiagnostics, retainEditorUpdateDiagnostics } from "./editor-update-diagnostics";
 import {
   expect,
   test,
@@ -2664,7 +2665,10 @@ test.beforeEach(async ({ context, page }) => {
   });
 });
 
-test.afterEach(async ({ context }, testInfo: TestInfo) => {
+test.afterEach(async ({ context, page }, testInfo: TestInfo) => {
+  if (testInfo.title === "navigates PDF pages with the left and right arrow keys") {
+    await retainEditorUpdateDiagnostics(page, testInfo);
+  }
   const state = runtimeGuardStates.get(context);
   if (!state) return;
   await Promise.all(context.pages().map((openPage) => openPage.waitForTimeout(0).catch(() => undefined)));
@@ -10782,6 +10786,7 @@ test("navigates PDF pages with the left and right arrow keys", async ({ page }) 
   });
   await expect(page).toHaveTitle("PatterDraw");
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  await installEditorUpdateDiagnostics(page);
   await openTestPdf(page, 3);
   const pages = page.locator("#pdf-page-rail .pdf-page-item");
   const pageStatus = page.locator(".page-status");

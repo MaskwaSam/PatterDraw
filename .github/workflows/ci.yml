@@ -47,8 +47,51 @@ jobs:
       - run: npm install --global npm@11.12.1 --ignore-scripts --no-audit --no-fund
       - run: test "$(npm --version)" = "11.12.1"
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      - run: npm run test:browser
+      - id: development-browser-install
+        run: npx playwright install --with-deps chromium
+      - id: development-suite
+        run: npm run test:browser
+        env:
+          PATTERDRAW_PDF_UPDATE_DIAGNOSTICS: "1"
+      - id: pdf-history
+        name: Inspect captured PDF update history
+        if: ${{ always() && steps.development-browser-install.outcome == 'success' }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { readdir, readFile, writeFile, appendFile, mkdir } from 'node:fs/promises';
+          import { join } from 'node:path';
+          await mkdir('test-results', { recursive: true });
+          const files = [];
+          async function visit(directory) {
+            for (const entry of await readdir(directory, { withFileTypes: true })) {
+              const path = join(directory, entry.name);
+              if (entry.isDirectory() && entry.name !== 'attachments') await visit(path);
+              else if (entry.isFile() && entry.name === 'editor-update-diagnostics.json') files.push(path);
+            }
+          }
+          await visit('test-results');
+          const observations = [];
+          for (const path of files) {
+            const receipt = JSON.parse(await readFile(path, 'utf8'));
+            const monitor = receipt.monitor;
+            const sameStackCaptured = Boolean(monitor?.firstFailure?.updates?.length
+              && monitor?.firstFailure?.commits?.length && !monitor?.observerError
+              && monitor?.failures?.some(failure =>
+              failure.message?.includes('Maximum update depth')
+              && failure.stack?.includes('forceStoreRerender')
+              && failure.stack?.includes('@excalidraw_excalidraw')));
+            observations.push({ path, status: receipt.status, retry: receipt.retry, sameStackCaptured,
+              updateCount: monitor?.updateCount, commitCount: monitor?.commitCount });
+          }
+          const captured = observations.some(observation => observation.sameStackCaptured);
+          await writeFile('test-results/editor-diagnostics-summary.json', JSON.stringify({ captured, observations }, null, 2) + '\n');
+          await appendFile(process.env.GITHUB_OUTPUT, 'captured=' + captured + '\n');
+          NODE
+      - name: Collect bounded PDF first-attempt diagnostics
+        if: ${{ !cancelled() && steps.development-browser-install.outcome == 'success' && steps.pdf-history.outputs.captured != 'true' }}
+        run: npm run test:browser -- classroom-ui.spec.ts --grep 'navigates PDF pages with the left and right arrow keys$' --repeat-each=20 --retries=0 --workers=3 --output=test-results/pdf-focused
+        env:
+          PATTERDRAW_PDF_UPDATE_DIAGNOSTICS: "1"
       - name: Upload development browser diagnostics
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
