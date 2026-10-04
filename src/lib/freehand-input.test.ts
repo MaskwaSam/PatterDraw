@@ -16,6 +16,8 @@ describe("native freehand input capture", () => {
   let canvas: HTMLCanvasElement;
   let frames: Map<number, FrameRequestCallback>;
   let serial: number;
+  let nativeUp: ((event: PointerEvent) => void) | undefined;
+  let nativeDown: ((event: PointerEvent) => void) | undefined;
   const pointer = (type: string, x: number, y: number, overrides: object = {}) => {
     const event = new MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0, buttons: type === "pointerup" ? 0 : 1 });
     Object.assign(event, { pointerId: 7, isPrimary: true, pressure: 0.2, ...overrides });
@@ -25,12 +27,29 @@ describe("native freehand input capture", () => {
     const element = { id: "first", type: "freedraw", isDeleted: false, x: 50, y: 100, points: [[0, 0]], pressures: [0.2], simulatePressure };
     const state = { activeTool: { type: "freedraw" }, zoom: { value: 2 }, newElement: null as typeof element | null };
     let nextElement = element;
+    let beforeNativeDown: ((event: PointerEvent) => void) | undefined;
+    const nativeState = { eventListeners: { onMove: null as { flush: () => void } | null } };
     // Native pointerdown creates its stroke after our host capture listener.
-    canvas.addEventListener("pointerdown", () => { state.newElement = nextElement; });
+    canvas.addEventListener("pointerdown", event => {
+      beforeNativeDown?.(event);
+      state.newElement = nextElement;
+      nativeDown?.(event);
+    });
     let blocked = false;
-    cleanup = captureFreehandInput(host, { getAppState: () => state } as never, () => blocked, onInterrupted);
+    cleanup = captureFreehandInput(host, {
+      getAppState: () => state,
+      onPointerUp: (callback: (...args: never[]) => void) => {
+        nativeUp = event => callback(state.activeTool as never, nativeState as never, event as never);
+        return () => { nativeUp = undefined; };
+      },
+      onPointerDown: (callback: (...args: never[]) => void) => {
+        nativeDown = event => callback(state.activeTool as never, nativeState as never, event as never);
+        return () => { nativeDown = undefined; };
+      },
+    } as never, () => blocked, onInterrupted);
     return {
-      element, state, onInterrupted, block: () => { blocked = true; },
+      element, state, nativeState, onInterrupted, block: () => { blocked = true; },
+      beforeNativeDown: (callback: (event: PointerEvent) => void) => { beforeNativeDown = callback; },
       nextStroke: (next: typeof element) => { nextElement = next; state.newElement = null; },
     };
   };
@@ -42,6 +61,8 @@ describe("native freehand input capture", () => {
   beforeEach(() => {
     frames = new Map();
     serial = 0;
+    nativeUp = undefined;
+    nativeDown = undefined;
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       frames.set(++serial, callback);
       return serial;
@@ -88,6 +109,71 @@ describe("native freehand input capture", () => {
     expect(mutateElement).toHaveBeenCalledOnce();
   });
 
+  it("reconciles the native pending move after it flushes and before release finalization", () => {
+    const { element } = setup();
+    canvas.dispatchEvent(pointer("pointerdown", 100, 200));
+    canvas.dispatchEvent(pointer("pointermove", 120, 220, { pressure: 0.4 }));
+    canvas.dispatchEvent(pointer("pointermove", 140, 240, { pressure: 0.8 }));
+    runFrames();
+    // The pinned engine flushes a frame-throttled old move in its pointerup
+    // handler, then emits its public onPointerUp hook, then appends release.
+    const event = pointer("pointerup", 140, 240, { pressure: 0 }) as PointerEvent;
+    canvas.dispatchEvent(event);
+    element.points.push([10, 10]);
+    element.pressures.push(0.4);
+    nativeUp?.(event);
+    element.points.push([20, 20]);
+    element.pressures.push(0);
+    expect(element.points).toEqual([[0, 0], [10, 10], [20, 20], [20, 20]]);
+    expect(element.pressures).toEqual([0.2, 0.4, 0.8, 0]);
+  });
+
+  for (const end of ["pointercancel", "pagehide"]) {
+    it(`drains a pending native move before ${end} persistence so its later frame cannot append stale ink`, () => {
+      const { element, nativeState, onInterrupted } = setup();
+      canvas.dispatchEvent(pointer("pointerdown", 100, 200));
+      canvas.dispatchEvent(pointer("pointermove", 120, 220, { pressure: 0.4 }));
+      canvas.dispatchEvent(pointer("pointermove", 140, 240, { pressure: 0.8 }));
+      runFrames();
+      let queued = true;
+      const nativeFrame = () => {
+        if (!queued) return;
+        element.points.push([10, 10]);
+        element.pressures.push(0.4);
+        queued = false;
+      };
+      nativeState.eventListeners.onMove = { flush: vi.fn(nativeFrame) };
+      if (end === "pointercancel") canvas.dispatchEvent(pointer(end, 140, 240));
+      else window.dispatchEvent(new Event(end));
+      expect(nativeState.eventListeners.onMove.flush).toHaveBeenCalledOnce();
+      expect(queued).toBe(false);
+      nativeFrame();
+      runFrames();
+      expect(element.points).toEqual([[0, 0], [10, 10], [20, 20]]);
+      expect(element.pressures).toEqual([0.2, 0.4, 0.8]);
+      if (end === "pointercancel") expect(onInterrupted).toHaveBeenCalledExactlyOnceWith("first");
+    });
+  }
+
+  for (const transition of ["scene replacement", "teardown"]) {
+    it(`does not mutate or persist another stroke if native flush triggers ${transition}`, () => {
+      const { element, state, nativeState, onInterrupted } = setup();
+      const another = { ...element, id: "another", points: [[0, 0]], pressures: [0.2] };
+      canvas.dispatchEvent(pointer("pointerdown", 100, 200));
+      canvas.dispatchEvent(pointer("pointermove", 120, 220));
+      nativeState.eventListeners.onMove = { flush: () => {
+        if (transition === "scene replacement") state.newElement = another;
+        else { cleanup?.(); cleanup = undefined; }
+      } };
+      canvas.dispatchEvent(pointer("pointercancel", 120, 220));
+      runFrames();
+      expect(element.points).toEqual([[0, 0]]);
+      expect(another.points).toEqual([[0, 0]]);
+      expect(mutateElement).not.toHaveBeenCalled();
+      expect(onInterrupted).not.toHaveBeenCalled();
+    });
+  }
+
   it("flushes cancelled ink before notifying persistence and isolates the next stroke", () => {
     const { element, state, onInterrupted, nextStroke } = setup(false, vi.fn(() => {
       expect(element.points).toEqual([[0, 0], [10, 10]]);
@@ -116,6 +202,21 @@ describe("native freehand input capture", () => {
     expect(element.points).toEqual([[0, 0]]);
     expect(mutateElement).not.toHaveBeenCalled();
     expect(onInterrupted).not.toHaveBeenCalled();
+  });
+
+  it("does not retire a new capture when native cleanup emits the old gesture's up with a reused pointer ID", () => {
+    const { element, state, nextStroke, beforeNativeDown } = setup();
+    canvas.dispatchEvent(pointer("pointerdown", 100, 200));
+    canvas.dispatchEvent(pointer("pointermove", 120, 220));
+    canvas.dispatchEvent(pointer("pointercancel", 120, 220));
+    nextStroke({ ...element, id: "second", x: 300, y: 100, points: [[0, 0]], pressures: [0.2] });
+    state.newElement = element;
+    beforeNativeDown(event => nativeUp?.(event));
+    canvas.dispatchEvent(pointer("pointerdown", 600, 200));
+    canvas.dispatchEvent(pointer("pointermove", 620, 240));
+    canvas.dispatchEvent(pointer("pointerup", 620, 240));
+    nativeUp?.(pointer("pointerup", 620, 240) as PointerEvent);
+    expect(state.newElement!.points).toEqual([[0, 0], [10, 20]]);
   });
 
   it("keeps collecting after capture loss without interrupting persistence", () => {
@@ -152,6 +253,8 @@ describe("native freehand input capture", () => {
     canvas.dispatchEvent(pointer("pointermove", 120, 220));
     cleanup?.();
     cleanup = undefined;
+    expect(nativeDown).toBeUndefined();
+    expect(nativeUp).toBeUndefined();
     canvas.dispatchEvent(pointer("pointermove", 140, 240));
     window.dispatchEvent(new Event("pagehide"));
     runFrames();

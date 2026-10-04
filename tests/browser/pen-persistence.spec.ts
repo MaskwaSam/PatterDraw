@@ -139,11 +139,15 @@ test("captures active freehand ink when the page becomes hidden", async ({ page 
   await page.mouse.up();
 });
 
-for (const loseCapture of [false, true]) {
-  test(`retains a fast complete pen circle during a pause at zoom and through undo and reload${loseCapture ? " after capture loss" : ""}`, async ({ page, browserName }) => {
+for (const { zoomIn, loseCapture } of [
+  { zoomIn: false, loseCapture: false },
+  { zoomIn: true, loseCapture: false },
+  { zoomIn: true, loseCapture: true },
+]) {
+  test(`retains a fast complete pen circle during a pause at ${zoomIn ? "125%" : "100%"} zoom and through undo and reload${loseCapture ? " after capture loss" : ""}`, async ({ page, browserName }) => {
     test.skip(browserName !== "chromium", "Rapid input uses Chromium's native pointer API.");
     await ready(page);
-    await page.locator(".footer-zoom-controls").getByRole("button", { name: "Zoom in", exact: true }).click();
+    if (zoomIn) await page.locator(".footer-zoom-controls").getByRole("button", { name: "Zoom in", exact: true }).click();
     await page.getByTestId("toolbar-freedraw").check({ force: true });
     const cdp = await page.context().newCDPSession(page);
     if (loseCapture) await page.evaluate(() => {
@@ -203,25 +207,22 @@ for (const loseCapture of [false, true]) {
     });
     await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
     const [circle] = await savedInk(page);
-    // Native finalization may contribute an extra point. Verify every injected
-    // move and its pressure in order, rather than relying on a fixed total or
-    // closed endpoints that could hide an arc joined by a chord.
-    expect(circle.points.length).toBeGreaterThanOrEqual(122);
+    // Require the complete chronological stroke: down, all 120 moves, and
+    // exactly one native release endpoint. An extra stale move can create a
+    // chord even if all intended samples survive as an ordered subsequence.
+    expect(circle.points).toHaveLength(122);
     expect(circle.pressures).toHaveLength(circle.points.length);
     expect(circle.points.at(-1)).toEqual(circle.points[0]);
     const radius = (Math.max(...circle.points.map(p => p[0])) - Math.min(...circle.points.map(p => p[0]))) / 2;
-    let cursor = 1;
     for (let index = 1; index <= 120; index++) {
       const angle = index / 120 * Math.PI * 2;
       const expected = [radius * (Math.cos(angle) - 1), radius * Math.sin(angle)];
       const pressure = 0.2 + 0.6 * index / 120;
-      while (cursor < circle.points.length && (
-        Math.hypot(circle.points[cursor][0] - expected[0], circle.points[cursor][1] - expected[1]) > 0.002
-        || Math.abs(circle.pressures[cursor] - pressure) > 0.001
-      )) cursor += 1;
-      expect(cursor, `Measured move ${index} and its pressure must survive in order`).toBeLessThan(circle.points.length);
-      cursor += 1;
+      expect(Math.hypot(circle.points[index][0] - expected[0], circle.points[index][1] - expected[1]), `Measured move ${index} must survive at its exact index`).toBeLessThan(0.002);
+      expect(Math.abs(circle.pressures[index] - pressure), `Pressure ${index} must survive at its exact index`).toBeLessThan(0.001);
     }
+    expect(circle.pressures[0]).toBeCloseTo(0.2);
+    expect(circle.pressures.at(-1)).toBe(0);
     expect(circle.points.some(p => p[1] < -radius * 0.95)).toBe(true);
     expect(circle.points.some(p => p[1] > radius * 0.95)).toBe(true);
     expect(Math.max(...circle.pressures)).toBeGreaterThan(0.79);

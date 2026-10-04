@@ -1,5 +1,5 @@
 import { mutateElement, viewportCoordsToSceneCoords } from "@excalidraw/excalidraw";
-import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
+import type { ExcalidrawImperativeAPI, PointerDownState } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawFreeDrawElement } from "@excalidraw/excalidraw/element/types";
 
 /** Keep actual browser input samples while native rendering stays frame paced.
@@ -16,8 +16,8 @@ export function captureFreehandInput(
     pointerId: number;
     elementBeforeDownId: string | null;
     element: ExcalidrawFreeDrawElement | null;
+    nativePointerDownState: PointerDownState | null;
     samples: Array<{ x: number; y: number; pressure: number }>;
-    applied: number;
   }
   let stroke: Stroke | null = null;
   let frame: number | null = null;
@@ -25,20 +25,27 @@ export function captureFreehandInput(
   const apply = (notify: boolean) => {
     const current = stroke;
     if (!current || inputBlocked()) return;
-    const native = api.getAppState().newElement;
+    let native = api.getAppState().newElement;
     if (!native || native.type !== "freedraw" || native.isDeleted) return;
     // Capture-phase pointerdown runs before native creation. If the engine
     // consumes/rejects this down, never adopt its previous unfinished stroke.
     if (native.id === current.elementBeforeDownId) return;
     if (current.element && current.element.id !== native.id) return;
+    const nativeId = native.id;
+    // Drain the same gesture's pending native move before replacing its
+    // geometry. Otherwise a later native RAF can append an older point after
+    // our canonical batch, including after cancellation or exit persistence.
+    current.nativePointerDownState?.eventListeners.onMove?.flush();
+    if (stroke !== current || inputBlocked()) return;
+    native = api.getAppState().newElement;
+    if (!native || native.type !== "freedraw" || native.isDeleted) return;
+    if (native.id !== nativeId) return;
     current.element = native;
-    if (current.applied === current.samples.length) return;
     const points = current.samples.map(({ x, y }) => [x - native.x, y - native.y] as ExcalidrawFreeDrawElement["points"][number]);
     const pressures = native.simulatePressure ? [] : current.samples.map(sample => sample.pressure);
     // One mutation per frame preserves every sample without drawing once for
     // each hardware event. On release, native finalization adds the endpoint.
     mutateElement(native, { points, pressures }, notify);
-    current.applied = current.samples.length;
   };
   const append = (event: PointerEvent) => {
     const current = stroke;
@@ -73,7 +80,7 @@ export function captureFreehandInput(
     stroke = {
       pointerId: event.pointerId,
       elementBeforeDownId: api.getAppState().newElement?.id ?? null,
-      element: null, samples: [], applied: 0,
+      element: null, nativePointerDownState: null, samples: [],
     };
     append(event);
   };
@@ -88,12 +95,15 @@ export function captureFreehandInput(
   };
   const finish = (event: PointerEvent, interrupted = false) => {
     if (!stroke || event.pointerId !== stroke.pointerId) return;
+    const current = stroke;
     if (frame !== null) cancelAnimationFrame(frame);
     frame = null;
-    // Flush before the engine's window pointerup finalizes its undo entry.
-    // Keep release pressure/endpoint handling in the native engine.
+    // Native pointerup first flushes its pending throttled move. Reconcile
+    // after that flush, before the engine adds release and finalizes history.
+    // Cancellation/exit can also observe a native append after our last frame.
     apply(false);
-    const element = stroke.element;
+    if (stroke !== current) return;
+    const element = current.element;
     stroke = null;
     if (interrupted && element && !inputBlocked() && api.getAppState().newElement?.id === element.id) {
       // The engine leaves newElement set after pointercancel. Persist the
@@ -101,7 +111,24 @@ export function captureFreehandInput(
       onInterrupted(element.id);
     }
   };
-  const release = (event: PointerEvent) => finish(event);
+  const release = (event: PointerEvent) => {
+    if (!stroke || event.pointerId !== stroke.pointerId) return;
+    if (frame !== null) cancelAnimationFrame(frame);
+    frame = null;
+    apply(false);
+    // Keep the captured stroke until the public native pre-finalization hook.
+    // A capture-phase write alone precedes the engine's pending-move flush.
+  };
+  const unsubscribeNativeUp = api.onPointerUp((_tool, state, event) => {
+    // Missing-up cleanup may emit the previous gesture's up with a new down
+    // event and a reused pointer ID. Only finish this exact native gesture.
+    if (stroke?.nativePointerDownState === state) finish(event);
+  });
+  const unsubscribeNativeDown = api.onPointerDown((tool, state, event) => {
+    if (stroke && tool.type === "freedraw" && event.pointerId === stroke.pointerId) {
+      stroke.nativePointerDownState = state;
+    }
+  });
   const cancel = (event: PointerEvent) => finish(event, true);
   const captureBeforeExit = () => apply(false);
   const captureWhenHidden = () => {
@@ -121,6 +148,8 @@ export function captureFreehandInput(
   return () => {
     if (frame !== null) cancelAnimationFrame(frame);
     stroke = null;
+    unsubscribeNativeUp();
+    unsubscribeNativeDown();
     host.removeEventListener("pointerdown", down, true);
     window.removeEventListener("pointermove", move, true);
     window.removeEventListener("pointerup", release, true);
