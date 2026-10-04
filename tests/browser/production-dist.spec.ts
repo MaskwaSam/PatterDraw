@@ -1212,8 +1212,14 @@ test("keeps A usable, bounds B/C/D updates, and advances after A closes", async 
       /\/mathjax\/sre\/speech-worker\.js$/,
       /\/mathjax\/sre\/mathmaps\/(?:base|en)\.json$/,
     ]) {
+      // SVG readiness does not acknowledge the speech worker's asynchronous
+      // math-map startup. Wait for the actual response before checking that A
+      // still supplied it from its service-worker authority after cutover.
+      await expect.poll(
+        () => postCutoverLazyResponses.filter((response) => pattern.test(response.path)).length,
+        { message: `Missing post-cutover A response for ${pattern}`, timeout: 30_000 },
+      ).toBeGreaterThan(0);
       const matches = postCutoverLazyResponses.filter((response) => pattern.test(response.path));
-      expect(matches.length, `Missing post-cutover A response for ${pattern}`).toBeGreaterThan(0);
       expect(matches.every((response) => response.fromServiceWorker), JSON.stringify(matches))
         .toBe(true);
     }
