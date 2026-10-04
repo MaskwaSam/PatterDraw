@@ -1,4 +1,5 @@
 import { createCanvas, loadImage } from "@napi-rs/canvas";
+import { writeFile } from "node:fs/promises";
 import {
   expect,
   test,
@@ -2532,13 +2533,17 @@ async function autosavedPdfBackgroundPosition(page: import("@playwright/test").P
 
 const runtimeGuardAllowedOrigin = "http://127.0.0.1:5173";
 const runtimeGuardUnhandledPrefix = "[patterdraw-runtime-guard:unhandledrejection] ";
+const runtimeGuardWindowErrorPrefix = "[patterdraw-runtime-guard:error] ";
 const syntheticPinchConsoleErrorPrefix =
   "Warning: An update (setState, replaceState, or forceUpdate) was scheduled from inside an update function.";
 
 type RuntimeGuardState = {
   consoleErrors: string[];
+  consoleErrorStacks: Array<{ text: string; stacks: string[] }>;
+  consoleDetailCaptures: Promise<void>[];
   externalRequests: string[];
   pageErrors: string[];
+  windowErrors: string[];
   unhandledRejections: string[];
   pages: Set<Page>;
   pageListener: (page: Page) => void;
@@ -2557,9 +2562,26 @@ function addRuntimeGuardPage(state: RuntimeGuardState, page: Page): void {
     const text = message.text();
     if (message.type() === "error") {
       state.consoleErrors.push(text);
+      state.consoleDetailCaptures.push(
+        Promise.all(message.args().map((argument) => argument.evaluate((value) => {
+          if (
+            value && typeof value === "object"
+            && "stack" in value && typeof value.stack === "string"
+          ) return value.stack;
+          return null;
+        }).catch(() => null))).then((stacks) => {
+          state.consoleErrorStacks.push({
+            text,
+            stacks: stacks.filter((stack): stack is string => stack !== null),
+          });
+        }),
+      );
       return;
     }
     if (message.type() !== "debug") return;
+    if (text.startsWith(runtimeGuardWindowErrorPrefix)) {
+      state.windowErrors.push(text.slice(runtimeGuardWindowErrorPrefix.length));
+    }
     if (text.startsWith(runtimeGuardUnhandledPrefix)) {
       state.unhandledRejections.push(text.slice(runtimeGuardUnhandledPrefix.length));
     }
@@ -2569,8 +2591,11 @@ function addRuntimeGuardPage(state: RuntimeGuardState, page: Page): void {
 async function installRuntimeGuard(context: BrowserContext, page: Page): Promise<void> {
   const state: RuntimeGuardState = {
     consoleErrors: [],
+    consoleErrorStacks: [],
+    consoleDetailCaptures: [],
     externalRequests: [],
     pageErrors: [],
+    windowErrors: [],
     unhandledRejections: [],
     pages: new Set(),
     pageListener: () => undefined,
@@ -2595,6 +2620,17 @@ async function installRuntimeGuard(context: BrowserContext, page: Page): Promise
   addRuntimeGuardPage(state, page);
   context.on("page", state.pageListener);
   await context.addInitScript(() => {
+    // Bootstrap prevents the browser's default error report after showing its
+    // fatal screen. Capture the exception before that handler is installed.
+    window.addEventListener("error", (event) => {
+      if (event.target instanceof Element) return;
+      const reason = event.error;
+      const detail = reason instanceof Error
+        ? (reason.stack || reason.message)
+        : (event.message || String(reason));
+      console.debug("[patterdraw-runtime-guard:error] " + detail
+        + `\nMessage: ${event.message}\nSource: ${event.filename}:${event.lineno}:${event.colno}`);
+    });
     window.addEventListener("unhandledrejection", (event) => {
       const reason = event.reason;
       if (
@@ -2635,8 +2671,46 @@ test.afterEach(async ({ context }, testInfo: TestInfo) => {
   context.off("request", state.requestListener);
   context.off("page", state.pageListener);
 
-  // Preserve the primary assertion when a test is already failing; runtime
-  // diagnostics are still attached to the Playwright trace/listener output.
+  let consoleDetailsTimedOut = false;
+  let consoleDetailTimer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    Promise.allSettled(state.consoleDetailCaptures),
+    new Promise<void>((resolve) => {
+      consoleDetailTimer = setTimeout(() => {
+        consoleDetailsTimedOut = true;
+        resolve();
+      }, 2_000);
+    }),
+  ]);
+  if (consoleDetailTimer) clearTimeout(consoleDetailTimer);
+  if (
+    testInfo.status !== testInfo.expectedStatus
+    || state.consoleErrors.length > 0
+    || state.externalRequests.length > 0
+    || state.pageErrors.length > 0
+    || state.windowErrors.length > 0
+    || state.unhandledRejections.length > 0
+  ) {
+    const diagnosticsPath = testInfo.outputPath("runtime-diagnostics.json");
+    await writeFile(diagnosticsPath, JSON.stringify({
+      title: testInfo.title,
+      status: testInfo.status,
+      consoleErrors: state.consoleErrors,
+      consoleErrorStacks: state.consoleErrorStacks,
+      consoleDetailsTimedOut,
+      externalRequests: state.externalRequests,
+      pageErrors: state.pageErrors,
+      windowErrors: state.windowErrors,
+      unhandledRejections: state.unhandledRejections,
+    }, null, 2) + "\n");
+    await testInfo.attach("runtime-diagnostics.json", {
+      contentType: "application/json",
+      path: diagnosticsPath,
+    });
+  }
+
+  // Preserve the primary assertion when a test is already failing. The JSON
+  // attachment retains runtime errors even when this attempt has no trace.
   if (testInfo.status !== testInfo.expectedStatus) return;
   const consoleErrors = state.consoleErrors.filter((error) => {
     if (
@@ -2652,6 +2726,7 @@ test.afterEach(async ({ context }, testInfo: TestInfo) => {
   expect(consoleErrors, "browser console errors").toEqual([]);
   expect(state.externalRequests, "offline guard blocked external requests").toEqual([]);
   expect(state.pageErrors, "uncaught page errors").toEqual([]);
+  expect(state.windowErrors, "window runtime errors, including bootstrap-handled failures").toEqual([]);
   expect(state.unhandledRejections, "unhandled promise rejections").toEqual([]);
 });
 
@@ -10719,6 +10794,75 @@ test("navigates PDF pages with the left and right arrow keys", async ({ page }) 
   await expect(resizeHandle).toHaveAttribute("aria-valuenow", "240");
   await expect(pages.nth(1)).toHaveClass(/is-selected/);
   expect(consoleErrors).toEqual([]);
+});
+
+test("keeps the newest PDF arrow navigation while scene hydration is unfinished", async ({ page, context }) => {
+  await openTestPdf(page, 3);
+  const saved = await keyvalValue<{
+    pdfPageOrder: string[];
+    scenes: Record<string, {
+      elements: Array<{ id: string; type: string; locked?: boolean }>;
+      pdfPage?: { backgroundElementId: string };
+    }>;
+  }>(page, "patterdraw:autosave:project:v1");
+  if (!saved) throw new Error("The imported PDF autosave was not created.");
+  const targetSceneId = saved.pdfPageOrder[1];
+  const backgroundIds = saved.pdfPageOrder.map((sceneId) => (
+    saved.scenes[sceneId].pdfPage?.backgroundElementId || ""
+  ));
+  expect(backgroundIds.every(Boolean)).toBe(true);
+  await expect(page.getByTestId("toolbar-selection")).toBeChecked();
+  await page.locator(".editor-host").click({ position: { x: 600, y: 400 } });
+
+  const session = await context.newCDPSession(page);
+  await session.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+  const pages = page.locator("#pdf-page-rail .pdf-page-item");
+  const guard = page.getByTestId("scene-hydration-input-guard");
+  const liveBackgroundIds = () => page.evaluate((ids) => {
+    const scene = (window as unknown as {
+      h?: { app?: { scene?: { getNonDeletedElements?: () => Array<{ id: string }> } } };
+    }).h?.app?.scene;
+    return scene?.getNonDeletedElements?.()
+      .filter((element) => ids.includes(element.id)).map((element) => element.id) || [];
+  }, backgroundIds);
+  await deferAnimationFrames(page);
+  try {
+    // Page labels update before the two hydration paints. Deliberately keep
+    // those paints pending so B -> C -> B must supersede unfinished loads.
+    for (const [key, index] of [["ArrowRight", 1], ["ArrowRight", 2], ["ArrowLeft", 1]] as const) {
+      await page.keyboard.press(key);
+      await expect(pages.nth(index)).toHaveClass(/is-selected/);
+      await expect(guard).toBeVisible();
+    }
+  } finally {
+    await releaseDeferredAnimationFrames(page);
+  }
+  await expect(guard).toHaveCount(0);
+  await expect.poll(liveBackgroundIds).toEqual([backgroundIds[1]]);
+  await expect.poll(async () => (
+    await keyvalValue<{ activeSceneId: string }>(page, "patterdraw:autosave:project:v1")
+  )?.activeSceneId).toBe(targetSceneId);
+
+  await page.reload();
+  await expect(page.locator(".editor-host .excalidraw")).toBeVisible({ timeout: DEVELOPMENT_EDITOR_MOUNT_TIMEOUT });
+  await expect(guard).toHaveCount(0);
+  // Reload intentionally starts on Board. Verify durable PDF scene content,
+  // then reopen PDF mode and select B through the normal page rail.
+  await expect(page.locator(".app-shell")).toHaveClass(/is-board-mode/);
+  const restored = await keyvalValue<NonNullable<typeof saved>>(page, "patterdraw:autosave:project:v1");
+  expect(restored?.pdfPageOrder).toEqual(saved.pdfPageOrder);
+  for (const [index, sceneId] of saved.pdfPageOrder.entries()) {
+    expect(restored?.scenes[sceneId].pdfPage?.backgroundElementId).toBe(backgroundIds[index]);
+    expect(restored?.scenes[sceneId].elements.find((element) => element.id === backgroundIds[index]))
+      .toMatchObject({ id: backgroundIds[index], type: "image", locked: true });
+  }
+  await page.getByRole("button", { name: "PDF", exact: true }).click();
+  await expect(pages).toHaveCount(3);
+  await pages.nth(1).locator(".pdf-page-open").click();
+  await expect(guard).toHaveCount(0);
+  await expect(pages.nth(1)).toHaveClass(/is-selected/);
+  await expect(page.locator(".page-status")).toContainText("Page 2 of 3");
+  await expect.poll(liveBackgroundIds).toEqual([backgroundIds[1]]);
 });
 
 test("keeps a PDF page's annotation badge current after navigating away", async ({ page }) => {
