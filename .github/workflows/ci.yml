@@ -49,6 +49,12 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
+      - name: Repeat PDF navigation regression without retries
+        run: >-
+          npm run test:browser -- classroom-ui.spec.ts
+          --grep 'navigates PDF pages with the left and right arrow keys$'
+          --repeat-each=20 --retries=0 --workers=3
+          --output=test-results/pdf-navigation-regression
       - name: Upload development browser diagnostics
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

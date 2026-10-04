@@ -137,6 +137,7 @@ import type { InspectedPdfFile } from "./lib/pdf/import-pdf";
 import type { ProjectArchiveWorkerReadiness } from "./lib/project-archive-client";
 import type { StorageReadiness } from "./lib/storage-readiness";
 import { projectNeedsSwitchProtection } from "./lib/project-switch-safety";
+import { createSceneNavigationProjectUpdate } from "./lib/scene-navigation";
 import { bytesForBlob } from "./lib/blob-bytes";
 import { downloadBlob, safeFileStem } from "./lib/download";
 import { exportFullBoardPng } from "./lib/export-board";
@@ -10275,10 +10276,10 @@ export default function App() {
     else if (isSceneChange) pendingFrameIdRef.current = null;
     if (isSceneChange) pendingCreatedFrameIdRef.current = null;
     if (needsHydration) beginSceneHydration();
+    const selectScene = createSceneNavigationProjectUpdate(sceneId);
     setProject((current) => {
-      if (!current) return current;
-      if (!current.scenes[sceneId] || current.activeSceneId === sceneId) return current;
-      const next = { ...current, activeSceneId: sceneId };
+      const next = selectScene(current);
+      if (next === current || !next) return current;
       projectRef.current = next;
       activeSceneIdRef.current = sceneId;
       return next;
