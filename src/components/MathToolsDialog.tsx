@@ -365,7 +365,7 @@ export function MathToolsDialog({
               </div>
             ) : null}
             <div className="math-tools-grid" role="region" aria-label={experimentalFeaturesEnabled ? `${MATH_TOOL_CATEGORIES.find((candidate) => candidate.id === category)?.label} tools` : "Ready classroom tools"}>
-              <button className="math-tool-card" type="button" data-testid="math-tool-calculator"
+              <button className="math-tool-card calculator-math-tool-card" type="button" data-testid="math-tool-calculator"
                 aria-pressed={calculatorOpen} onClick={onToggleCalculator}>
                 <span className="math-tool-card-heading"><strong>TI-36X Pro calculator</strong><span>{calculatorOpen ? "Hide" : "Show"}</span></span>
                 <p>Scientific calculator in a movable panel. Keep drawing around it.</p>
