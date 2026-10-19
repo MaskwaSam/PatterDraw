@@ -56,20 +56,21 @@
     "jsdom": "29.1.1",
     "typescript": "6.0.3",
     "vite": "8.1.4",
-    "vitest": "4.1.10"
+    "vitest": "4.1.11"
   },
   "overrides": {
     "@excalidraw/excalidraw": {
-      "nanoid": "3.3.18"
+      "nanoid": "3.3.18",
+      "sass": "1.79.0"
     },
     "@excalidraw/mermaid-to-excalidraw": {
       "nanoid": "5.1.16"
     },
-    "dompurify": "3.4.13",
+    "dompurify": "3.4.16",
     "lodash-es": "4.18.1",
     "mermaid": "11.16.1",
     "points-on-path": "0.2.1",
     "postcss": "8.5.25",
-    "undici": "7.29.0"
+    "undici": "7.29.1"
   }
 }

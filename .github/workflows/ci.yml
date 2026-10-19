@@ -19,6 +19,8 @@ jobs:
     steps:
       # v4.2.2
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -38,6 +40,8 @@ jobs:
     steps:
       # v4.2.2
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -49,6 +53,12 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
+      - name: Repeat PDF navigation regression without retries
+        run: >-
+          npm run test:browser -- classroom-ui.spec.ts
+          --grep 'navigates PDF pages with the left and right arrow keys$'
+          --repeat-each=20 --retries=0 --workers=3
+          --output=test-results/pdf-navigation-regression
       - name: Upload development browser diagnostics
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -69,7 +79,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           # Final packaging checks the real local origin/main tracking ref.
-          # PR merge commits remain explicitly development-only below.
+          # Test the exact candidate; PR artifacts remain development-only.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -342,7 +353,8 @@ jobs:
           }
           verify_served_release before-browser
           browser_status=0
-          PW_PRODUCTION_REUSE_SERVER=1 npm run test:browser:production || browser_status=$?
+          DEBUG=pw:browser PW_PRODUCTION_REUSE_SERVER=1 npm run test:browser:production 2>&1 \
+            | tee artifacts/production/browser.log || browser_status=$?
           verify_served_release after-browser
           exit "$browser_status"
       - id: production-postverify

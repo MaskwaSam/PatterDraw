@@ -11,7 +11,7 @@ PatterDraw directly bundles these open-source packages. Production builds copy t
 | `@excalidraw/mermaid-to-excalidraw` | 2.2.2 | MIT | <https://github.com/excalidraw/mermaid-to-excalidraw> |
 | Mermaid | 11.16.1 | MIT | <https://github.com/mermaid-js/mermaid> |
 | `@mermaid-js/parser` | 0.6.3 and 1.2.0 | MIT | <https://github.com/mermaid-js/mermaid> |
-| DOMPurify | 3.4.13 | MPL-2.0 OR Apache-2.0 | <https://github.com/cure53/DOMPurify> |
+| DOMPurify | 3.4.16 | MPL-2.0 OR Apache-2.0 | <https://github.com/cure53/DOMPurify> |
 | KaTeX | 0.16.47 | MIT | <https://github.com/KaTeX/KaTeX> |
 | `pdfjs-dist` | 6.2.108 | Apache-2.0 | <https://github.com/mozilla/pdf.js> |
 | `pdf-lib` | 1.17.1 | MIT | <https://github.com/Hopding/pdf-lib> |

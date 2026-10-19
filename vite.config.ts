@@ -401,7 +401,9 @@ export default defineConfig({
     // parser/rendering modules. Serial execution avoids oversubscribing a
     // classroom or CI host; the timeout still fails a genuinely stuck test.
     testTimeout: 30_000,
-    pool: "threads",
+    // Keep the normal pool, with a process-pool escape hatch for macOS/Node
+    // environments where Worker/jsdom startup stalls before tests collect.
+    pool: process.env.PATTERDRAW_TEST_POOL === "forks" ? "forks" : "threads",
     maxWorkers: 1,
     server: {
       deps: {

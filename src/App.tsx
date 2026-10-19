@@ -24,6 +24,7 @@ import type {
 } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement, FileId } from "@excalidraw/excalidraw/element/types";
 import type { LassoGeometrySnapshot } from "./lib/lasso/stable-element-adapter";
+import { captureFreehandInput } from "./lib/freehand-input";
 import { TopBar } from "./components/TopBar";
 import { ClearBoardDialog } from "./components/ClearBoardDialog";
 import { boardClearSummary, slideOrderForBoardClearUndo } from "./lib/board-clear";
@@ -122,6 +123,7 @@ import {
   AUTOSAVE_BASE_INTERVAL_MS,
   getAutosaveCooldownMs,
   getAutosaveFollowupDelayMs,
+  shouldDeferFreehandPersistence,
 } from "./lib/autosave-policy";
 import {
   loadLibraryItems,
@@ -136,6 +138,7 @@ import type { InspectedPdfFile } from "./lib/pdf/import-pdf";
 import type { ProjectArchiveWorkerReadiness } from "./lib/project-archive-client";
 import type { StorageReadiness } from "./lib/storage-readiness";
 import { projectNeedsSwitchProtection } from "./lib/project-switch-safety";
+import { createSceneNavigationProjectUpdate } from "./lib/scene-navigation";
 import { bytesForBlob } from "./lib/blob-bytes";
 import { downloadBlob, safeFileStem } from "./lib/download";
 import { exportFullBoardPng } from "./lib/export-board";
@@ -3886,6 +3889,9 @@ export default function App() {
   const autosaveLastQueuedAtRef = useRef(0);
   const autosaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingScenePersistenceRef = useRef<PendingScenePersistence | null>(null);
+  // Native cancellation leaves newElement set. Exempt only that stroke from
+  // deferred saves; every subsequent native ID still waits for its release.
+  const interruptedFreehandElementIdRef = useRef<string | null>(null);
   const scenePersistenceTimerRef = useRef<number | null>(null);
   projectRef.current = project;
   pdfBytesRef.current = pdfBytes;
@@ -4154,7 +4160,7 @@ export default function App() {
     restoreFocus: shouldRestoreExportDialogFocus,
     returnFocusRef: exportOptionsTriggerRef,
   });
-  const commitPendingScenePersistence = useCallback(() => {
+  const commitPendingScenePersistence = useCallback((deferActiveFreehand = false) => {
     const adopted = preservePendingScenePersistence(
       pendingScenePersistenceRef.current,
       bufferedHydrationChangeRef.current,
@@ -4170,6 +4176,15 @@ export default function App() {
     }
     const pending = pendingScenePersistenceRef.current;
     if (!pending) return projectRef.current;
+    // Full-scene validation/serialization is expensive on ink-heavy boards.
+    // Keep the latest native points in the pending slot while the pen is down;
+    // pointer release and explicit save/navigation/exit paths still commit it.
+    if (deferActiveFreehand && shouldDeferFreehandPersistence(
+      pending.appState,
+      interruptedFreehandElementIdRef.current,
+    )) {
+      return projectRef.current;
+    }
     pendingScenePersistenceRef.current = null;
     const baseProject = projectRef.current;
     const mergePendingScene = createPendingSceneProjectUpdate(pending, clearedBoardSlidesRef.current);
@@ -4301,7 +4316,7 @@ export default function App() {
       window.clearTimeout(scenePersistenceTimerRef.current);
     }
     scenePersistenceTimerRef.current = window.setTimeout(
-      commitPendingScenePersistence,
+      () => commitPendingScenePersistence(true),
       SCENE_PERSISTENCE_DELAY_MS,
     );
   }, [commitPendingScenePersistence]);
@@ -4388,7 +4403,15 @@ export default function App() {
         // autosaveDirtyRef here could briefly report "Saved locally" with a
         // stale snapshot still queued. Commit it now and keep the follow-up
         // write on the same autosave path.
-        if (pendingScenePersistenceRef.current) commitPendingScenePersistence();
+        if (pendingScenePersistenceRef.current) {
+          commitPendingScenePersistence(true);
+          if (pendingScenePersistenceRef.current) {
+            // The ongoing stroke is deliberately still pending. Do not label
+            // that newer ink saved merely because an older write completed.
+            setSaveStatus("saving");
+            return;
+          }
+        }
         if (!autosaveDirtyRef.current) {
           autosaveNeedsUnloadWarningRef.current = false;
           setSaveStatus(autosaveStartupReadyRef.current ? "saved" : "saving");
@@ -10257,10 +10280,10 @@ export default function App() {
     else if (isSceneChange) pendingFrameIdRef.current = null;
     if (isSceneChange) pendingCreatedFrameIdRef.current = null;
     if (needsHydration) beginSceneHydration();
+    const selectScene = createSceneNavigationProjectUpdate(sceneId);
     setProject((current) => {
-      if (!current) return current;
-      if (!current.scenes[sceneId] || current.activeSceneId === sceneId) return current;
-      const next = { ...current, activeSceneId: sceneId };
+      const next = selectScene(current);
+      if (next === current || !next) return current;
       projectRef.current = next;
       activeSceneIdRef.current = sceneId;
       return next;
@@ -14079,6 +14102,16 @@ export default function App() {
     }
     captureMathInteractionPoint(event);
   }, [captureMathInteractionPoint]);
+
+  useEffect(() => {
+    const host = editorHostRef.current;
+    if (!api || !host) return;
+    return captureFreehandInput(host, api, () => sceneInputBlockedRef.current, (elementId) => {
+      interruptedFreehandElementIdRef.current = elementId;
+      commitCurrentLiveScenePersistence();
+      flushAutosave(true);
+    });
+  }, [api, commitCurrentLiveScenePersistence, flushAutosave]);
 
   const slideBoundsForGesture = useCallback((gesture: SlideFrameGesture): SlideFrameBounds => {
     const aspectRatio = slideFrameAspectRatioValue(slideFrameAspectRatioRef.current);
