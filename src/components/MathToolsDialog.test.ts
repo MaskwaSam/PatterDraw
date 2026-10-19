@@ -53,6 +53,8 @@ describe("MathToolsDialog classroom category", () => {
     const root = createRoot(container);
     roots.push(root);
     act(() => root.render(createElement(MathToolsDialog, {
+      calculatorOpen: false,
+      onToggleCalculator: vi.fn(),
       onCancel: vi.fn(),
       onOpenGeoGon: vi.fn(),
       onOpenClassroomTimeTool,
@@ -74,5 +76,30 @@ describe("MathToolsDialog classroom category", () => {
       act(() => card.click());
       expect(onOpenClassroomTimeTool).toHaveBeenLastCalledWith(kind);
     }
+  });
+});
+
+
+describe("MathToolsDialog calculator", () => {
+  it("is a standard toggle even when experimental tools are disabled", () => {
+    localStorage.removeItem(EXPERIMENTAL_FEATURES_STORAGE_KEY);
+    const onToggleCalculator = vi.fn();
+    const container = document.body.appendChild(document.createElement("div"));
+    const root = createRoot(container);
+    roots.push(root);
+    act(() => root.render(createElement(MathToolsDialog, {
+      calculatorOpen: true,
+      onToggleCalculator,
+      onCancel: vi.fn(),
+      onOpenGeoGon: vi.fn(),
+      onOpenClassroomTimeTool: vi.fn(),
+      onInsert: vi.fn(),
+      onStartInteraction: vi.fn(),
+    })));
+    const toggle = container.querySelector<HTMLButtonElement>('[data-testid="math-tool-calculator"]')!;
+    expect(toggle).not.toBeNull();
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    act(() => toggle.click());
+    expect(onToggleCalculator).toHaveBeenCalledOnce();
   });
 });

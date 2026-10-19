@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import {
   CaptureUpdateAction,
   convertToExcalidrawElements,
@@ -58,6 +58,7 @@ import { KeyboardShortcutsDialog } from "./components/KeyboardShortcutsDialog";
 import { StrokeWidthExtensions } from "./components/StrokeWidthExtensions";
 import { MathToolsMenuExtension } from "./components/MathToolsMenuExtension";
 import { MathToolsDialog } from "./components/MathToolsDialog";
+const CalculatorPanel = lazy(() => import("./components/CalculatorPanel"));
 import {
   ClassroomTimeDialog,
   type ClassroomCalendarEventDraft,
@@ -3245,6 +3246,8 @@ export default function App() {
   const [equationEditor, setEquationEditor] = useState<EquationEditorState | null>(null);
   const [mermaidEditor, setMermaidEditor] = useState<MermaidEditorState | null>(null);
   const [isMathToolsOpen, setIsMathToolsOpen] = useState(false);
+  const [calculatorLoaded, setCalculatorLoaded] = useState(false);
+  const [isCalculatorOpen, setIsCalculatorOpen] = useState(false);
   const [classroomTimeDialog, setClassroomTimeDialog] = useState<ClassroomTimeDialogState | null>(null);
   const [selectedClassroomTime, setSelectedClassroomTime] = useState<SelectedClassroomTimeWidget | null>(null);
   const [presentationClassroomTimeSelection, setPresentationClassroomTimeSelection] = useState<
@@ -6442,6 +6445,7 @@ export default function App() {
     setLassoGeometryFactory(null);
     setLassoInitialSelection(null);
     setIsMathToolsOpen(false);
+    setIsCalculatorOpen(false);
     setClassroomTimeDialog(null);
     setIsGeoGonOpen(false);
     setMathToolEdit(null);
@@ -14999,11 +15003,31 @@ export default function App() {
         <MathToolsDialog
           initialConfiguration={mathToolEdit?.initialConfiguration}
           onCancel={closeMathTools}
+          calculatorOpen={isCalculatorOpen}
+          onToggleCalculator={() => {
+            focusAfterMathToolsRef.current = isCalculatorOpen ? "trigger" : null;
+            setCalculatorLoaded(true);
+            setIsCalculatorOpen((open) => !open);
+            setIsMathToolsOpen(false);
+            setMathToolEdit(null);
+          }}
           onOpenGeoGon={openGeoGon}
           onOpenClassroomTimeTool={openClassroomTimeTool}
           onInsert={insertMathTool}
           onStartInteraction={startMathInteraction}
         />
+      ) : null}
+      {calculatorLoaded ? (
+        <Suspense fallback={null}>
+          <CalculatorPanel
+            visible={isCalculatorOpen && featurePreferences.mathTools && !presentation && !featurePreferences.obsCaptureArea}
+            onReturnFocus={() => editorHostRef.current?.querySelector<HTMLElement>(".excalidraw")?.focus()}
+            onClose={() => {
+              setIsCalculatorOpen(false);
+              editorHostRef.current?.querySelector<HTMLElement>(".excalidraw")?.focus();
+            }}
+          />
+        </Suspense>
       ) : null}
       {classroomTimeDialog && !presentation && !featurePreferences.obsCaptureArea ? (
         <ClassroomTimeDialog

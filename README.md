@@ -229,3 +229,9 @@ future Moodle activity under `moodle/mod_patterdraw` will be GPL-3.0-or-later as
 required for Moodle plugins. Third-party licenses are summarized in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); production builds copy the
 application and notices into the release payload.
+
+### Floating scientific calculator
+
+Open **Math tools → TI-36X Pro calculator** to show or hide the local calculator above the board. Drag its title control, or focus that control and use arrow keys (Shift for larger steps), to move it. The close button hides the panel. Calculations and memory survive hide/show; the board stays usable around it. Keyboard shortcuts apply to the calculator only while it has focus. Presentation and OBS capture hide it; disabling Math tools closes it. Calculator state is separate from board/project exports and uses the local `patterdraw-ti36x-v1` storage key. The original scientific functions, display copying and solar-panel button recorder are retained.
+
+The calculator is loaded on first use and runs locally inside a scoped Shadow DOM; see `src/vendor/ti36x/PROVENANCE.md` for source and adaptation details.

@@ -7,7 +7,8 @@
  */
 export function isEditableKeyboardTarget(target: EventTarget | null): boolean {
   if (typeof Element === "undefined" || !(target instanceof Element)) return false;
-  if (target.closest("input, textarea, select")) return true;
+  // Shadow DOM retargets calculator key events to its marked host.
+  if (target.closest("[data-calculator-input], input, textarea, select")) return true;
 
   const contentEditable = target.closest("[contenteditable]");
   if (contentEditable) {

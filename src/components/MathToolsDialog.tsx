@@ -24,6 +24,8 @@ import { useModalDialog } from "./useModalDialog";
 interface MathToolsDialogProps {
   initialConfiguration?: MathToolConfiguration | null;
   onCancel: () => void;
+  calculatorOpen: boolean;
+  onToggleCalculator: () => void;
   onOpenGeoGon: () => void;
   onOpenClassroomTimeTool: (kind: ClassroomTimeWidgetKind) => void;
   onInsert: (tool: GeneratedMathToolInsertion) => void;
@@ -217,6 +219,8 @@ function initialConfigurations(initialConfiguration?: MathToolConfiguration | nu
 export function MathToolsDialog({
   initialConfiguration,
   onCancel,
+  calculatorOpen,
+  onToggleCalculator,
   onOpenGeoGon,
   onOpenClassroomTimeTool,
   onInsert,
@@ -361,6 +365,11 @@ export function MathToolsDialog({
               </div>
             ) : null}
             <div className="math-tools-grid" role="region" aria-label={experimentalFeaturesEnabled ? `${MATH_TOOL_CATEGORIES.find((candidate) => candidate.id === category)?.label} tools` : "Ready classroom tools"}>
+              <button className="math-tool-card" type="button" data-testid="math-tool-calculator"
+                aria-pressed={calculatorOpen} onClick={onToggleCalculator}>
+                <span className="math-tool-card-heading"><strong>TI-36X Pro calculator</strong><span>{calculatorOpen ? "Hide" : "Show"}</span></span>
+                <p>Scientific calculator in a movable panel. Keep drawing around it.</p>
+              </button>
               {experimentalFeaturesEnabled && category === "instruments" ? (
                 <button
                   className="math-tool-card geogon-math-tool-card"

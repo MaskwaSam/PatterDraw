@@ -30,6 +30,17 @@ describe("editable keyboard targets", () => {
     expect(isEditableKeyboardTarget(element(markup, selector))).toBe(true);
   });
 
+  it("recognizes calculator shadow hosts and panel controls without claiming the board", () => {
+    const panel = document.createElement("section");
+    panel.dataset.calculatorInput = "true";
+    const host = panel.appendChild(document.createElement("div"));
+    const key = host.attachShadow({ mode: "open" }).appendChild(document.createElement("button"));
+    expect(isEditableKeyboardTarget(host)).toBe(true);
+    expect(isEditableKeyboardTarget(panel.appendChild(document.createElement("button")))).toBe(true);
+    expect(isEditableKeyboardTarget(key.getRootNode() instanceof ShadowRoot ? host : key)).toBe(true);
+    expect(isEditableKeyboardTarget(document.createElement("canvas"))).toBe(false);
+  });
+
   it("does not classify plain or explicitly non-editable content", () => {
     expect(isEditableKeyboardTarget(element("<div><span></span></div>", "span"))).toBe(false);
     expect(isEditableKeyboardTarget(element('<div contenteditable="false"><span></span></div>', "span"))).toBe(false);

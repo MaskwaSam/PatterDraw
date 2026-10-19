@@ -1,0 +1,28 @@
+<main class="page">
+  <div class="calc-wrap" id="calc" aria-label="TI-36X Pro practice calculator" tabindex="-1">
+    <div class="calc">
+      <div class="face">
+        <div class="brand">
+          <b aria-hidden="true">TI-36X Pro</b>
+          <button type="button" class="solar" aria-label="Show button presses" aria-pressed="false" aria-expanded="false" aria-controls="keypress-recorder" title="Show button presses"><span aria-hidden="true"></span></button>
+          <div class="maker" aria-hidden="true"><i>ti</i><span>Texas Instruments</span></div>
+        </div>
+        <div class="bezel">
+          <div class="lcd" role="button" tabindex="0" aria-label="Copy calculator screen as an image" aria-describedby="display-copy-status" aria-live="polite" aria-atomic="true">
+            <div class="status"></div>
+            <div class="screen"></div>
+          </div>
+        </div>
+        <div class="keys" role="group" aria-label="Calculator keypad"></div>
+      </div>
+    </div>
+    <p id="display-copy-status" class="display-copy-status" role="status"></p>
+    <div class="display-copy-fallback" hidden>
+      <div class="display-copy-actions"><button type="button" data-display-copy="save">Save screen PNG</button><button type="button" data-display-copy="text">Copy screen text</button></div>
+      <textarea class="display-copy-text" aria-label="Screen text to select and copy" readonly></textarea>
+    </div>
+  </div>
+
+  <section id="keypress-recorder" class="recorder" aria-label="Button presses" hidden></section>
+
+</main>

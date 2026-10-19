@@ -4458,3 +4458,24 @@ body:has(.app-shell:fullscreen.is-obs-capture-enabled) :is(.Modal, .context-menu
   .classroom-time-event-form > * { grid-column: 1 !important; }
   .classroom-time-overlay-secondary { border-left: 0; }
 }
+
+/* This floating utility is outside scene/export data and leaves the board usable. */
+.calculator-panel {
+  position: fixed;
+  z-index: 105;
+  width: min(332px, calc(100vw - 16px));
+  max-height: calc(100dvh - 16px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  color: inherit;
+  box-shadow: 0 8px 28px #0003;
+}
+.calculator-panel[hidden] { display: none; }
+.calculator-panel-header { display: flex; padding: 5px; gap: 8px; flex: none; }
+.calculator-panel-header button { border: 0; border-radius: 6px; padding: 7px 10px; background: transparent; color: inherit; }
+.calculator-panel-header button:focus-visible { outline: 2px solid #23709f; }
+.calculator-panel-move { flex: 1; text-align: left; cursor: move; touch-action: none; font-weight: 600; }
+.calculator-panel-body { overflow: auto; overscroll-behavior: contain; min-height: 0; }

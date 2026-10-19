@@ -14,6 +14,7 @@
   "include": [
     "playwright.config.ts",
     "playwright.production.config.ts",
+    "playwright.calculator.config.ts",
     "tests/browser/**/*.ts"
   ]
 }
