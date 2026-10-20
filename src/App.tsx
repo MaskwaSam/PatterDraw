@@ -59,6 +59,7 @@ import { KeyboardShortcutsDialog } from "./components/KeyboardShortcutsDialog";
 import { StrokeWidthExtensions } from "./components/StrokeWidthExtensions";
 import { MathToolsMenuExtension } from "./components/MathToolsMenuExtension";
 import { MathToolsDialog } from "./components/MathToolsDialog";
+import type { CalculatorScreenDragSession } from "./components/calculator-screen-drag";
 const CalculatorPanel = lazy(() => import("./components/CalculatorPanel"));
 import {
   ClassroomTimeDialog,
@@ -11591,11 +11592,15 @@ export default function App() {
     viewportPoint: { clientX: number; clientY: number },
     imageMimeHint?: LocalDropImageMime,
     customData?: Record<string, unknown>,
+    calculatorDrop?: { signal: AbortSignal; isCurrent(): boolean; viewportSize: { width: number; height: number } },
   ): Promise<boolean> => {
     if (!api) return false;
     const operation = beginSceneOperation();
     if (!operation) return false;
+    const cancelCalculatorDrop = () => operation.controller.abort();
+    calculatorDrop?.signal.addEventListener("abort", cancelCalculatorDrop, { once: true });
     try {
+      if (calculatorDrop && (calculatorDrop.signal.aborted || !calculatorDrop.isCurrent())) return false;
       // PNG and SVG drops are wrapper-owned because Excalidraw otherwise
       // attempts to restore embedded scene metadata before its image hook.
       const imageMime = imageMimeHint || await guessLocalDropImageMime(file);
@@ -11681,9 +11686,13 @@ export default function App() {
       });
       const fileIdValue = await generateSafeLocalImageFileId(persistedFile, operation.signal);
       const dataURL = await getDataURL(persistedBlob);
-      if (!isCurrentSceneOperation(operation)) return false;
+      if (!isCurrentSceneOperation(operation) || (calculatorDrop && (calculatorDrop.signal.aborted || !calculatorDrop.isCurrent()))) return false;
       const appState = api.getAppState();
       const center = viewportCoordsToSceneCoords(viewportPoint, appState);
+      // Preserve the captured LCD's visible size at any board zoom. The PNG
+      // retains its high-resolution pixels; only scene geometry is scaled.
+      const sceneWidth = calculatorDrop ? calculatorDrop.viewportSize.width / appState.zoom.value : width;
+      const sceneHeight = calculatorDrop ? calculatorDrop.viewportSize.height / appState.zoom.value : height;
       const fileId = fileIdValue as FileId;
       const imageId = createLocalId();
       const binaryFile: BinaryFileData = {
@@ -11695,10 +11704,10 @@ export default function App() {
       const [image] = convertToExcalidrawElements([{
         id: imageId,
         type: "image",
-        x: center.x - width / 2,
-        y: center.y - height / 2,
-        width,
-        height,
+        x: center.x - sceneWidth / 2,
+        y: center.y - sceneHeight / 2,
+        width: sceneWidth,
+        height: sceneHeight,
         fileId,
         status: "saved",
         strokeColor: "transparent",
@@ -11719,9 +11728,36 @@ export default function App() {
       }
       return false;
     } finally {
+      calculatorDrop?.signal.removeEventListener("abort", cancelCalculatorDrop);
       finishSceneOperation(operation);
     }
   }, [api, beginSceneOperation, finishSceneOperation, isCurrentSceneOperation]);
+
+  const beginCalculatorScreenDrag = useCallback((): CalculatorScreenDragSession | null => {
+    if (!api || !featurePreferencesRef.current.mathTools) return null;
+    const operation = beginSceneOperation();
+    if (!operation) return null;
+    const canDrop = (point: { clientX: number; clientY: number }) => {
+      if (!isCurrentSceneOperation(operation)) return false;
+      const target = document.elementFromPoint(point.clientX, point.clientY);
+      return target instanceof HTMLCanvasElement
+        && target.matches("canvas.excalidraw__canvas.interactive")
+        && Boolean(editorHostRef.current?.contains(target));
+    };
+    return {
+      signal: operation.signal,
+      canDrop,
+      cancel: () => { operation.controller.abort(); finishSceneOperation(operation); },
+      drop: (image, point, signal) => {
+        if (!canDrop(point) || signal.aborted) return Promise.resolve(false);
+        return insertDroppedLocalImage(new File([image.blob], "calculator-screen.png", { type: "image/png" }),
+          point, "image/png", undefined, {
+            signal, isCurrent: () => isCurrentSceneOperation(operation),
+            viewportSize: { width: image.width, height: image.height },
+          });
+      },
+    };
+  }, [api, beginSceneOperation, finishSceneOperation, insertDroppedLocalImage, isCurrentSceneOperation]);
 
   const insertGeoGonSvg = useCallback(async (rawSvg: string): Promise<boolean> => {
     const svg = geoGonSvgFromClipboardText(rawSvg);
@@ -15053,6 +15089,7 @@ export default function App() {
       {calculatorLoaded ? (
         <Suspense fallback={null}>
           <CalculatorPanel
+            onBeginScreenDrag={beginCalculatorScreenDrag}
             visible={isCalculatorOpen && featurePreferences.mathTools && !presentation && !featurePreferences.obsCaptureArea}
             onReturnFocus={() => editorHostRef.current?.querySelector<HTMLElement>(".excalidraw")?.focus()}
             onClose={() => {

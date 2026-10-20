@@ -640,4 +640,6 @@ kbd {
   .lcd.blink .opt.cursor:not(.on) { border-bottom-color: currentColor; }
 }
 
-:host { display:block; color-scheme:light; } .page { min-height:0; padding:8px; gap:8px; } .calc-wrap { width:min(300px, calc(100vw - 50px), max(200px, calc((100dvh - 100px) / 2.2))); } .recorder { width:100%; min-width:0; max-height:180px; overflow:auto; }
+:host { display:block; color-scheme:light; } .page { min-height:0; padding:8px; gap:8px; } .calc-wrap { width:var(--calculator-width, min(300px, calc(100vw - 50px), max(200px, calc((100dvh - 100px) / 2.2)))); } .recorder { width:100%; min-width:0; max-height:180px; overflow:auto; }
+
+.lcd { touch-action: none; cursor: grab; } .lcd:active { cursor: grabbing; }

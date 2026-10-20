@@ -4480,3 +4480,11 @@ body:has(.app-shell:fullscreen.is-obs-capture-enabled) :is(.Modal, .context-menu
 .calculator-panel-header button:focus-visible { outline: 2px solid #23709f; }
 .calculator-panel-move { flex: 1; text-align: left; cursor: move; touch-action: none; font-weight: 600; }
 .calculator-panel-body { overflow: auto; overscroll-behavior: contain; min-height: 0; }
+
+.calculator-panel { box-sizing: border-box; }
+.calculator-panel-body { padding-bottom: 16px; }
+.calculator-panel-resize { position: absolute; bottom: 0; right: 0; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 4px 0 10px; background: var(--panel); color: inherit; cursor: nwse-resize; touch-action: none; }
+.calculator-panel-resize:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.calculator-screen-drag-preview { position: fixed; z-index: 1000; pointer-events: none; width: min(260px, 60vw); padding: 3px; border: 2px solid #b45309; border-radius: 5px; background: #b8cca8; box-shadow: 0 4px 16px #0004; opacity: .9; }
+.calculator-screen-drag-preview[data-valid-drop="true"] { border-color: #15803d; }
+.calculator-screen-drag-preview img { width: 100%; display: block; }

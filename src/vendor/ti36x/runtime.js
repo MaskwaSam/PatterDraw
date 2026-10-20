@@ -4582,7 +4582,14 @@ export function mountCalculator(host) {
   calculatorScope.TI.startDisplayCopy(app);
   calculatorScope.TI.startRecorder(app, shadow.querySelector('#keypress-recorder'));
   let destroyed = false;
-  return { focus: () => root.focus({ preventScroll: true }), destroy: () => {
+  const screen = root.querySelector('.lcd');
+  screen.title = 'Click to copy the screen. Drag onto the canvas to place an image.';
+  return { screen, captureScreen: () => {
+    const box = screen.getBoundingClientRect();
+    // The panel changes the real cqw container width, not a CSS transform.
+    // DOM rectangles and computed font/border sizes therefore share CSS pixels.
+    return calculatorScope.TI.displayCopy.capturePNG(screen).then(blob => ({ blob, width: box.width, height: box.height }));
+  }, focus: () => root.focus({ preventScroll: true }), destroy: () => {
     if (destroyed) return;
     destroyed = true;
     app.destroy(); shadow.replaceChildren();
